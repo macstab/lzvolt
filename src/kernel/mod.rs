@@ -251,6 +251,27 @@ pub fn ctrl_match_asm(_ctrl: &[u8; GROUP_WIDTH], _tag: u8) -> Option<BitMask> {
     None
 }
 
+/// Scan a control group for slots holding no live entry.
+///
+/// The encoding puts `FULL` in `0x00..=0x7F` and both `EMPTY` and `DELETED`
+/// above `0x80`, so this is a single high-bit test rather than two comparisons —
+/// on x86 literally one `pmovmskb`. Insertion needs it to find a landing slot,
+/// and probing needs it to know when a probe sequence has hit an `EMPTY` and can
+/// stop.
+#[inline(always)]
+pub fn ctrl_match_vacant(ctrl: &[u8; GROUP_WIDTH]) -> BitMask {
+    match intrinsics::ctrl_match_vacant(ctrl) {
+        Some(bits) => BitMask::new(bits, intrinsics::stride()),
+        None => BitMask::new(scalar::ctrl_match_vacant(ctrl) as u64, 1),
+    }
+}
+
+/// Portable reference form of [`ctrl_match_vacant`], for differential tests.
+#[inline(always)]
+pub fn ctrl_match_vacant_scalar(ctrl: &[u8; GROUP_WIDTH]) -> BitMask {
+    BitMask::new(scalar::ctrl_match_vacant(ctrl) as u64, 1)
+}
+
 /// The portable reference implementation, always available.
 ///
 /// Exposed so the differential tests and the benchmark baseline can call it
@@ -329,6 +350,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn vacant_backend_matches_scalar_reference() {
+        let mut state = 0x1234_5678_9ABC_DEF0u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for _ in 0..10_000 {
+            let mut ctrl = [0u8; GROUP_WIDTH];
+            for chunk in ctrl.chunks_mut(8) {
+                chunk.copy_from_slice(&next().to_le_bytes()[..chunk.len()]);
+            }
+            assert_eq!(
+                ctrl_match_vacant(&ctrl).to_dense(),
+                ctrl_match_vacant_scalar(&ctrl).to_dense(),
+                "backend {} disagreed for {ctrl:?}",
+                backend_name()
+            );
+        }
+    }
+
+    #[test]
+    fn vacant_separates_full_from_empty_and_deleted() {
+        let mut ctrl = [0x00u8; GROUP_WIDTH]; // all FULL, tag 0
+        ctrl[3] = 0xFF; // EMPTY
+        ctrl[11] = 0x80; // DELETED
+        ctrl[7] = 0x7F; // FULL with the highest tag -- must not count as vacant
+        assert_eq!(
+            ctrl_match_vacant(&ctrl).iter().collect::<Vec<_>>(),
+            vec![3, 11]
+        );
     }
 
     #[test]
