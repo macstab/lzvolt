@@ -41,9 +41,12 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+// The three interchangeable kernel implementations live together in `backend`;
+// `cpu` is the feature detection that would choose between wider ones.
+pub mod backend;
 pub mod cpu;
-pub mod intrinsics;
-pub mod scalar;
+
+pub use backend::{intrinsics, scalar};
 
 /// Number of slots scanned by a single control-group probe.
 ///
