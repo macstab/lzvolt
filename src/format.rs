@@ -26,6 +26,20 @@
 //! reads outnumber writes ten to one, the asymmetry is the point: unpacking is
 //! a `memcpy` loop and costs a fraction of what packing does.
 //!
+//! # Verification
+//!
+//! [`unpack`] copies with raw pointers, so the checks in front of those copies
+//! are the only thing between a malformed value and memory unsafety. Three
+//! things stand behind that: every truncation and every single-bit flip of a
+//! packed stream, thousands of multi-byte corruptions and streams that were
+//! never packed at all, and all of it run under Miri, which reports
+//! out-of-bounds access and uninitialised reads that a passing test would not.
+//!
+//! `cargo +nightly miri test -p keva-core --lib store::pack`
+//!
+//! That belongs in CI. A change here that keeps the tests green but drops a
+//! bounds check is exactly the failure this module is shaped to prevent.
+//!
 //! # What it does not do
 //!
 //! Entropy coding. That is where the remaining ratio lives, and it would cost
@@ -302,6 +316,60 @@ fn emit_literals_only(literals: &[u8], out: &mut Vec<u8>) {
 /// Every length and offset in `input` is treated as hostile: the declared size
 /// is capped before anything is reserved, each field is bounds-checked, and a
 /// backward reference is verified against what has actually been produced.
+/// Bytes a block copy may write past the logical end of the output.
+///
+/// The whole point of copying in fixed blocks is not having to trim the last
+/// one, so the buffer is over-allocated by a block and the length is set to the
+/// declared size at the end. Nothing ever reads the slack.
+const OVERRUN: usize = 32;
+
+/// Copy `len` bytes from `src` to `dst` in fixed blocks, overrunning freely.
+///
+/// # Safety
+///
+/// `src` must be readable for `len.next_multiple_of(OVERRUN)` bytes and `dst`
+/// writable for the same. The caller establishes both before calling; that is
+/// the entire reason this is not doing it itself.
+#[inline]
+unsafe fn wildcopy(mut dst: *mut u8, mut src: *const u8, len: usize) {
+    let mut copied = 0usize;
+    loop {
+        std::ptr::copy_nonoverlapping(src, dst, OVERRUN);
+        copied += OVERRUN;
+        if copied >= len {
+            return;
+        }
+        src = src.add(OVERRUN);
+        dst = dst.add(OVERRUN);
+    }
+}
+
+/// Unpack into `out`, replacing whatever it held.
+///
+/// Every length and offset in `input` is treated as hostile: the declared size
+/// is capped before anything is reserved, each field is bounds-checked, and a
+/// backward reference is verified against what has actually been produced.
+///
+/// # How the unchecked copies are made safe
+///
+/// The copies below use raw pointers, and each one is preceded by the check
+/// that makes it sound rather than relying on a later one to catch it:
+///
+/// - the output is reserved for `declared + OVERRUN`, so a block copy may
+///   overrun the logical end by up to one block without leaving the allocation;
+/// - a literal run is copied only after `at + literal_len` has been shown to be
+///   within `input`, and blockwise only when a further `OVERRUN` bytes are also
+///   within it, falling back to an exact copy near the end of the stream;
+/// - a match is copied only after its offset has been shown to be no larger
+///   than what has already been produced, so it never reads uninitialised
+///   memory, and only after `produced + match_len <= declared`;
+/// - the length is set once, at the end, to `declared` — never to whatever the
+///   overrun happened to reach.
+///
+/// The corruption test walks every truncation and every single-bit flip of a
+/// packed stream. With the bounds moved out of the copies, that test is what
+/// stands between a malformed value and memory unsafety, so it is not
+/// optional.
 pub fn unpack(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
     out.clear();
 
@@ -310,10 +378,14 @@ pub fn unpack(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
     if declared > MAX_UNPACKED {
         return Err(PackError::TooLarge);
     }
-    out.reserve(declared);
+    out.reserve(declared + OVERRUN);
 
+    let capacity = out.capacity();
+    let base = out.as_mut_ptr();
+    let mut produced = 0usize;
     let mut at = header;
-    while out.len() < declared {
+
+    while produced < declared {
         let token = *input.get(at).ok_or(PackError::Truncated)?;
         at += 1;
 
@@ -323,14 +395,35 @@ pub fn unpack(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
         }
 
         let end = at.checked_add(literal_len).ok_or(PackError::TooLarge)?;
-        let literals = input.get(at..end).ok_or(PackError::Truncated)?;
-        if out.len() + literals.len() > declared {
+        if end > input.len() {
+            return Err(PackError::Truncated);
+        }
+        if produced + literal_len > declared {
             return Err(PackError::LengthMismatch);
         }
-        out.extend_from_slice(literals);
+
+        // Blockwise only while a whole block is readable from the input and
+        // writable into the reservation; the tail of the stream takes the exact
+        // path, because overrunning the input would read memory that is not
+        // ours.
+        if literal_len > 0 {
+            let blocked = literal_len.next_multiple_of(OVERRUN);
+            unsafe {
+                if end + OVERRUN <= input.len() && produced + blocked <= capacity {
+                    wildcopy(base.add(produced), input.as_ptr().add(at), literal_len);
+                } else {
+                    std::ptr::copy_nonoverlapping(
+                        input.as_ptr().add(at),
+                        base.add(produced),
+                        literal_len,
+                    );
+                }
+            }
+            produced += literal_len;
+        }
         at = end;
 
-        if out.len() == declared {
+        if produced == declared {
             break;
         }
 
@@ -344,40 +437,62 @@ pub fn unpack(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
         }
         let match_len = match_len + MIN_MATCH;
 
-        if offset == 0 || offset > out.len() {
+        if offset == 0 || offset > produced {
             return Err(PackError::BadOffset);
         }
-        if out.len() + match_len > declared {
+        if produced + match_len > declared {
             return Err(PackError::LengthMismatch);
         }
 
-        // Copied in blocks rather than byte by byte, which is where the
-        // difference against a tuned implementation was: per byte this was a
-        // bounds check, a capacity check and a length update, against one
-        // `memcpy` for the whole run.
-        //
         // A match may overlap the output it is still producing — that is how a
-        // repeated pattern is encoded — so the block is capped at the offset
-        // and the source advances with it. Each round then copies only bytes
-        // that are already written, and the pattern repeats correctly.
-        let mut copied = 0usize;
-        while copied < match_len {
-            let take = (match_len - copied).min(offset);
-            let from = out.len() - offset;
-            out.extend_from_within(from..from + take);
-            copied += take;
+        // repeated pattern is encoded. Blockwise copying is only sound when the
+        // source is at least a block behind the destination; closer than that,
+        // the copy would read bytes it has not written yet, so the pattern is
+        // laid down offset by offset instead.
+        unsafe {
+            let mut src = base.add(produced - offset);
+            let mut dst = base.add(produced);
+            if offset >= OVERRUN && produced + match_len.next_multiple_of(OVERRUN) <= capacity {
+                wildcopy(dst, src, match_len);
+            } else {
+                let mut copied = 0usize;
+                while copied < match_len {
+                    let take = (match_len - copied).min(offset);
+                    std::ptr::copy_nonoverlapping(src, dst, take);
+                    src = src.add(take);
+                    dst = dst.add(take);
+                    copied += take;
+                }
+            }
         }
+        produced += match_len;
     }
 
-    if out.len() != declared {
+    if produced != declared {
         return Err(PackError::LengthMismatch);
     }
+    // Set once, to the declared size: the overrun above may have written past
+    // it, and those bytes are not part of the value.
+    unsafe { out.set_len(declared) };
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn records(total: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(total);
+        let mut i = 0u64;
+        while out.len() < total {
+            out.extend_from_slice(
+                format!("{{\"id\":{i},\"tenant\":\"t42\",\"active\":true}}").as_bytes(),
+            );
+            i += 1;
+        }
+        out.truncate(total);
+        out
+    }
 
     fn roundtrip(input: &[u8]) {
         let mut packed = Vec::new();
@@ -503,6 +618,81 @@ mod tests {
             unpack(&absurd, &mut out),
             Err(PackError::TooLarge | PackError::Truncated)
         ));
+    }
+
+    /// The copies in `unpack` are unchecked, so the checks that precede them
+    /// are the only thing between a malformed value and memory unsafety. Single
+    /// bit flips are covered above; this adds the shapes a corrupt file or a
+    /// hostile sender actually produces — several bytes wrong at once, a
+    /// plausible header over a garbage body, and streams that were never packed
+    /// at all.
+    ///
+    /// Nothing here asserts a particular error. The property under test is that
+    /// none of it reads or writes out of bounds, which shows up as a crash or,
+    /// under Miri, as undefined behaviour.
+    #[test]
+    fn hostile_input_stays_within_bounds() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        let source = records(3000);
+        let mut packed = Vec::new();
+        assert!(pack(&source, &mut packed));
+        let mut out = Vec::new();
+
+        // Several bytes corrupted at once, which single-bit coverage misses:
+        // a length field can be made large and its guard byte made consistent
+        // by the same edit.
+        for _ in 0..4000 {
+            let mut broken = packed.clone();
+            let hits = 1 + (next() % 6) as usize;
+            for _ in 0..hits {
+                let at = (next() as usize) % broken.len();
+                broken[at] = next() as u8;
+            }
+            let _ = unpack(&broken, &mut out);
+        }
+
+        // A believable declared length in front of noise.
+        for len in [0u64, 1, 64, 4096, 1 << 20] {
+            for _ in 0..200 {
+                let mut stream = Vec::new();
+                put_varint_into(len, &mut stream);
+                for _ in 0..(next() % 200) {
+                    stream.push(next() as u8);
+                }
+                let _ = unpack(&stream, &mut out);
+            }
+        }
+
+        // Streams that were never packed.
+        for _ in 0..2000 {
+            let n = (next() % 300) as usize;
+            let stream: Vec<u8> = (0..n).map(|_| next() as u8).collect();
+            let _ = unpack(&stream, &mut out);
+        }
+    }
+
+    /// A match whose offset is smaller than one copy block takes the overlapping
+    /// path, and one that is larger takes the blockwise path. Both have to
+    /// produce the same bytes, and the boundary between them is where a
+    /// blockwise copy would read what it has not yet written.
+    #[test]
+    fn both_match_copy_paths_agree() {
+        for offset in [1usize, 2, 3, 7, 8, 15, 16, 31, 32, 33, 64, 200] {
+            let mut input = Vec::new();
+            let pattern: Vec<u8> = (0..offset).map(|i| b'a' + (i % 26) as u8).collect();
+            while input.len() < 4000 {
+                input.extend_from_slice(&pattern);
+            }
+            input.truncate(4000);
+            roundtrip(&input);
+        }
     }
 
     #[test]
