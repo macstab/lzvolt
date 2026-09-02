@@ -831,6 +831,71 @@ mod tests {
         }
     }
 
+    /// The assembly packer must produce exactly what the Rust one produces.
+    ///
+    /// Not merely something that unpacks to the same bytes — the identical
+    /// stream. A different but valid encoding would mean two builds of the same
+    /// version writing different bytes for the same value, which surfaces much
+    /// later as two nodes disagreeing about a snapshot.
+    #[test]
+    fn the_assembly_packer_agrees_byte_for_byte() {
+        if !keva_asm::pack_find::asm_available() {
+            // No kernel on this target. That is a supported configuration, not
+            // a skipped test — there is simply nothing to diff against.
+            return;
+        }
+
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut noise_byte = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        };
+
+        let mut cases: Vec<Vec<u8>> = Vec::new();
+        for size in [0usize, 1, 3, 4, 5, 7, 8, 15, 16, 17, 64, 1000, 4096, 65_536] {
+            cases.push(records(size));
+            cases.push(vec![b'a'; size]);
+            cases.push((0..size).map(|_| noise_byte()).collect());
+        }
+        cases.push([b'a', b'b'].repeat(2048));
+        let mut edge = b"prefix".to_vec();
+        edge.extend(std::iter::repeat(b'z').take(3000));
+        edge.extend_from_slice(b"suffix");
+        cases.push(edge);
+
+        let mut rust_out = Vec::new();
+        let mut asm_out = Vec::new();
+        let mut rust_table = Box::new([0u32; HASH_SIZE]);
+        let mut asm_table = vec![0u32; HASH_SIZE];
+        let mut round_trip = Vec::new();
+
+        for input in &cases {
+            let rust_kept = pack_with(input, &mut rust_out, &mut rust_table);
+            let asm_kept =
+                keva_asm::pack_find::pack_asm(input, &mut asm_out, &mut asm_table).is_some();
+
+            assert_eq!(
+                rust_kept,
+                asm_kept,
+                "disagreed on whether packing helped for {} bytes",
+                input.len()
+            );
+
+            if rust_kept {
+                assert_eq!(
+                    rust_out,
+                    asm_out,
+                    "different encodings for the same {} byte input",
+                    input.len()
+                );
+                unpack(&asm_out, &mut round_trip).expect("assembly output must unpack");
+                assert_eq!(&round_trip, input, "assembly output lost bytes");
+            }
+        }
+    }
+
     #[test]
     fn an_offset_before_the_start_is_refused() {
         // Declared length 8, one literal, then a match reaching back further

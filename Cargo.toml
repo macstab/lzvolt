@@ -24,3 +24,7 @@ asm = []
 [[bench]]
 name = "ctrl_match"
 harness = false
+
+[[bench]]
+name = "pack_find"
+harness = false

@@ -117,6 +117,51 @@ fn packing(c: &mut Criterion) {
     group.finish();
 }
 
+/// The hand-written packer against the compiler's, over identical inputs.
+///
+/// The search kernel alone measured 4-17% ahead and still made the packer
+/// 16-29% slower, because it was called once per match and an `extern "C"`
+/// boundary stops the compiler carrying loop state in registers. This one
+/// crosses once per value, so what shows up here is the kernel's real margin
+/// rather than the boundary's cost.
+fn packing_asm(c: &mut Criterion) {
+    if !keva_asm::pack_find::asm_available() {
+        return;
+    }
+    let mut group = c.benchmark_group("pack/asm");
+
+    for (label, data) in [
+        ("records_512", records(512)),
+        ("records_4k", records(4096)),
+        ("records_64k", records(65_536)),
+        ("varied_4k", varied(4096)),
+        ("varied_64k", varied(65_536)),
+        ("noise_4k", noise(4096)),
+    ] {
+        group.throughput(Throughput::Bytes(data.len() as u64));
+
+        group.bench_function(BenchmarkId::new("asm", label), |b| {
+            let mut out = Vec::with_capacity(data.len() + 16);
+            let mut table = vec![0u32; keva_asm::pack_find::TABLE_SIZE];
+            b.iter(|| {
+                black_box(keva_asm::pack_find::pack_asm(
+                    black_box(&data),
+                    &mut out,
+                    &mut table,
+                ))
+            });
+        });
+
+        group.bench_function(BenchmarkId::new("rust", label), |b| {
+            let mut out = Vec::with_capacity(data.len() * 2);
+            let mut packer = pack::Packer::new();
+            b.iter(|| black_box(packer.pack(black_box(&data), &mut out)));
+        });
+    }
+
+    group.finish();
+}
+
 fn unpacking(c: &mut Criterion) {
     let mut group = c.benchmark_group("pack/decompress");
 
@@ -205,5 +250,5 @@ fn against_lz4(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, packing, unpacking, ratio, against_lz4);
+criterion_group!(benches, packing, packing_asm, unpacking, ratio, against_lz4);
 criterion_main!(benches);

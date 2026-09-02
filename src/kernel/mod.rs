@@ -45,6 +45,7 @@
 // `cpu` is the feature detection that would choose between wider ones.
 pub mod backend;
 pub mod cpu;
+pub mod pack_find;
 
 pub use backend::{intrinsics, scalar};
 

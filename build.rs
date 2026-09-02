@@ -10,7 +10,11 @@ fn main() {
 
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let sources: &[&str] = match arch.as_str() {
-        "aarch64" => &["asm/aarch64/ctrl_match.S"],
+        "aarch64" => &[
+            "asm/aarch64/ctrl_match.S",
+            "asm/aarch64/pack_find.S",
+            "asm/aarch64/pack.S",
+        ],
         "x86_64" => &["asm/x86_64/ctrl_match.S"],
         // Every other target runs the scalar reference. That is a supported
         // configuration, not a degraded one -- correctness does not depend on
