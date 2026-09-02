@@ -265,13 +265,21 @@ pub fn unpack(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
             return Err(PackError::LengthMismatch);
         }
 
-        // Byte at a time on purpose: a match may overlap its own output, which
-        // is how a run of one repeated byte is encoded, and `copy_within` would
-        // read bytes it has not written yet.
-        let start = out.len() - offset;
-        for i in 0..match_len {
-            let byte = out[start + i];
-            out.push(byte);
+        // Copied in blocks rather than byte by byte, which is where the
+        // difference against a tuned implementation was: per byte this was a
+        // bounds check, a capacity check and a length update, against one
+        // `memcpy` for the whole run.
+        //
+        // A match may overlap the output it is still producing — that is how a
+        // repeated pattern is encoded — so the block is capped at the offset
+        // and the source advances with it. Each round then copies only bytes
+        // that are already written, and the pattern repeats correctly.
+        let mut copied = 0usize;
+        while copied < match_len {
+            let take = (match_len - copied).min(offset);
+            let from = out.len() - offset;
+            out.extend_from_within(from..from + take);
+            copied += take;
         }
     }
 
