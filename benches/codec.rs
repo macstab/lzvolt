@@ -63,9 +63,13 @@ fn packing(c: &mut Criterion) {
         ("noise_4k", noise(4096)),
     ] {
         group.throughput(Throughput::Bytes(data.len() as u64));
+        // Measured through the reusable packer, which is how a table calls it:
+        // a fresh one per call would be measuring the setup, and the setup is
+        // exactly what was removed.
         group.bench_with_input(BenchmarkId::from_parameter(label), &data, |b, data| {
             let mut out = Vec::with_capacity(data.len() * 2);
-            b.iter(|| black_box(pack::pack(black_box(data), &mut out)));
+            let mut packer = pack::Packer::new();
+            b.iter(|| black_box(packer.pack(black_box(data), &mut out)));
         });
     }
 
