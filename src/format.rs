@@ -145,6 +145,15 @@ fn hash4(bytes: &[u8]) -> usize {
     (word.wrapping_mul(0x9E37_79B1) >> (32 - HASH_BITS)) as usize
 }
 
+/// The four bytes at `at`, as one word.
+///
+/// `at + 4` is within the input at every call site: the main loop runs while
+/// `at + MIN_MATCH <= input.len()`, and a candidate is always behind `at`.
+#[inline]
+fn word4(input: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(input[at..at + 4].try_into().unwrap())
+}
+
 /// How fast the search gives up. After `1 << SKIP_TRIGGER` consecutive misses
 /// the cursor starts advancing by more than one byte, and keeps accelerating.
 ///
@@ -217,16 +226,24 @@ fn pack_with(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> b
         table[slot] = at as u32 + 1;
 
         // Zero means empty. Anything else is a position from this value or a
-        // previous one; only positions behind the cursor are usable, and the
-        // byte comparison below decides whether it was worth anything.
+        // previous one, and only positions behind the cursor are usable.
+        //
+        // The four bytes are compared inline before anything else happens. On
+        // data that varies, almost every candidate fails here — and the
+        // previous form paid two bounds-checked slice constructions and a call
+        // to find that out. Since the hash is of exactly these four bytes, a
+        // candidate that disagrees on them cannot match at all, so this rejects
+        // without touching the extension loop.
         let matched = if stored == 0 {
             0
         } else {
             let candidate = stored as usize - 1;
             if candidate >= at || at - candidate > MAX_OFFSET {
                 0
+            } else if word4(input, candidate) != word4(input, at) {
+                0
             } else {
-                common_prefix(&input[candidate..], &input[at..])
+                MIN_MATCH + common_prefix(&input[candidate + MIN_MATCH..], &input[at + MIN_MATCH..])
             }
         };
 
