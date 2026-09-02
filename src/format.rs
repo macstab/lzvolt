@@ -352,6 +352,35 @@ fn emit_literals_only(literals: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(literals);
 }
 
+/// Lay down a match whose source overlaps the output it is producing.
+///
+/// The naive form copies `offset` bytes at a time, so a run of one repeated
+/// byte costs one call per byte. Instead the chunk doubles each round while the
+/// read always starts at `src`: after writing `n` bytes, the pattern at `src`
+/// is `offset + n` bytes long, so the next round may take twice what the last
+/// one did. A hundred-byte run at offset one becomes seven copies rather than a
+/// hundred.
+///
+/// This is the case LZ4 handles with jump tables and ClickHouse with `pshufb`.
+/// Doubling needs neither, and costs the same on both architectures.
+///
+/// # Safety
+///
+/// `src` must equal `dst.sub(offset)` with `offset >= 1`, the pattern at `src`
+/// must be initialised for `offset` bytes, and `dst` must be writable for
+/// `len` bytes.
+#[inline]
+unsafe fn overlapping_copy(dst: *mut u8, src: *const u8, offset: usize, len: usize) {
+    let mut written = 0usize;
+    let mut chunk = offset;
+    while written < len {
+        let take = chunk.min(len - written);
+        std::ptr::copy_nonoverlapping(src, dst.add(written), take);
+        written += take;
+        chunk *= 2;
+    }
+}
+
 /// Unpack into `out`, replacing whatever it held.
 ///
 /// Every length and offset in `input` is treated as hostile: the declared size
@@ -492,12 +521,7 @@ pub fn unpack(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
                 if offset >= OVERRUN {
                     std::ptr::copy_nonoverlapping(src, dst, OVERRUN);
                 } else {
-                    let mut copied = 0usize;
-                    while copied < match_len {
-                        let take = (match_len - copied).min(offset);
-                        std::ptr::copy_nonoverlapping(src.add(copied), dst.add(copied), take);
-                        copied += take;
-                    }
+                    overlapping_copy(dst, src, offset, match_len);
                 }
             }
 
@@ -569,19 +593,12 @@ pub fn unpack(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
         // the copy would read bytes it has not written yet, so the pattern is
         // laid down offset by offset instead.
         unsafe {
-            let mut src = base.add(produced - offset);
-            let mut dst = base.add(produced);
+            let src = base.add(produced - offset);
+            let dst = base.add(produced);
             if offset >= OVERRUN && produced + match_len.next_multiple_of(OVERRUN) <= capacity {
                 wildcopy(dst, src, match_len);
             } else {
-                let mut copied = 0usize;
-                while copied < match_len {
-                    let take = (match_len - copied).min(offset);
-                    std::ptr::copy_nonoverlapping(src, dst, take);
-                    src = src.add(take);
-                    dst = dst.add(take);
-                    copied += take;
-                }
+                overlapping_copy(dst, src, offset, match_len);
             }
         }
         produced += match_len;
