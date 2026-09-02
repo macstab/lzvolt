@@ -38,6 +38,45 @@ fn records(total: usize) -> Vec<u8> {
     out
 }
 
+/// Records whose field *values* vary, not just an incrementing id.
+///
+/// The generator above repeats almost everything but a few digits, which
+/// compresses far better than a real table of user records and inflates the
+/// throughput, since that is reported against output bytes. This is the number
+/// worth quoting.
+fn varied(total: usize) -> Vec<u8> {
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let regions = ["eu-central-1", "us-east-1", "ap-south-1", "sa-east-1"];
+    let roles = ["member", "admin", "viewer", "owner", "billing"];
+
+    let mut out = Vec::with_capacity(total);
+    while out.len() < total {
+        let r = next();
+        out.extend_from_slice(
+            format!(
+                "{{\"id\":\"{:016x}\",\"tenant\":\"{:08x}\",\"role\":\"{}\",\
+                 \"region\":\"{}\",\"score\":{},\"seen\":{},\"token\":\"{:016x}\"}}",
+                r,
+                next() as u32,
+                roles[(r % 5) as usize],
+                regions[(r % 4) as usize],
+                next() % 100_000,
+                next() % 1_700_000_000,
+                next()
+            )
+            .as_bytes(),
+        );
+    }
+    out.truncate(total);
+    out
+}
+
 /// Incompressible, so the match loop finds nothing and every byte becomes a
 /// literal. This is the worst case for the packer and the case a namespace of
 /// already-compressed blobs hits on every write.
@@ -60,6 +99,8 @@ fn packing(c: &mut Criterion) {
         ("records_512", records(512)),
         ("records_4k", records(4096)),
         ("records_64k", records(65_536)),
+        ("varied_4k", varied(4096)),
+        ("varied_64k", varied(65_536)),
         ("noise_4k", noise(4096)),
     ] {
         group.throughput(Throughput::Bytes(data.len() as u64));
@@ -83,6 +124,8 @@ fn unpacking(c: &mut Criterion) {
         ("records_512", records(512)),
         ("records_4k", records(4096)),
         ("records_64k", records(65_536)),
+        ("varied_4k", varied(4096)),
+        ("varied_64k", varied(65_536)),
     ] {
         let mut packed = Vec::new();
         if !pack::pack(&data, &mut packed) {
@@ -103,7 +146,12 @@ fn unpacking(c: &mut Criterion) {
 /// The ratio, alongside the speed, because one is meaningless without the
 /// other — a packer can always be made faster by compressing less.
 fn ratio(c: &mut Criterion) {
-    for (label, data) in [("records_4k", records(4096)), ("noise_4k", noise(4096))] {
+    for (label, data) in [
+        ("records_4k", records(4096)),
+        ("varied_4k", varied(4096)),
+        ("varied_64k", varied(65_536)),
+        ("noise_4k", noise(4096)),
+    ] {
         let mut packed = Vec::new();
         let kept = pack::pack(&data, &mut packed);
         eprintln!(
