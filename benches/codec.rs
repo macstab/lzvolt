@@ -166,5 +166,44 @@ fn ratio(c: &mut Criterion) {
     c.bench_function("pack/ratio_noop", |b| b.iter(|| black_box(0u8)));
 }
 
-criterion_group!(benches, packing, unpacking, ratio);
+/// The same data through LZ4, in the same harness.
+///
+/// Every comparison in this file was against numbers quoted from LZ4's
+/// documentation, measured on other hardware with other data. This runs it
+/// here, so the difference is the implementation and not the conditions.
+fn against_lz4(c: &mut Criterion) {
+    let mut group = c.benchmark_group("lz4");
+
+    for (label, data) in [
+        ("varied_4k", varied(4096)),
+        ("varied_64k", varied(65_536)),
+        ("records_4k", records(4096)),
+        ("noise_4k", noise(4096)),
+    ] {
+        group.throughput(Throughput::Bytes(data.len() as u64));
+
+        group.bench_function(BenchmarkId::new("compress", label), |b| {
+            b.iter(|| black_box(lz4_flex::compress(black_box(&data))));
+        });
+
+        let packed = lz4_flex::compress(&data);
+        let original = data.len();
+        group.bench_function(BenchmarkId::new("decompress", label), |b| {
+            b.iter(|| {
+                black_box(lz4_flex::decompress(black_box(&packed), original).unwrap());
+            });
+        });
+
+        eprintln!(
+            "  lz4 ratio {label}: {} -> {} bytes ({:.2}x)",
+            original,
+            packed.len(),
+            original as f64 / packed.len() as f64
+        );
+    }
+
+    group.finish();
+}
+
+criterion_group!(benches, packing, unpacking, ratio, against_lz4);
 criterion_main!(benches);
