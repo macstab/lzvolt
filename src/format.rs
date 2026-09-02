@@ -238,9 +238,10 @@ fn pack_with(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> b
             0
         } else {
             let candidate = stored as usize - 1;
-            if candidate >= at || at - candidate > MAX_OFFSET {
-                0
-            } else if word4(input, candidate) != word4(input, at) {
+            let usable = candidate < at
+                && at - candidate <= MAX_OFFSET
+                && word4(input, candidate) == word4(input, at);
+            if !usable {
                 0
             } else {
                 MIN_MATCH + common_prefix(&input[candidate + MIN_MATCH..], &input[at + MIN_MATCH..])
@@ -255,7 +256,30 @@ fn pack_with(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> b
         misses = 1 << SKIP_TRIGGER;
 
         let candidate = stored as usize - 1;
-        emit_block(&input[literal_start..at], at - candidate, matched, out);
+
+        // Walk the match backwards into the literals that were about to be
+        // emitted. The bytes are already known to be equal there; they were
+        // simply never looked at, because the search only ever moves forward.
+        //
+        // This is worth more than the ratio it adds. Every byte moved out of a
+        // literal run and into a match is a byte the decoder copies in a block
+        // instead of individually, and — since it shortens the run rather than
+        // splitting it — it produces fewer, longer blocks. Decoding is bounded
+        // by per-block work, so fewer blocks is the lever.
+        let mut back = 0usize;
+        while candidate > back
+            && at - back > literal_start
+            && input[candidate - back - 1] == input[at - back - 1]
+        {
+            back += 1;
+        }
+
+        emit_block(
+            &input[literal_start..at - back],
+            at - candidate,
+            matched + back,
+            out,
+        );
 
         at += matched;
         literal_start = at;
@@ -340,6 +364,23 @@ fn emit_literals_only(literals: &[u8], out: &mut Vec<u8>) {
 /// declared size at the end. Nothing ever reads the slack.
 const OVERRUN: usize = 32;
 
+/// Input bytes the fast path must be able to read past the token.
+///
+/// Computed once rather than per block: the guard runs on every block, and a
+/// `max` there is arithmetic the loop does not need.
+const FAST_INPUT_SLACK: usize = if FAST_LITERAL > OVERRUN {
+    FAST_LITERAL
+} else {
+    OVERRUN
+};
+
+/// Bytes the fast path copies for a literal run.
+///
+/// The short form carries at most fourteen, so sixteen covers it. Copying a
+/// full [`OVERRUN`] there would move twice the bytes for no gain, and on data
+/// that compresses poorly literals are most of the output.
+const FAST_LITERAL: usize = 16;
+
 /// Copy `len` bytes from `src` to `dst` in fixed blocks, overrunning freely.
 ///
 /// # Safety
@@ -404,6 +445,67 @@ pub fn unpack(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
 
     while produced < declared {
         let token = *input.get(at).ok_or(PackError::Truncated)?;
+
+        // The common block: neither length escaped its nibble, and there is
+        // room to read and write whole copy units without checking either
+        // again. Everything the slow path computes step by step is bounded
+        // here by construction — a literal run is at most 14 bytes and a match
+        // at most 18 — so the two copies run at fixed sizes and the arithmetic
+        // between them disappears.
+        //
+        // LZ4 owes most of its decode speed to exactly this shape. Without it
+        // a block costs a dozen branches; with it, four.
+        let short_literal = (token >> 4) as usize;
+        let short_match = (token & 0x0F) as usize;
+        if short_literal != 15
+            && short_match != 15
+            && at + 1 + short_literal + 2 + FAST_INPUT_SLACK <= input.len()
+            && produced + 64 <= capacity
+        {
+            let literal_at = at + 1;
+            let offset_at = literal_at + short_literal;
+            // Left bounds-checked deliberately. Replacing this with two
+            // unchecked byte reads measured 4.5% *slower*: the checked slice
+            // becomes one 16-bit load, the unchecked pair does not.
+            let offset =
+                u16::from_le_bytes(input[offset_at..offset_at + 2].try_into().unwrap()) as usize;
+            let match_len = short_match + MIN_MATCH;
+            let after_literals = produced + short_literal;
+
+            // Validated before either copy, because the match may reach into
+            // the literals this block is about to write.
+            if offset == 0 || offset > after_literals {
+                return Err(PackError::BadOffset);
+            }
+            if after_literals + match_len > declared {
+                return Err(PackError::LengthMismatch);
+            }
+
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    input.as_ptr().add(literal_at),
+                    base.add(produced),
+                    FAST_LITERAL,
+                );
+                let src = base.add(after_literals - offset);
+                let dst = base.add(after_literals);
+                if offset >= OVERRUN {
+                    std::ptr::copy_nonoverlapping(src, dst, OVERRUN);
+                } else {
+                    let mut copied = 0usize;
+                    while copied < match_len {
+                        let take = (match_len - copied).min(offset);
+                        std::ptr::copy_nonoverlapping(src.add(copied), dst.add(copied), take);
+                        copied += take;
+                    }
+                }
+            }
+
+            produced = after_literals + match_len;
+            at = offset_at + 2;
+            continue;
+        }
+
         at += 1;
 
         let mut literal_len = (token >> 4) as usize;
