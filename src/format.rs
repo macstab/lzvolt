@@ -120,11 +120,25 @@ impl std::error::Error for PackError {}
 /// would otherwise reserve gigabytes before failing.
 const MAX_UNPACKED: usize = 512 * 1024 * 1024;
 
+/// Hash the four bytes at the start of `bytes`.
+///
+/// Read as one word rather than four indexed bytes: the indexed form is four
+/// bounds checks and four loads that the compiler is not always willing to
+/// merge, and this runs once per position in the input.
 #[inline]
 fn hash4(bytes: &[u8]) -> usize {
-    let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let word = u32::from_le_bytes(bytes[..4].try_into().unwrap());
     (word.wrapping_mul(0x9E37_79B1) >> (32 - HASH_BITS)) as usize
 }
+
+/// How fast the search gives up. After `1 << SKIP_TRIGGER` consecutive misses
+/// the cursor starts advancing by more than one byte, and keeps accelerating.
+///
+/// Without it, data that does not compress is walked one byte at a time to no
+/// purpose — and even data that does compress spends most positions between
+/// matches. The cost is a slightly worse ratio, since a skipped position is a
+/// match never looked for; LZ4 uses the same trigger for the same reason.
+const SKIP_TRIGGER: usize = 6;
 
 /// Write a length that did not fit in a nibble: 255s until a smaller byte.
 fn put_extended(mut remaining: usize, out: &mut Vec<u8>) {
@@ -174,8 +188,14 @@ fn pack_with(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> b
 
     put_varint_into(input.len() as u64, out);
 
+    out.reserve(input.len() / 4);
+
     let mut at = 0usize;
     let mut literal_start = 0usize;
+    // Starts at the trigger, so the first step is one byte. Starting at one
+    // would make the shift zero and the cursor would sit on the same position
+    // for the first sixty-four attempts.
+    let mut misses = 1usize << SKIP_TRIGGER;
 
     while at + MIN_MATCH <= input.len() {
         let slot = hash4(&input[at..]);
@@ -197,9 +217,11 @@ fn pack_with(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> b
         };
 
         if matched < MIN_MATCH {
-            at += 1;
+            at += misses >> SKIP_TRIGGER;
+            misses += 1;
             continue;
         }
+        misses = 1 << SKIP_TRIGGER;
 
         let candidate = stored as usize - 1;
         emit_block(&input[literal_start..at], at - candidate, matched, out);
