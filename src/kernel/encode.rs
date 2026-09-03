@@ -44,13 +44,43 @@ pub struct PackState {
 pub const MIN_MATCH: usize = 4;
 /// Longest backward reference. Must agree with `keva_core::store::pack`.
 pub const MAX_OFFSET: usize = 65_535;
-/// Table size as a power of two. Must agree with `keva_core::store::pack`.
+/// Table size as a power of two, and how much of it a small value uses. Must
+/// agree with `keva_core::store::pack`.
 pub const HASH_BITS: u32 = 12;
+/// How much of the table a value above [`NARROW_TABLE_ABOVE`] uses. The table is
+/// still allocated in full; a large value simply touches less of it, and touched
+/// lines are what the cache charges for.
+pub const HASH_BITS_LARGE: u32 = 11;
+/// Length above which the packer narrows the table. Must agree with
+/// `keva_core::store::pack`.
+pub const NARROW_TABLE_ABOVE: usize = 8192;
 /// Misses before the stride widens. Must agree with `keva_core::store::pack`.
 pub const SKIP_TRIGGER: u32 = 6;
 
 /// Entries the table must hold.
 pub const TABLE_SIZE: usize = 1 << HASH_BITS;
+
+/// A slot that has never been written. Must agree with `keva_core::store::pack`.
+///
+/// Not zero, and that is load-bearing rather than stylistic. The kernel decides
+/// whether a candidate is usable with a single unsigned compare of `at -
+/// stored` against the window; a sentinel large enough to make that subtraction
+/// wrap fails the compare already, which is how the "is this slot empty" branch
+/// was removed from the hot loop entirely.
+///
+/// The cost is that a zero-filled table is not merely unhelpful, it is unsound:
+/// slot zero would read as position -1 and send the verify load outside the
+/// buffer. Build tables with [`new_table`].
+pub const EMPTY: u32 = 0x8000_0000;
+
+/// A match table, initialised the only way the kernels accept.
+///
+/// This exists so that no caller has to know about [`EMPTY`]. Handing
+/// [`pack_asm`] a `vec![0u32; TABLE_SIZE]` would read out of bounds, and a
+/// constructor is a cheaper defence than a comment.
+pub fn new_table() -> Vec<u32> {
+    vec![EMPTY; TABLE_SIZE]
+}
 
 
 #[cfg(all(keva_asm, target_arch = "aarch64"))]
@@ -90,6 +120,9 @@ extern "C" {
 /// measured and lost 12% on a 64 KiB value that compresses to 33 KiB, while
 /// gaining 1-3% on values whose output is a few hundred bytes — so the memset is
 /// a prefetch in disguise, and it pays wherever there is real output to write.
+///
+/// `table` must have come from [`new_table`], or from an earlier call to this
+/// function. A zero-filled one is unsound -- see [`EMPTY`].
 pub fn pack_asm(input: &[u8], out: &mut Vec<u8>, table: &mut [u32]) -> Option<usize> {
     debug_assert!(table.len() >= TABLE_SIZE);
 
@@ -334,7 +367,10 @@ mod tests {
     #[test]
     fn the_duplicated_constants_still_hold() {
         assert_eq!(TABLE_SIZE, 4096);
-        assert_eq!(32 - HASH_BITS, 20, "the shift baked into the .S file");
+        assert_eq!(32 - HASH_BITS, 20, "the small-value shift in the .S file");
+        assert_eq!(32 - HASH_BITS_LARGE, 21, "the large-value shift in the .S file");
+        assert_eq!(NARROW_TABLE_ABOVE, 8192, "the threshold in the .S file");
+        assert_eq!(EMPTY, 0x8000_0000, "the sentinel the .S file relies on");
         assert_eq!(MIN_MATCH, 4);
         assert_eq!(MAX_OFFSET, 65_535);
         assert_eq!(1u32 << SKIP_TRIGGER, 64, "the reset value in the .S file");

@@ -1,4 +1,4 @@
-/*
+    /*
  * keva_pack_find -- the packer's match search, one call per match.
  *
  *   void keva_pack_find(const uint8_t *input, uintptr_t len,
@@ -24,7 +24,7 @@
  * loudly if they drift, which is the only reason duplicating them is
  * acceptable.
  *
- *   HASH_BITS    12   ->  shift the 32-bit product right by 20
+ *   HASH_BITS    11   ->  shift the 32-bit product right by 21
  *   MAX_OFFSET   65535
  *   MIN_MATCH    4
  *   SKIP_TRIGGER 6

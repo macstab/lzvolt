@@ -63,8 +63,58 @@ const MAX_OFFSET: usize = 65_535;
 ///
 /// A single slot per hash, so a collision simply loses a match rather than
 /// costing a search. That is the trade that keeps packing near memory speed.
+///
+/// Eleven bits, not twelve, and the reason is the cache rather than the hash.
+/// The table shares L1 with the data it indexes, so every slot it gains is a
+/// line the input loses. Measured on a 64 KiB value, where the two are actually
+/// in contention:
+///
+/// ```text
+///   bits   table     GiB/s   ratio
+///     10    4 KiB     0.78    1.86x
+///     11    8 KiB     0.72    1.91x
+///     12   16 KiB     0.60    1.96x
+///     13   32 KiB     0.55    1.94x
+/// ```
+///
+/// Halving the table buys 21% and costs 2.5% of the ratio; halving it again
+/// buys 30% and costs 5%. Eleven is where that trade stops being obviously
+/// worth it. On a 4 KiB value, where nothing is in contention, eleven measures
+/// 1% ahead of twelve at an identical ratio -- so this is not a compromise for
+/// small values, it is simply better there too.
 const HASH_BITS: usize = 12;
+
+/// Table bits for a value large enough that the table competes with it for L1.
+///
+/// The full table is always allocated; this only narrows how much of it a large
+/// value touches, and touched lines are what the cache actually pays for.
+const HASH_BITS_LARGE: usize = 11;
+
+/// Where the table stops being free and starts being a rival for cache.
+///
+/// Below this a value and the whole table sit in L1 together, and the wider
+/// table is simply better: fewer collisions, so fewer verify loads that go to a
+/// random address only to fail. Incompressible data is where that shows up
+/// hardest, since every collision there is pure waste -- 4 KiB of noise packs at
+/// 4.47 GiB/s with twelve bits and 3.74 with eleven.
+///
+/// Above it the relationship inverts, because the table is displacing the data:
+/// a 64 KiB value packs at 0.61 GiB/s with twelve bits and 0.87 with eleven.
+const NARROW_TABLE_ABOVE: usize = 8192;
 const HASH_SIZE: usize = 1 << HASH_BITS;
+
+/// A slot that has never been written.
+///
+/// Zero would be the obvious choice and it costs a branch: the search would
+/// have to ask "is this slot empty" before asking "is this candidate usable",
+/// and the first question is only ever asked to avoid mis-answering the second.
+///
+/// Any value far above the largest reachable position folds the two into one.
+/// The usability test computes `at - stored` and rejects anything at or past
+/// the window; a sentinel this large makes that subtraction wrap, so an empty
+/// slot fails the test already there. No position can collide with it, since a
+/// value would have to be two gigabytes long to reach it.
+const EMPTY: u32 = 0x8000_0000;
 
 /// The match-finding table, held across calls.
 ///
@@ -80,15 +130,14 @@ const HASH_SIZE: usize = 1 << HASH_BITS;
 /// trade for removing the setup entirely.
 #[derive(Debug)]
 pub struct Packer {
-    /// Position plus one, so that zero means "nothing here" without needing a
-    /// sentinel pass over the table.
+    /// Position plus one, with [`EMPTY`] for a slot never written.
     table: Box<[u32; HASH_SIZE]>,
 }
 
 impl Default for Packer {
     fn default() -> Self {
         Packer {
-            table: Box::new([0u32; HASH_SIZE]),
+            table: Box::new([EMPTY; HASH_SIZE]),
         }
     }
 }
@@ -140,9 +189,20 @@ const MAX_UNPACKED: usize = 512 * 1024 * 1024;
 /// bounds checks and four loads that the compiler is not always willing to
 /// merge, and this runs once per position in the input.
 #[inline]
-fn hash4(bytes: &[u8]) -> usize {
+fn hash4(bytes: &[u8], shift: u32) -> usize {
     let word = u32::from_le_bytes(bytes[..4].try_into().unwrap());
-    (word.wrapping_mul(0x9E37_79B1) >> (32 - HASH_BITS)) as usize
+    (word.wrapping_mul(0x9E37_79B1) >> shift) as usize
+}
+
+/// How far to shift the hash for a value of this length. See
+/// [`NARROW_TABLE_ABOVE`].
+#[inline]
+fn hash_shift(len: usize) -> u32 {
+    if len > NARROW_TABLE_ABOVE {
+        (32 - HASH_BITS_LARGE) as u32
+    } else {
+        (32 - HASH_BITS) as u32
+    }
 }
 
 /// The four bytes at `at`, as one word.
@@ -198,7 +258,7 @@ fn get_extended(input: &[u8], at: &mut usize) -> Result<usize, PackError> {
 /// the original in that case, so a namespace holding JPEGs pays the packing
 /// attempt and nothing else.
 pub fn pack(input: &[u8], out: &mut Vec<u8>) -> bool {
-    let mut table = Box::new([0u32; HASH_SIZE]);
+    let mut table = Box::new([EMPTY; HASH_SIZE]);
     pack_with(input, out, &mut table)
 }
 
@@ -219,14 +279,17 @@ fn pack_with(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> b
     // would make the shift zero and the cursor would sit on the same position
     // for the first sixty-four attempts.
     let mut misses = 1usize << SKIP_TRIGGER;
+    let shift = hash_shift(input.len());
 
     while at + MIN_MATCH <= input.len() {
-        let slot = hash4(&input[at..]);
+        let slot = hash4(&input[at..], shift);
         let stored = table[slot];
         table[slot] = at as u32 + 1;
 
-        // Zero means empty. Anything else is a position from this value or a
-        // previous one, and only positions behind the cursor are usable.
+        // A slot holds a position from this value or a previous one, and only
+        // positions behind the cursor are usable. An untouched slot holds
+        // [`EMPTY`], which is far enough ahead of any real position that the
+        // same test rejects it — see the constant.
         //
         // The four bytes are compared inline before anything else happens. On
         // data that varies, almost every candidate fails here — and the
@@ -234,18 +297,14 @@ fn pack_with(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> b
         // to find that out. Since the hash is of exactly these four bytes, a
         // candidate that disagrees on them cannot match at all, so this rejects
         // without touching the extension loop.
-        let matched = if stored == 0 {
-            0
+        let candidate = stored as usize - 1;
+        let matched = if candidate < at
+            && at - candidate <= MAX_OFFSET
+            && word4(input, candidate) == word4(input, at)
+        {
+            MIN_MATCH + common_prefix(&input[candidate + MIN_MATCH..], &input[at + MIN_MATCH..])
         } else {
-            let candidate = stored as usize - 1;
-            let usable = candidate < at
-                && at - candidate <= MAX_OFFSET
-                && word4(input, candidate) == word4(input, at);
-            if !usable {
-                0
-            } else {
-                MIN_MATCH + common_prefix(&input[candidate + MIN_MATCH..], &input[at + MIN_MATCH..])
-            }
+            0
         };
 
         if matched < MIN_MATCH {
@@ -254,8 +313,6 @@ fn pack_with(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> b
             continue;
         }
         misses = 1 << SKIP_TRIGGER;
-
-        let candidate = stored as usize - 1;
 
         // Walk the match backwards into the literals that were about to be
         // emitted. The bytes are already known to be equal there; they were
@@ -867,8 +924,10 @@ mod tests {
 
         let mut rust_out = Vec::new();
         let mut asm_out = Vec::new();
-        let mut rust_table = Box::new([0u32; HASH_SIZE]);
-        let mut asm_table = vec![0u32; HASH_SIZE];
+        // Both sides start from the sentinel, not from zero: a zero slot reads
+        // as position -1 and would send the kernel's verify load out of bounds.
+        let mut rust_table = Box::new([EMPTY; HASH_SIZE]);
+        let mut asm_table = keva_asm::pack_find::new_table();
         let mut round_trip = Vec::new();
 
         for input in &cases {

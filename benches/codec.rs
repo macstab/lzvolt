@@ -142,7 +142,7 @@ fn packing_asm(c: &mut Criterion) {
 
         group.bench_function(BenchmarkId::new("asm", label), |b| {
             let mut out = Vec::with_capacity(data.len() + 16);
-            let mut table = vec![0u32; keva_asm::pack_find::TABLE_SIZE];
+            let mut table = keva_asm::pack_find::new_table();
             b.iter(|| {
                 black_box(keva_asm::pack_find::pack_asm(
                     black_box(&data),
@@ -181,7 +181,7 @@ fn sizes(c: &mut Criterion) {
 
         group.bench_function(BenchmarkId::new("pack", bytes), |b| {
             let mut out = Vec::with_capacity(bytes + 16);
-            let mut table = vec![0u32; keva_asm::pack_find::TABLE_SIZE];
+            let mut table = keva_asm::pack_find::new_table();
             b.iter(|| {
                 black_box(keva_asm::pack_find::pack_asm(
                     black_box(&data),

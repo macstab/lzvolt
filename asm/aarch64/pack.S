@@ -37,7 +37,8 @@
  * Constants are duplicated from pack.rs because a `.S` file cannot read Rust
  * consts. `the_duplicated_constants_still_hold` fails if they drift.
  *
- *   HASH_BITS 12 -> shift 20   MAX_OFFSET 65535   MIN_MATCH 4   SKIP_TRIGGER 6
+ *   HASH_BITS 12 -> shift 20, or 11 -> 21 above 8192 bytes; see .Lshift_ready
+ *   MAX_OFFSET 65535   MIN_MATCH 4   SKIP_TRIGGER 6   EMPTY 0x80000000
  */
 
 #include "../common.h"
@@ -50,11 +51,12 @@ KEVA_SYM(keva_pack):
     // x30 is saved because this function calls out to the block writer; without
     // it the first `bl` overwrites the caller's return address and the final
     // `ret` jumps into whatever was left there.
-    stp     x29, x30, [sp, #-80]!
+    stp     x29, x30, [sp, #-96]!
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
     stp     x23, x24, [sp, #48]
     stp     x25, x26, [sp, #64]
+    stp     x27, x28, [sp, #80]
     mov     x29, sp
 
     mov     x19, x0                     // src
@@ -94,30 +96,58 @@ KEVA_SYM(keva_pack):
     movk    w7, #0x9E37, lsl #16
     mov     w13, #65534                 // MAX_OFFSET - 1; see the window check
 
+    /*
+     * How much of the table this value gets to use, chosen once from its length.
+     *
+     * The whole table is always allocated; the shift only decides how much of it
+     * a value touches, and touched lines are what the cache charges for. Below
+     * the threshold a value and the full table sit in L1 together and the wider
+     * table wins on collisions -- 4 KiB of noise packs at 4.47 GiB/s with twelve
+     * bits and 3.74 with eleven, because every collision there is a verify load
+     * to a random address that cannot possibly succeed. Above it the table is
+     * displacing the data instead, and the relationship inverts: a 64 KiB value
+     * packs at 0.61 with twelve bits and 0.87 with eleven.
+     *
+     * A register shift costs the same as an immediate one, so this is free.
+     */
+    mov     w27, #20                    // 32 - HASH_BITS
+    mov     x9, #8192                   // NARROW_TABLE_ABOVE
+    cmp     x20, x9
+    b.ls    .Lshift_ready
+    mov     w27, #21                    // 32 - HASH_BITS_LARGE
+.Lshift_ready:
+
     /* ---- search ------------------------------------------------------ */
+
 .Lscan:
     cmp     x25, x8
     b.hi    .Ltail
 
     ldr     w9, [x19, x25]              // four bytes at `at`
     mul     w10, w9, w7
-    lsr     w10, w10, #20               // slot
+    lsr     w10, w10, w27               // slot
 
     ldr     w11, [x22, x10, lsl #2]     // stored
     add     w12, w25, #1
     str     w12, [x22, x10, lsl #2]     // table[slot] = at + 1
 
-    cbz     w11, .Lmiss
-
     /*
-     * Both window checks in one unsigned compare.
+     * Every rejection in one unsigned compare, including the empty slot.
      *
      * `stored` is already candidate + 1, so subtracting it from the cursor
      * gives `at - candidate - 1` without materialising the candidate first.
-     * A candidate at or ahead of the cursor -- which a stale entry left by an
-     * earlier call on different data can be -- wraps to a huge unsigned and
-     * fails the same compare that rejects an offset past the window. So the
-     * separate "behind the cursor" test, and the branch it needed, are gone.
+     * Three things have to be rejected and all three fail this one test:
+     *
+     *   - an offset past the window          -- the difference exceeds the bound
+     *   - a candidate at or ahead of the cursor, which a stale entry left by an
+     *     earlier call can be                -- the subtraction wraps
+     *   - a slot never written               -- it holds KEVA_PACK_EMPTY, which
+     *                                           is large enough to wrap too
+     *
+     * That last one is why the caller must fill the table with the sentinel
+     * rather than with zero: a zero slot would read as position -1 and send the
+     * verify load outside the buffer. `pack_find::new_table` is the only
+     * supported way to build one.
      *
      * The bound is MAX_OFFSET - 1 because the subtraction already took one off.
      */
@@ -225,11 +255,12 @@ KEVA_SYM(keva_pack):
 .Lgiveup_restore:
     mov     w0, wzr
 .Lreturn:
+    ldp     x27, x28, [sp, #80]
     ldp     x25, x26, [sp, #64]
     ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #80
+    ldp     x29, x30, [sp], #96
     ret
 
 .Lgiveup:
