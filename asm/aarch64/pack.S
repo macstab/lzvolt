@@ -92,6 +92,7 @@ KEVA_SYM(keva_pack):
     sub     x8, x20, #4                 // scan limit
     mov     w7, #0x79B1                 // 0x9E3779B1
     movk    w7, #0x9E37, lsl #16
+    mov     w13, #65534                 // MAX_OFFSET - 1; see the window check
 
     /* ---- search ------------------------------------------------------ */
 .Lscan:
@@ -107,16 +108,24 @@ KEVA_SYM(keva_pack):
     str     w12, [x22, x10, lsl #2]     // table[slot] = at + 1
 
     cbz     w11, .Lmiss
-    sub     w11, w11, #1                // candidate
 
-    cmp     w11, w25
-    b.hs    .Lmiss                      // must be behind the cursor
-
+    /*
+     * Both window checks in one unsigned compare.
+     *
+     * `stored` is already candidate + 1, so subtracting it from the cursor
+     * gives `at - candidate - 1` without materialising the candidate first.
+     * A candidate at or ahead of the cursor -- which a stale entry left by an
+     * earlier call on different data can be -- wraps to a huge unsigned and
+     * fails the same compare that rejects an offset past the window. So the
+     * separate "behind the cursor" test, and the branch it needed, are gone.
+     *
+     * The bound is MAX_OFFSET - 1 because the subtraction already took one off.
+     */
     sub     w12, w25, w11
-    mov     w13, #65535
     cmp     w12, w13
-    b.hi    .Lmiss                      // outside the window
+    b.hi    .Lmiss
 
+    sub     w11, w11, #1                // candidate, now that it is worth having
     ldr     w14, [x19, x11]
     cmp     w14, w9
     b.ne    .Lmiss                      // the hash collided
@@ -234,11 +243,13 @@ KEVA_SYM(keva_pack):
  *   x3 = literal count, x4 = offset.
  *   Returns x0 = 1 on success, 0 when the output has reached src_len.
  *
- * Clobbers x5, x6, x9, x10, x12, x13, x14 and advances x23.
+ * Clobbers x5, x6, x9, x10, x12, v0, v1 and advances x23. x13 is left alone
+ * so the search can keep a loop-invariant constant there.
+ *
+ * A leaf: it calls nothing, so x30 survives untouched and there is no frame to
+ * build. Saving one here cost two memory accesses per match for nothing.
  */
 .Lblock:
-    stp     x29, x30, [sp, #-16]!
-
     // Refuse once the output has reached the input length: packing has failed
     // to help by then and the result would be discarded anyway.
     //
@@ -287,18 +298,65 @@ KEVA_SYM(keva_pack):
     strb    w9, [x21, x23]
     add     x23, x23, #1
 
+/*
+ * Copy the literals, 32 bytes at a time.
+ *
+ * This ran a byte at a time first and it was the wrong thing to be doing: seven
+ * instructions, a loop-carried dependency and a branch, per byte, against the
+ * Rust side's `extend_from_slice` -- which is a vectorised memcpy. On data that
+ * matches rarely almost every byte comes through here, so that loop was most of
+ * what the packer did.
+ *
+ * `remaining >= 32` is the only guard needed, and it bounds both sides at once.
+ * Source: `remaining` counts bytes still inside the literal run, so a 32-byte
+ * read ends at or before the run's end, which is at or before `src_len`.
+ * Destination: the block writer already refused unless `cursor + count <
+ * src_len`, and a 32-byte store ends at or before `cursor + count`, so it stays
+ * inside the caller's `src_len + 16`. Each rung of the tail ladder is the same
+ * argument with a smaller width.
+ *
+ * v0 and v1 are caller-saved, so the wide path costs no spill.
+ */
 .Lblock_literals:
     cbz     x3, .Lblock_offset
     sub     x6, x1, x3                  // literal start
-    mov     x9, #0
-.Lblock_copy:
-    ldrb    w10, [x19, x6]
-    strb    w10, [x21, x23]
-    add     x6, x6, #1
-    add     x23, x23, #1
-    add     x9, x9, #1
-    cmp     x9, x3
-    b.lo    .Lblock_copy
+    add     x9, x19, x6                 // read pointer
+    add     x10, x21, x23               // write pointer
+    mov     x6, x3                      // remaining; the start is in x9 now
+    add     x23, x23, x3                // the cursor lands here either way
+
+.Lblock_copy32:
+    cmp     x6, #32
+    b.lo    .Lblock_copy16
+    ldp     q0, q1, [x9]
+    stp     q0, q1, [x10]
+    add     x9, x9, #32
+    add     x10, x10, #32
+    sub     x6, x6, #32
+    b       .Lblock_copy32
+
+    // Under 32 bytes left, so bits 4 down to 0 of `remaining` spell out the
+    // rest exactly and each can be handled once, without a loop.
+.Lblock_copy16:
+    tbz     x6, #4, .Lblock_copy8
+    ldr     q0, [x9], #16
+    str     q0, [x10], #16
+.Lblock_copy8:
+    tbz     x6, #3, .Lblock_copy4
+    ldr     x12, [x9], #8
+    str     x12, [x10], #8
+.Lblock_copy4:
+    tbz     x6, #2, .Lblock_copy2
+    ldr     w12, [x9], #4
+    str     w12, [x10], #4
+.Lblock_copy2:
+    tbz     x6, #1, .Lblock_copy1
+    ldrh    w12, [x9], #2
+    strh    w12, [x10], #2
+.Lblock_copy1:
+    tbz     x6, #0, .Lblock_offset
+    ldrb    w12, [x9]
+    strb    w12, [x10]
 
 .Lblock_offset:
     cbz     x2, .Lblock_done            // the tail carries no match
@@ -326,12 +384,10 @@ KEVA_SYM(keva_pack):
 
 .Lblock_done:
     mov     x0, #1
-    ldp     x29, x30, [sp], #16
     ret
 
 .Lblock_full:
     mov     x0, #0
-    ldp     x29, x30, [sp], #16
     ret
 
 #if !defined(__APPLE__)

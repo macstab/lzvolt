@@ -162,6 +162,48 @@ fn packing_asm(c: &mut Criterion) {
     group.finish();
 }
 
+/// Where packing peaks, and whether unpacking peaks in the same place.
+///
+/// Splitting a value into blocks would let any size run at whatever size turns
+/// out to be fastest, so this is the measurement that picks the block size --
+/// and it has to agree in both directions, since a block that packs fast and
+/// unpacks slowly is no use to a store that reads far more than it writes.
+///
+/// `varied` is the shape that discriminates: it is compressible enough that the
+/// packer does real work, and varied enough that the match table cannot hold the
+/// whole input once it grows.
+fn sizes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pack/sizes");
+
+    for bytes in [512usize, 1024, 2048, 4096, 8192, 16_384, 32_768, 65_536] {
+        let data = varied(bytes);
+        group.throughput(Throughput::Bytes(bytes as u64));
+
+        group.bench_function(BenchmarkId::new("pack", bytes), |b| {
+            let mut out = Vec::with_capacity(bytes + 16);
+            let mut table = vec![0u32; keva_asm::pack_find::TABLE_SIZE];
+            b.iter(|| {
+                black_box(keva_asm::pack_find::pack_asm(
+                    black_box(&data),
+                    &mut out,
+                    &mut table,
+                ))
+            });
+        });
+
+        let mut packed = Vec::new();
+        if !pack::pack(&data, &mut packed) {
+            continue;
+        }
+        group.bench_function(BenchmarkId::new("unpack", bytes), |b| {
+            let mut out = Vec::with_capacity(bytes);
+            b.iter(|| pack::unpack(black_box(&packed), &mut out).unwrap());
+        });
+    }
+
+    group.finish();
+}
+
 fn unpacking(c: &mut Criterion) {
     let mut group = c.benchmark_group("pack/decompress");
 
@@ -250,5 +292,5 @@ fn against_lz4(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, packing, packing_asm, unpacking, ratio, against_lz4);
+criterion_group!(benches, packing, packing_asm, sizes, unpacking, ratio, against_lz4);
 criterion_main!(benches);
