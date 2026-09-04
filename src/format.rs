@@ -515,6 +515,27 @@ unsafe fn wildcopy(mut dst: *mut u8, mut src: *const u8, len: usize) {
 /// stands between a malformed value and memory unsafety, so it is not
 /// optional.
 pub fn unpack(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
+    // The kernel is handed a body and a length and answers one question: did it
+    // decode. Declining is not an error report — it means "this needs the
+    // decoder that can name what is wrong", which is the one below. So a stream
+    // the kernel refuses is never rejected on its word alone.
+    if keva_asm::unpack::asm_available() {
+        if let Some((declared, header)) = get_varint(input) {
+            if let Ok(declared) = usize::try_from(declared) {
+                if declared <= MAX_UNPACKED
+                    && keva_asm::unpack::unpack_asm(&input[header..], out, declared)
+                {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    unpack_portable(input, out)
+}
+
+/// The decoder every kernel is diffed against, and the only place an error is
+/// given a name.
+fn unpack_portable(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
     out.clear();
 
     let (declared, header) = get_varint(input).ok_or(PackError::Truncated)?;
@@ -894,6 +915,120 @@ mod tests {
     /// stream. A different but valid encoding would mean two builds of the same
     /// version writing different bytes for the same value, which surfaces much
     /// later as two nodes disagreeing about a snapshot.
+    /// Drive both decoders over everything the packer can emit, and require
+    /// that they produce the same bytes.
+    ///
+    /// The sizes are chosen around the widths the kernel copies in: sixteen for
+    /// a short literal run, thirty-two for a block. The repeating patterns are
+    /// there for the other reason — a two- or three-byte offset takes the
+    /// doubling path, which is the only part of the decoder that reads bytes it
+    /// wrote moments earlier, and it is where an off-by-one would corrupt data
+    /// rather than crash.
+    #[test]
+    fn the_assembly_decoder_agrees_with_the_portable_one() {
+        if !keva_asm::unpack::asm_available() {
+            return;
+        }
+
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut noise_byte = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        };
+
+        let mut cases: Vec<Vec<u8>> = Vec::new();
+        for size in [
+            1usize, 2, 3, 4, 5, 7, 8, 15, 16, 17, 31, 32, 33, 47, 48, 49, 64, 1000, 4096, 8192,
+            65_536,
+        ] {
+            cases.push(records(size));
+            cases.push(vec![b'a'; size]);
+            cases.push((0..size).map(|_| noise_byte()).collect());
+        }
+        cases.push(b"ab".repeat(3000));
+        cases.push(b"abc".repeat(2000));
+        cases.push(b"abcdefg".repeat(900));
+        cases.push([b"xy".repeat(500), vec![0u8; 4000], b"xy".repeat(500)].concat());
+
+        let mut packed = Vec::new();
+        let mut asm_out = Vec::new();
+        let mut ref_out = Vec::new();
+
+        for input in &cases {
+            if !pack(input, &mut packed) {
+                continue;
+            }
+            let (declared, header) = get_varint(&packed).expect("the packer wrote a header");
+            let declared = declared as usize;
+
+            assert!(
+                keva_asm::unpack::unpack_asm(&packed[header..], &mut asm_out, declared),
+                "the kernel declined a stream the packer produced, {} bytes",
+                input.len()
+            );
+            unpack_portable(&packed, &mut ref_out).expect("the portable decoder accepts it");
+
+            assert_eq!(asm_out, ref_out, "decoders disagree on {} bytes", input.len());
+            assert_eq!(&asm_out[..], &input[..], "round trip lost {} bytes", input.len());
+        }
+    }
+
+    /// A corrupt stream may be refused by the kernel and named by the portable
+    /// decoder, and that asymmetry is deliberate. What must never happen is the
+    /// kernel accepting something the portable decoder would reject, or the two
+    /// accepting it and producing different bytes — that is how a silently
+    /// wrong value reaches a client.
+    #[test]
+    fn the_assembly_decoder_never_accepts_more_than_the_portable_one() {
+        if !keva_asm::unpack::asm_available() {
+            return;
+        }
+
+        let mut packed = Vec::new();
+        assert!(pack(&records(4096), &mut packed));
+
+        let mut broken: Vec<Vec<u8>> = Vec::new();
+        for cut in [0usize, 1, 2, 3, 5, 9, 17, 33, 64, 128] {
+            if cut < packed.len() {
+                broken.push(packed[..packed.len() - cut].to_vec());
+            }
+        }
+        for at in [0usize, 1, 2, 3, 4, 8, 16, 32, 64, 100] {
+            for xor in [0x01u8, 0x0F, 0xF0, 0xFF] {
+                if at < packed.len() {
+                    let mut c = packed.clone();
+                    c[at] ^= xor;
+                    broken.push(c);
+                }
+            }
+        }
+
+        let mut asm_out = Vec::new();
+        let mut ref_out = Vec::new();
+        for case in &broken {
+            let Some((declared, header)) = get_varint(case) else {
+                continue;
+            };
+            let Ok(declared) = usize::try_from(declared) else {
+                continue;
+            };
+            if declared > MAX_UNPACKED {
+                continue;
+            }
+            if !keva_asm::unpack::unpack_asm(&case[header..], &mut asm_out, declared) {
+                continue; // refused, which the portable decoder is free to name
+            }
+            let reference = unpack_portable(case, &mut ref_out);
+            assert!(
+                reference.is_ok(),
+                "the kernel accepted a stream the portable decoder rejects"
+            );
+            assert_eq!(asm_out, ref_out, "decoders disagree on a corrupt stream");
+        }
+    }
+
     #[test]
     fn the_assembly_packer_agrees_byte_for_byte() {
         if !keva_asm::pack_find::asm_available() {

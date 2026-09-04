@@ -14,6 +14,7 @@ fn main() {
             "asm/aarch64/ctrl_match.S",
             "asm/aarch64/pack_find.S",
             "asm/aarch64/pack.S",
+            "asm/aarch64/unpack.S",
         ],
         "x86_64" => &["asm/x86_64/ctrl_match.S"],
         // Every other target runs the scalar reference. That is a supported

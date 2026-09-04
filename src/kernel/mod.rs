@@ -46,6 +46,7 @@
 pub mod backend;
 pub mod cpu;
 pub mod pack_find;
+pub mod unpack;
 
 pub use backend::{intrinsics, scalar};
 
