@@ -142,25 +142,24 @@ KEVA_SYM(keva_unpack):
     lsr     w5, w4, #4                  // literal nibble
     and     w26, w4, #15                // match nibble, kept across helpers
 
+    /*
+     * Only the literal nibble gates the block now.
+     *
+     * A saturated *match* nibble used to leave for the general writer, and on
+     * data that compresses well that is 99% of blocks -- so almost nothing ever
+     * used the zone, and every block re-asked the questions the zone had
+     * already answered. The long match is handled below instead, inside the
+     * loop, which is what liblz4 does and why it carries three block bodies.
+     */
     cmp     w5, #15
-    b.eq    .Lslow
-    cmp     w26, #15
     b.eq    .Lslow
 
     /* ---- the common block -------------------------------------------- */
     add     x7, x23, #1                 // literals start here
     add     x8, x7, x5                  // and the offset follows them
     ldrh    w11, [x19, x8]              // offset
-    add     x14, x26, #4                // match length
     add     x16, x24, x5                // output position after the literals
-    add     x12, x16, x14               // and after the match
-
-    // Only the offset is still worth asking about. A fast block lays down at
-    // most fourteen literals and eighteen match bytes, and the zone holds the
-    // cursor sixty-four short of the declared length, so it cannot overrun.
-    cbz     w11, .Lfail
-    cmp     x11, x16
-    b.hi    .Lfail                      // reaches back before the output
+    add     x23, x8, #2                 // cursor past the offset
 
     // A short run carries at most fourteen literals, so one 16-byte move covers
     // it whatever the length. Trimming would cost a branch to save nothing: the
@@ -168,6 +167,20 @@ KEVA_SYM(keva_unpack):
     ldr     q0, [x19, x7]
     str     q0, [x21, x24]
 
+    cmp     w26, #15
+    b.eq    .Lfast_long
+
+    add     x14, x26, #4                // match length
+    add     x12, x16, x14               // and after the match
+
+    // Only the offset is still worth asking about. A short block lays down at
+    // most fourteen literals and eighteen match bytes, and the zone holds the
+    // cursor sixty-four short of the declared length, so it cannot overrun.
+    cbz     w11, .Lfail
+    cmp     x11, x16
+    b.hi    .Lfail                      // reaches back before the output
+
+.Lfast_copy:
     add     x13, x21, x16               // where the match is written
     sub     x15, x13, x11               // and where it is read from
     cmp     x11, #32
@@ -179,7 +192,6 @@ KEVA_SYM(keva_unpack):
     stp     q0, q1, [x13]
 
     mov     x24, x12
-    add     x23, x8, #2
     b       .Lfast
 
 .Lfast_near:
@@ -189,7 +201,65 @@ KEVA_SYM(keva_unpack):
     mov     x3, x14
     bl      .Lrepeat
     mov     x24, x12
-    add     x23, x8, #2
+    b       .Lfast
+
+/*
+ * A long match, still inside the loop.
+ *
+ * Unlike a short one this can run to any length, so the two things the zone
+ * cannot promise are asked here and nowhere else: that the length bytes are
+ * inside the input, and that the match does not carry the output past what was
+ * declared. Everything about the literals stays covered by the zone.
+ *
+ * This is the block that data compressing six-fold is made of -- 99% of its
+ * blocks saturate the match nibble, with an average match of 38 bytes against
+ * 1.4 literals. Sending them to the general writer meant the zone bought
+ * nothing on exactly the shape it was built for.
+ */
+.Lfast_long:
+    mov     x14, #15
+    mov     x8, #0
+.Lfast_lenbyte:
+    cmp     x23, x20
+    b.hs    .Lfail
+    ldrb    w9, [x19, x23]
+    add     x23, x23, #1
+    add     x8, x8, x9
+    cmp     w9, #255
+    b.ne    .Lfast_lendone
+    mov     x10, #0x20000000            // MAX_UNPACKED, 512 MiB
+    cmp     x8, x10
+    b.hi    .Lfail
+    b       .Lfast_lenbyte
+.Lfast_lendone:
+    add     x14, x14, x8
+    add     x14, x14, #4                // match length
+    add     x12, x16, x14
+
+    cbz     w11, .Lfail
+    cmp     x11, x16
+    b.hi    .Lfail
+    cmp     x12, x22
+    b.hi    .Lfail                      // an unbounded length can overrun
+
+    add     x13, x21, x16
+    sub     x15, x13, x11
+    cmp     x11, #32
+    b.lo    .Lfast_near
+
+    // Long enough to be worth the block loop, and far enough back to use it.
+    mov     x5, #0
+.Lfast_longblk:
+    ldp     q0, q1, [x15]
+    stp     q0, q1, [x13]
+    add     x5, x5, #32
+    cmp     x5, x14
+    b.hs    .Lfast_longout
+    add     x15, x15, #32
+    add     x13, x13, #32
+    b       .Lfast_longblk
+.Lfast_longout:
+    mov     x24, x12
     b       .Lfast
 
     /*
