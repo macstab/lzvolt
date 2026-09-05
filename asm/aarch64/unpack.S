@@ -70,11 +70,12 @@
  * callee-saved register.
  */
 KEVA_SYM(keva_unpack):
-    stp     x29, x30, [sp, #-80]!
+    stp     x29, x30, [sp, #-96]!
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
     stp     x23, x24, [sp, #48]
     stp     x25, x26, [sp, #64]
+    stp     x27, x28, [sp, #80]
     mov     x29, sp
 
     mov     x19, x0
@@ -91,19 +92,47 @@ KEVA_SYM(keva_unpack):
     mov     x23, #0                     // at
     mov     x24, #0                     // produced
 
-    // Highest cursor at which a fast-path block still reads inside the input,
-    // clamped to zero for a stream too short to hold one -- which then takes
-    // the exact path from its first block.
-    subs    x25, x20, #48
+    /*
+     * The zone the fast loop runs in, as two limits computed once.
+     *
+     * Inside it a block needs no bound test of its own: the input cursor stays
+     * far enough from the end that a token, fourteen literals, two offset bytes
+     * and a 32-byte block all land inside, and the output cursor stays far
+     * enough that the at-most 32 bytes a fast block produces cannot reach the
+     * declared length. Both clamp to zero for a value too small to hold one,
+     * which then runs entirely on the checked loop.
+     */
+    subs    x25, x20, #48               // input limit
     csel    x25, x25, xzr, hs
+    subs    x28, x22, #64               // output limit
+    csel    x28, x28, xzr, hs
 
+/*
+ * Two loops over the same format, and that is the whole shape of this file.
+ *
+ * The fast one runs while both cursors sit inside the zone above. It asks
+ * nothing about the end of the input, nothing about the end of the output and
+ * nothing about the declared length -- the zone answered all three before the
+ * loop began. What is left per block is the zone itself and the two nibbles.
+ *
+ * A saturated nibble is not a reason to leave. It is data-dependent and common
+ * -- matches run long on data that repeats, literal runs run long on data that
+ * does not -- so it drops into the general block writer and comes straight
+ * back. Only a *boundary* leaves, and it leaves for good.
+ *
+ * As one loop, the boundary question was asked by every block for the whole
+ * length of the value. liblz4 carries two decoders for exactly this reason, and
+ * it is why lifting single instructions out of it -- `ccmp`, post-indexed
+ * cursors, precomputed limits -- moved nothing here: the cost was never in the
+ * instructions, it was in where the decision lived.
+ */
     .p2align 4
-.Lloop:
-    cmp     x24, x22
-    b.hs    .Ldone
+.Lfast:
+    cmp     x23, x25
+    b.hs    .Ltail
+    cmp     x24, x28
+    b.hs    .Ltail
 
-    cmp     x23, x20
-    b.hs    .Lfail
     ldrb    w4, [x19, x23]              // token
     lsr     w5, w4, #4                  // literal nibble
     and     w26, w4, #15                // match nibble, kept across helpers
@@ -112,8 +141,6 @@ KEVA_SYM(keva_unpack):
     b.eq    .Lslow
     cmp     w26, #15
     b.eq    .Lslow
-    cmp     x23, x25
-    b.hs    .Lslow
 
     /* ---- the common block -------------------------------------------- */
     add     x7, x23, #1                 // literals start here
@@ -123,11 +150,12 @@ KEVA_SYM(keva_unpack):
     add     x16, x24, x5                // output position after the literals
     add     x12, x16, x14               // and after the match
 
+    // Only the offset is still worth asking about. A fast block lays down at
+    // most fourteen literals and eighteen match bytes, and the zone holds the
+    // cursor sixty-four short of the declared length, so it cannot overrun.
     cbz     w11, .Lfail
     cmp     x11, x16
     b.hi    .Lfail                      // reaches back before the output
-    cmp     x12, x22
-    b.hi    .Lfail                      // produces more than was declared
 
     // A short run carries at most fourteen literals, so one 16-byte move covers
     // it whatever the length. Trimming would cost a branch to save nothing: the
@@ -147,7 +175,7 @@ KEVA_SYM(keva_unpack):
 
     mov     x24, x12
     add     x23, x8, #2
-    b       .Lloop
+    b       .Lfast
 
 .Lfast_near:
     mov     x0, x13
@@ -157,9 +185,25 @@ KEVA_SYM(keva_unpack):
     bl      .Lrepeat
     mov     x24, x12
     add     x23, x8, #2
-    b       .Lloop
+    b       .Lfast
 
-    /* ---- extended lengths, or too close to the end of the input ------ */
+    /*
+     * Outside the zone: the same format, every question asked again.
+     *
+     * Reached once per value, when either cursor nears its buffer. It does not
+     * hand back -- the general writer below returns to `.Lfast`, which re-tests
+     * the zone and arrives here again. One test rather than two paths.
+     */
+.Ltail:
+    cmp     x24, x22
+    b.hs    .Ldone
+    cmp     x23, x20
+    b.hs    .Lfail
+    ldrb    w4, [x19, x23]              // token
+    lsr     w5, w4, #4
+    and     w26, w4, #15
+
+    /* ---- one block, whatever its lengths ----------------------------- */
 .Lslow:
     add     x23, x23, #1
 
@@ -231,7 +275,7 @@ KEVA_SYM(keva_unpack):
     mov     x2, x14
     bl      .Lwild
     mov     x24, x12
-    b       .Lloop
+    b       .Lfast
 
 .Lslow_near:
     mov     x0, x13
@@ -240,7 +284,7 @@ KEVA_SYM(keva_unpack):
     mov     x3, x14
     bl      .Lrepeat
     mov     x24, x12
-    b       .Lloop
+    b       .Lfast
 
 .Ldone:
     cmp     x24, x22
@@ -251,11 +295,12 @@ KEVA_SYM(keva_unpack):
 .Lfail:
     mov     w0, wzr
 .Lreturn:
+    ldp     x27, x28, [sp, #80]
     ldp     x25, x26, [sp, #64]
     ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #80
+    ldp     x29, x30, [sp], #96
     ret
 
 /*
