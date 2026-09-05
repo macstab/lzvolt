@@ -533,6 +533,32 @@ pub fn unpack(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
     unpack_portable(input, out)
 }
 
+/// Unpack a block whose uncompressed length the caller already knows.
+///
+/// This is the shape LZ4's own API has -- `LZ4_decompress_safe` is handed the
+/// destination and its size, because an LZ4 block carries no length of its own.
+/// [`unpack`] reads ours from the varint in front of the stream; this skips it.
+///
+/// The two differ only in that header. Everything after it is the LZ4 block
+/// format: a token of two nibbles, extended lengths as chains of 255, a
+/// two-byte little-endian offset, and match lengths stored less four. A block
+/// produced by liblz4 decodes here byte for byte, which the interop test
+/// checks — and which is what makes a decoder-against-decoder measurement
+/// possible with no format difference left in it.
+pub fn unpack_into(block: &[u8], out: &mut Vec<u8>, declared: usize) -> Result<(), PackError> {
+    if declared > MAX_UNPACKED {
+        return Err(PackError::TooLarge);
+    }
+    if keva_asm::unpack::asm_available() && keva_asm::unpack::unpack_asm(block, out, declared) {
+        return Ok(());
+    }
+    // The portable decoder wants the header, so give it one.
+    let mut framed = Vec::with_capacity(block.len() + 10);
+    put_varint_into(declared as u64, &mut framed);
+    framed.extend_from_slice(block);
+    unpack_portable(&framed, out)
+}
+
 /// The decoder every kernel is diffed against, and the only place an error is
 /// given a name.
 fn unpack_portable(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
@@ -924,6 +950,61 @@ mod tests {
     /// doubling path, which is the only part of the decoder that reads bytes it
     /// wrote moments earlier, and it is where an off-by-one would corrupt data
     /// rather than crash.
+    /// The reference implementation as a third opinion.
+    ///
+    /// Two decoders written by one author can share one misreading of the
+    /// format; a third that predates both cannot. liblz4 compresses, we decode,
+    /// and the bytes have to come back — which also establishes the claim the
+    /// benchmark rests on, that our decoder reads a genuine LZ4 block and a
+    /// decoder-against-decoder measurement has no format difference left in it.
+    ///
+    /// Off by default because it links a C library:
+    ///   RUSTFLAGS="-L/opt/homebrew/lib" cargo test -p keva-core --features liblz4
+    #[cfg(feature = "liblz4")]
+    #[test]
+    fn our_decoder_reads_what_liblz4_wrote() {
+        #[link(name = "lz4")]
+        extern "C" {
+            fn LZ4_compress_default(src: *const u8, dst: *mut u8, n: i32, cap: i32) -> i32;
+        }
+
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut noise_byte = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        };
+
+        let mut cases: Vec<Vec<u8>> = Vec::new();
+        for size in [1usize, 4, 15, 16, 17, 63, 64, 65, 1000, 4096, 65_536] {
+            cases.push(records(size));
+            cases.push(vec![b'a'; size]);
+            cases.push((0..size).map(|_| noise_byte()).collect());
+        }
+        cases.push(b"ab".repeat(3000));
+        cases.push(b"abcdefg".repeat(900));
+
+        let mut out = Vec::new();
+        for data in &cases {
+            let mut block = vec![0u8; data.len() + 1024];
+            let n = unsafe {
+                LZ4_compress_default(
+                    data.as_ptr(),
+                    block.as_mut_ptr(),
+                    data.len() as i32,
+                    block.len() as i32,
+                )
+            };
+            assert!(n > 0, "liblz4 refused {} bytes", data.len());
+            block.truncate(n as usize);
+
+            unpack_into(&block, &mut out, data.len())
+                .unwrap_or_else(|e| panic!("{} bytes from liblz4: {e}", data.len()));
+            assert_eq!(&out[..], &data[..], "differs on {} bytes", data.len());
+        }
+    }
+
     #[test]
     fn the_assembly_decoder_agrees_with_the_portable_one() {
         if !keva_asm::unpack::asm_available() {

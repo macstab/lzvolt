@@ -40,6 +40,37 @@ extern "C" {
     ) -> u32;
 }
 
+/// Decode into a caller-provided buffer, the way `LZ4_decompress_safe` is used.
+///
+/// The exact counterpart of the C entry point: a source, a destination, its
+/// capacity, and the uncompressed length. No allocation, no `Vec` bookkeeping,
+/// no `Result` — one call and a boolean. It exists so a decoder-against-decoder
+/// measurement has nothing but the two decoders in it.
+///
+/// `dst` must be at least `declared + UNPACK_SLACK` long; the kernel refuses
+/// otherwise. Returns whether it decoded; a `false` means the caller should run
+/// the portable decoder, exactly as with [`unpack_asm`].
+pub fn unpack_into_slice(src: &[u8], dst: &mut [u8], declared: usize) -> bool {
+    #[cfg(not(all(keva_asm, target_arch = "aarch64")))]
+    {
+        let _ = (src, dst, declared);
+        false
+    }
+
+    #[cfg(all(keva_asm, target_arch = "aarch64"))]
+    {
+        if declared == 0 {
+            return false;
+        }
+        // SAFETY: `dst.len()` is the true length of the buffer, and the kernel
+        // writes below it or returns zero.
+        let produced = unsafe {
+            keva_unpack(src.as_ptr(), src.len(), dst.as_mut_ptr(), dst.len(), declared)
+        } as usize;
+        produced == declared
+    }
+}
+
 /// Whether this build has an assembly decoder.
 pub const fn asm_available() -> bool {
     cfg!(all(keva_asm, target_arch = "aarch64"))

@@ -292,5 +292,60 @@ fn against_lz4(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, packing, packing_asm, sizes, unpacking, ratio, against_lz4);
+/// Both decoders over the identical LZ4 block.
+///
+/// Every other comparison in this file has a format difference somewhere in it:
+/// ours carries a length header, theirs does not, and the two packers make
+/// different blocks out of the same input. Here the bytes are the ones liblz4
+/// produced and each side is handed the uncompressed length the same way, so
+/// what is left is the decoder and nothing else.
+///
+///   RUSTFLAGS="-L/opt/homebrew/lib" cargo bench -p keva-core --features liblz4
+#[cfg(feature = "liblz4")]
+fn same_bytes(c: &mut Criterion) {
+    #[link(name = "lz4")]
+    extern "C" {
+        fn LZ4_compress_default(s: *const u8, d: *mut u8, n: i32, cap: i32) -> i32;
+        fn LZ4_decompress_safe(s: *const u8, d: *mut u8, n: i32, cap: i32) -> i32;
+    }
+
+    let mut group = c.benchmark_group("same_bytes");
+    for (label, data) in [
+        ("varied_4k", varied(4096)),
+        ("varied_64k", varied(65_536)),
+        ("records_4k", records(4096)),
+        ("records_64k", records(65_536)),
+    ] {
+        let mut block = vec![0u8; data.len() + 1024];
+        let n = unsafe {
+            LZ4_compress_default(data.as_ptr(), block.as_mut_ptr(), data.len() as i32, block.len() as i32)
+        };
+        assert!(n > 0);
+        block.truncate(n as usize);
+        let mut theirs = vec![0u8; data.len() + 64];
+        let mut mine = vec![0u8; data.len() + 64];
+
+        group.throughput(Throughput::Bytes(data.len() as u64));
+        // The same shape of call on both sides: a source, a destination and its
+        // size. No allocation, no Vec bookkeeping, no Result on either.
+        group.bench_function(BenchmarkId::new("keva", label), |b| {
+            b.iter(|| {
+                assert!(keva_asm::unpack::unpack_into_slice(
+                    black_box(&block), &mut mine, data.len()))
+            });
+        });
+        group.bench_function(BenchmarkId::new("liblz4", label), |b| {
+            b.iter(|| unsafe {
+                black_box(LZ4_decompress_safe(black_box(block.as_ptr()), theirs.as_mut_ptr(),
+                                              block.len() as i32, data.len() as i32))
+            });
+        });
+    }
+    group.finish();
+}
+
+#[cfg(not(feature = "liblz4"))]
+fn same_bytes(_: &mut Criterion) {}
+
+criterion_group!(benches, packing, packing_asm, sizes, unpacking, ratio, against_lz4, same_bytes);
 criterion_main!(benches);
