@@ -38,6 +38,28 @@ extern "C" {
         dst_cap: usize,
         declared: usize,
     ) -> u32;
+
+    /// The same decoder assembled for the wide split -- two bits of literal
+    /// length, six of match. See `asm/aarch64/unpack.S`.
+    fn keva_unpack_wide(
+        src: *const u8,
+        src_len: usize,
+        dst: *mut u8,
+        dst_cap: usize,
+        declared: usize,
+    ) -> u32;
+}
+
+/// Which way a value's token divides its eight bits.
+///
+/// Assembly is specialised per split rather than parameterised, so this selects
+/// between two kernels rather than setting a register in one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Split {
+    /// Four bits each, which is also the LZ4 block format.
+    Even,
+    /// Two for the literal run, six for the match.
+    WideMatch,
 }
 
 /// Decode into a caller-provided buffer, the way `LZ4_decompress_safe` is used.
@@ -50,10 +72,10 @@ extern "C" {
 /// `dst` must be at least `declared + UNPACK_SLACK` long; the kernel refuses
 /// otherwise. Returns whether it decoded; a `false` means the caller should run
 /// the portable decoder, exactly as with [`unpack_asm`].
-pub fn unpack_into_slice(src: &[u8], dst: &mut [u8], declared: usize) -> bool {
+pub fn unpack_into_slice(src: &[u8], dst: &mut [u8], declared: usize, split: Split) -> bool {
     #[cfg(not(all(keva_asm, target_arch = "aarch64")))]
     {
-        let _ = (src, dst, declared);
+        let _ = (src, dst, declared, split);
         false
     }
 
@@ -65,7 +87,14 @@ pub fn unpack_into_slice(src: &[u8], dst: &mut [u8], declared: usize) -> bool {
         // SAFETY: `dst.len()` is the true length of the buffer, and the kernel
         // writes below it or returns zero.
         let produced = unsafe {
-            keva_unpack(src.as_ptr(), src.len(), dst.as_mut_ptr(), dst.len(), declared)
+            match split {
+                Split::Even => {
+                    keva_unpack(src.as_ptr(), src.len(), dst.as_mut_ptr(), dst.len(), declared)
+                }
+                Split::WideMatch => {
+                    keva_unpack_wide(src.as_ptr(), src.len(), dst.as_mut_ptr(), dst.len(), declared)
+                }
+            }
         } as usize;
         produced == declared
     }
@@ -83,10 +112,10 @@ pub const fn asm_available() -> bool {
 /// kernel on this target, or the kernel declined. It never means the value is
 /// definitely corrupt, so the caller must fall back rather than report an
 /// error.
-pub fn unpack_asm(body: &[u8], out: &mut Vec<u8>, declared: usize) -> bool {
+pub fn unpack_asm(body: &[u8], out: &mut Vec<u8>, declared: usize, split: Split) -> bool {
     #[cfg(not(all(keva_asm, target_arch = "aarch64")))]
     {
-        let _ = (body, out, declared);
+        let _ = (body, out, declared, split);
         false
     }
 
@@ -108,13 +137,14 @@ pub fn unpack_asm(body: &[u8], out: &mut Vec<u8>, declared: usize) -> bool {
         // Nothing reads the slack: the length only moves out to `declared`, and
         // every byte below it was written by this call.
         let produced = unsafe {
-            keva_unpack(
-                body.as_ptr(),
-                body.len(),
-                out.as_mut_ptr(),
-                cap,
-                declared,
-            )
+            match split {
+                Split::Even => {
+                    keva_unpack(body.as_ptr(), body.len(), out.as_mut_ptr(), cap, declared)
+                }
+                Split::WideMatch => {
+                    keva_unpack_wide(body.as_ptr(), body.len(), out.as_mut_ptr(), cap, declared)
+                }
+            }
         } as usize;
 
         if produced != declared {

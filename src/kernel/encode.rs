@@ -123,6 +123,9 @@ extern "C" {
 ///
 /// `table` must have come from [`new_table`], or from an earlier call to this
 /// function. A zero-filled one is unsound -- see [`EMPTY`].
+/// The kernel writes the even split only. A value whose matches keep
+/// overflowing four bits is packed by the portable packer instead, which is
+/// where the choice between the two splits is made.
 pub fn pack_asm(input: &[u8], out: &mut Vec<u8>, table: &mut [u32]) -> Option<usize> {
     debug_assert!(table.len() >= TABLE_SIZE);
 

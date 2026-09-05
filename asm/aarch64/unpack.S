@@ -40,7 +40,7 @@
  *
  * The fast path reads at most one token, fourteen literals, two offset bytes
  * and one 32-byte block: 49 bytes from the cursor. Rather than recompute that
- * per block, `.Lentry` derives the cursor at which it stops holding and the
+ * per block, `L(entry)` derives the cursor at which it stops holding and the
  * loop compares against it. Past that point the tail runs on the exact path.
  *
  *   OVERRUN 32   FAST_LITERAL 16   MIN_MATCH 4   MAX_UNPACKED 512 MiB
@@ -48,9 +48,61 @@
 
 #include "../common.h"
 
+/*
+ * Two specialisations, one body.
+ *
+ * The token's bits are divided one way for most data and another for data that
+ * compresses well, and which one a value uses is in its header. Assembly does
+ * not take that as a parameter -- it takes it as a second copy of the code,
+ * because a register holding the shift would sit on the critical path of every
+ * block for the whole length of the value.
+ *
+ * So this file is assembled twice, once per split, with every local label run
+ * through L() to keep the two sets apart. build.rs does the second pass with
+ * -DKEVA_WIDE.
+ *
+ *   even (LZ4's own, and what a block liblz4 wrote uses)
+ *       four bits each: literal runs to 14, match lengths to 18
+ *   wide
+ *       two and six: literal runs to 2, match lengths to 66
+ *
+ * The wide one exists because counting real blocks says the match length
+ * overflows four bits in 99% of them on data that compresses six-fold. Six bits
+ * take that to zero.
+ */
+#ifdef KEVA_WIDE
+#  define KEVA_PFX   w
+#  define KEVA_ENTRY keva_unpack_wide
+#  define LIT_SHIFT  6
+#  define LIT_MAX    3
+#  define MAT_MAX    63
+#  define MAT_CAP    67                 /* MAT_MAX + MIN_MATCH */
+#else
+#  define KEVA_PFX   e
+#  define KEVA_ENTRY keva_unpack
+#  define LIT_SHIFT  4
+#  define LIT_MAX    15
+#  define MAT_MAX    15
+#  define MAT_CAP    19
+#endif
+
+/*
+ * KEVA_SYM pastes with ##, which means its argument is not expanded first --
+ * KEVA_NAME(KEVA_ENTRY) would name the symbol after the macro rather than after
+ * what it stands for. One more level fixes it, because an argument to a macro
+ * that does not paste is expanded before substitution.
+ */
+#define KEVA_NAME1(n) KEVA_SYM(n)
+#define KEVA_NAME(n) KEVA_NAME1(n)
+
+#define L2(p, n) .L ## p ## _ ## n
+#define L1(p, n) L2(p, n)
+#define L(n) L1(KEVA_PFX, n)
+
+
     .text
     .p2align 4
-    .globl KEVA_SYM(keva_unpack)
+    .globl KEVA_NAME(KEVA_ENTRY)
 
 /*
  * Register map, held across the whole call:
@@ -63,7 +115,7 @@
  * The helpers below are called from the loop, so what each one is allowed to
  * destroy is part of its contract:
  *
- *   .Lexact  x0, x1, x2, x4, x6      .Lrepeat  x0-x7
+ *   L(exact)  x0, x1, x2, x4, x6      L(repeat)  x0-x7
  *
  * The extended-length reader and the block copier used to be two more of these
  * and are now written out at each of their four sites. On data that compresses
@@ -74,7 +126,7 @@
  * Everything the loop needs across a call therefore lives in x11-x17 or in a
  * callee-saved register.
  */
-KEVA_SYM(keva_unpack):
+KEVA_NAME(KEVA_ENTRY):
     stp     x29, x30, [sp, #-96]!
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
@@ -88,11 +140,11 @@ KEVA_SYM(keva_unpack):
     mov     x21, x2
     mov     x22, x4
 
-.Lentry:
+L(entry):
     // The one capacity check. Everything below leans on it.
     add     x5, x22, #64
     cmp     x3, x5
-    b.lo    .Lfail
+    b.lo    L(fail)
 
     mov     x23, #0                     // at
     mov     x24, #0                     // produced
@@ -124,9 +176,11 @@ KEVA_SYM(keva_unpack):
      * Both clamp to zero for a value too small to hold one block, which then
      * runs entirely on the checked loop.
      */
+    // Seventeen whatever the split: the block reads a token and then sixteen
+    // bytes of literals unconditionally, and the offset sits inside that reach.
     subs    x25, x20, #17               // input limit
     csel    x25, x25, xzr, hs
-    subs    x28, x22, #32               // output limit
+    subs    x28, x22, #(LIT_MAX + MAT_CAP)  // output limit
     csel    x28, x28, xzr, hs
 
 /*
@@ -149,15 +203,15 @@ KEVA_SYM(keva_unpack):
  * instructions, it was in where the decision lived.
  */
     .p2align 4
-.Lfast:
+L(fast):
     cmp     x23, x25
-    b.hs    .Ltail
+    b.hs    L(tail)
     cmp     x24, x28
-    b.hs    .Ltail
+    b.hs    L(tail)
 
     ldrb    w4, [x19, x23]              // token
-    lsr     w5, w4, #4                  // literal nibble
-    and     w26, w4, #15                // match nibble, kept across helpers
+    lsr     w5, w4, #LIT_SHIFT                  // literal nibble
+    and     w26, w4, #MAT_MAX                // match nibble, kept across helpers
 
     /*
      * Only the literal nibble gates the block now.
@@ -170,8 +224,8 @@ KEVA_SYM(keva_unpack):
      */
     /* ---- the common block -------------------------------------------- */
     add     x7, x23, #1                 // literals start here
-    cmp     w5, #15
-    b.eq    .Lfast_litlong
+    cmp     w5, #LIT_MAX
+    b.eq    L(fast_litlong)
 
     add     x8, x7, x5                  // the offset follows the literals
     add     x16, x24, x5                // output position after them
@@ -182,12 +236,12 @@ KEVA_SYM(keva_unpack):
     ldr     q0, [x19, x7]
     str     q0, [x21, x24]
 
-.Lfast_offset:
+L(fast_offset):
     ldrh    w11, [x19, x8]              // offset
     add     x23, x8, #2                 // cursor past it
 
-    cmp     w26, #15
-    b.eq    .Lfast_long
+    cmp     w26, #MAT_MAX
+    b.eq    L(fast_long)
 
     add     x14, x26, #4                // match length
     add     x12, x16, x14               // and after the match
@@ -195,32 +249,47 @@ KEVA_SYM(keva_unpack):
     // Only the offset is still worth asking about. A short block lays down at
     // most fourteen literals and eighteen match bytes, and the zone holds the
     // cursor sixty-four short of the declared length, so it cannot overrun.
-    cbz     w11, .Lfail
+    cbz     w11, L(fail)
     cmp     x11, x16
-    b.hi    .Lfail                      // reaches back before the output
+    b.hi    L(fail)                      // reaches back before the output
 
-.Lfast_copy:
+L(fast_copy):
     add     x13, x21, x16               // where the match is written
     sub     x15, x13, x11               // and where it is read from
-    cmp     x11, #32
-    b.lo    .Lfast_near
+    /*
+     * Far enough back that the bytes this reads are all already written, which
+     * is what makes a straight move correct -- and that is the offset against
+     * the match length, not against the width of the move.
+     *
+     * The move covers the longest match this split can carry without an
+     * extension: one vector pair under the even split, two under the wide one,
+     * where a match runs to 66 bytes.
+     */
+    cmp     x11, x14
+    b.lo    L(fast_near)
 
-    // Far enough back that source and destination cannot overlap within one
-    // block, so the widest move available is also the correct one.
     ldp     q0, q1, [x15]
     stp     q0, q1, [x13]
+#if MAT_CAP > 32
+    ldp     q2, q3, [x15, #32]
+    stp     q2, q3, [x13, #32]
+#endif
+#if MAT_CAP > 64
+    ldp     q4, q5, [x15, #64]
+    stp     q4, q5, [x13, #64]
+#endif
 
     mov     x24, x12
-    b       .Lfast
+    b       L(fast)
 
-.Lfast_near:
+L(fast_near):
     mov     x0, x13
     mov     x1, x15
     mov     x2, x11
     mov     x3, x14
-    bl      .Lrepeat
+    bl      L(repeat)
     mov     x24, x12
-    b       .Lfast
+    b       L(fast)
 
 /*
  * A long literal run, still inside the loop.
@@ -238,22 +307,22 @@ KEVA_SYM(keva_unpack):
  * run longer than that is rare enough to leave to the checked path, which is
  * also where the multi-byte length encoding belongs.
  */
-.Lfast_litlong:
+L(fast_litlong):
     add     x9, x23, #1
     ldrb    w10, [x19, x9]              // the zone covers this byte already
     cmp     w10, #255
-    b.eq    .Lslow                      // a run past 269 bytes
-    add     x12, x10, #15               // the length this run would have
+    b.eq    L(slow)                      // a run past 269 bytes
+    add     x12, x10, #LIT_MAX               // the length this run would have
     add     x7, x23, #2                 // and it starts past the length byte
 
     add     x9, x7, x12
     add     x9, x9, #32
     cmp     x9, x20
-    b.hi    .Lslow                      // the run, or its block copy, runs off
+    b.hi    L(slow)                      // the run, or its block copy, runs off
     add     x16, x24, x12
     add     x9, x16, #32
     cmp     x9, x22
-    b.hi    .Lslow                      // no room for a following block
+    b.hi    L(slow)                      // no room for a following block
 
     // Committed only here. Every exit above goes to the checked path, which
     // re-reads the token and expects the nibble still to say fifteen -- writing
@@ -264,15 +333,15 @@ KEVA_SYM(keva_unpack):
     add     x0, x21, x24
     add     x1, x19, x7
     mov     x9, #0
-.Lfast_litblk:
+L(fast_litblk):
     ldp     q0, q1, [x1]
     stp     q0, q1, [x0]
     add     x9, x9, #32
     cmp     x9, x5
-    b.hs    .Lfast_offset
+    b.hs    L(fast_offset)
     add     x1, x1, #32
     add     x0, x0, #32
-    b       .Lfast_litblk
+    b       L(fast_litblk)
 
 /*
  * A long match, still inside the loop.
@@ -287,75 +356,75 @@ KEVA_SYM(keva_unpack):
  * 1.4 literals. Sending them to the general writer meant the zone bought
  * nothing on exactly the shape it was built for.
  */
-.Lfast_long:
-    mov     x14, #15
+L(fast_long):
+    mov     x14, #MAT_MAX
     mov     x8, #0
-.Lfast_lenbyte:
+L(fast_lenbyte):
     cmp     x23, x20
-    b.hs    .Lfail
+    b.hs    L(fail)
     ldrb    w9, [x19, x23]
     add     x23, x23, #1
     add     x8, x8, x9
     cmp     w9, #255
-    b.ne    .Lfast_lendone
+    b.ne    L(fast_lendone)
     mov     x10, #0x20000000            // MAX_UNPACKED, 512 MiB
     cmp     x8, x10
-    b.hi    .Lfail
-    b       .Lfast_lenbyte
-.Lfast_lendone:
+    b.hi    L(fail)
+    b       L(fast_lenbyte)
+L(fast_lendone):
     add     x14, x14, x8
     add     x14, x14, #4                // match length
     add     x12, x16, x14
 
-    cbz     w11, .Lfail
+    cbz     w11, L(fail)
     cmp     x11, x16
-    b.hi    .Lfail
+    b.hi    L(fail)
     cmp     x12, x22
-    b.hi    .Lfail                      // an unbounded length can overrun
+    b.hi    L(fail)                      // an unbounded length can overrun
 
     add     x13, x21, x16
     sub     x15, x13, x11
     cmp     x11, #32
-    b.lo    .Lfast_near
+    b.lo    L(fast_near)
 
     // Long enough to be worth the block loop, and far enough back to use it.
     mov     x5, #0
-.Lfast_longblk:
+L(fast_longblk):
     ldp     q0, q1, [x15]
     stp     q0, q1, [x13]
     add     x5, x5, #32
     cmp     x5, x14
-    b.hs    .Lfast_longout
+    b.hs    L(fast_longout)
     add     x15, x15, #32
     add     x13, x13, #32
-    b       .Lfast_longblk
-.Lfast_longout:
+    b       L(fast_longblk)
+L(fast_longout):
     mov     x24, x12
-    b       .Lfast
+    b       L(fast)
 
     /*
      * Outside the zone: the same format, every question asked again.
      *
      * Reached once per value, when either cursor nears its buffer. It does not
-     * hand back -- the general writer below returns to `.Lfast`, which re-tests
+     * hand back -- the general writer below returns to `L(fast)`, which re-tests
      * the zone and arrives here again. One test rather than two paths.
      */
-.Ltail:
+L(tail):
     cmp     x24, x22
-    b.hs    .Ldone
+    b.hs    L(done)
     cmp     x23, x20
-    b.hs    .Lfail
+    b.hs    L(fail)
     ldrb    w4, [x19, x23]              // token
-    lsr     w5, w4, #4
-    and     w26, w4, #15
+    lsr     w5, w4, #LIT_SHIFT
+    and     w26, w4, #MAT_MAX
 
     /* ---- one block, whatever its lengths ----------------------------- */
-.Lslow:
+L(slow):
     add     x23, x23, #1
 
     mov     x15, x5                     // literal length
-    cmp     x5, #15
-    b.ne    .Lslow_lit_ready
+    cmp     x5, #LIT_MAX
+    b.ne    L(slow_lit_ready)
     /*
      * The extended length, read here rather than called.
      *
@@ -365,31 +434,31 @@ KEVA_SYM(keva_unpack):
      * the same reason.
      */
     mov     x8, #0
-.Llitlen_byte:
+L(litlen_byte):
     cmp     x23, x20
-    b.hs    .Lfail
+    b.hs    L(fail)
     ldrb    w9, [x19, x23]
     add     x23, x23, #1
     add     x8, x8, x9
     cmp     w9, #255
-    b.ne    .Llitlen_done
+    b.ne    L(litlen_done)
     // A run of 255s on a corrupt stream would otherwise spin until it wrapped.
     mov     x10, #0x20000000            // MAX_UNPACKED, 512 MiB
     cmp     x8, x10
-    b.hi    .Lfail
-    b       .Llitlen_byte
-.Llitlen_done:
+    b.hi    L(fail)
+    b       L(litlen_byte)
+L(litlen_done):
     add     x15, x15, x8
 
-.Lslow_lit_ready:
+L(slow_lit_ready):
     add     x16, x23, x15               // one past the literals
     cmp     x16, x20
-    b.hi    .Lfail                      // the run runs off the input
+    b.hi    L(fail)                      // the run runs off the input
     add     x17, x24, x15
     cmp     x17, x22
-    b.hi    .Lfail                      // more output than was declared
+    b.hi    L(fail)                      // more output than was declared
 
-    cbz     x15, .Lslow_lit_done
+    cbz     x15, L(slow_lit_done)
     add     x0, x21, x24
     add     x1, x19, x23
 
@@ -407,57 +476,57 @@ KEVA_SYM(keva_unpack):
      * bytes of the end of the stream.
      */
     cmp     x15, #16
-    b.hi    .Lslow_lit_wide
+    b.hi    L(slow_lit_wide)
     add     x9, x23, #16
     cmp     x9, x20
-    b.hi    .Lslow_lit_narrow
+    b.hi    L(slow_lit_narrow)
     ldr     q0, [x1]
     str     q0, [x0]
-    b       .Lslow_lit_done
-.Lslow_lit_narrow:
+    b       L(slow_lit_done)
+L(slow_lit_narrow):
     mov     x2, x15
-    bl      .Lexact
-    b       .Lslow_lit_done
+    bl      L(exact)
+    b       L(slow_lit_done)
 
     // Wide while a whole block is readable from the input, exact for the tail:
     // overrunning the input would read memory that is not ours. The output side
     // needs no test -- see the header.
-.Lslow_lit_wide:
+L(slow_lit_wide):
     add     x9, x16, #32
     cmp     x9, x20
     mov     x2, x15
-    b.hi    .Lslow_lit_exact
+    b.hi    L(slow_lit_exact)
     mov     x5, #0
-.Llitcp_block:
+L(litcp_block):
     ldp     q0, q1, [x1]
     stp     q0, q1, [x0]
     add     x5, x5, #32
     cmp     x5, x2
-    b.hs    .Llitcp_out
+    b.hs    L(litcp_out)
     add     x1, x1, #32
     add     x0, x0, #32
-    b       .Llitcp_block
-.Llitcp_out:
-    b       .Lslow_lit_done
-.Lslow_lit_exact:
-    bl      .Lexact
+    b       L(litcp_block)
+L(litcp_out):
+    b       L(slow_lit_done)
+L(slow_lit_exact):
+    bl      L(exact)
 
-.Lslow_lit_done:
+L(slow_lit_done):
     mov     x24, x17
     mov     x23, x16
 
     cmp     x24, x22
-    b.hs    .Ldone                      // the value ends on a literal run
+    b.hs    L(done)                      // the value ends on a literal run
 
     add     x9, x23, #2
     cmp     x9, x20
-    b.hi    .Lfail
+    b.hi    L(fail)
     ldrh    w11, [x19, x23]             // offset, kept clear of the length reader
     mov     x23, x9
 
     mov     x14, x26                    // match length, less MIN_MATCH
-    cmp     x26, #15
-    b.ne    .Lslow_mat_ready
+    cmp     x26, #MAT_MAX
+    b.ne    L(slow_mat_ready)
     /*
      * The extended length, read here rather than called.
      *
@@ -467,69 +536,69 @@ KEVA_SYM(keva_unpack):
      * the same reason.
      */
     mov     x8, #0
-.Lmatlen_byte:
+L(matlen_byte):
     cmp     x23, x20
-    b.hs    .Lfail
+    b.hs    L(fail)
     ldrb    w9, [x19, x23]
     add     x23, x23, #1
     add     x8, x8, x9
     cmp     w9, #255
-    b.ne    .Lmatlen_done
+    b.ne    L(matlen_done)
     // A run of 255s on a corrupt stream would otherwise spin until it wrapped.
     mov     x10, #0x20000000            // MAX_UNPACKED, 512 MiB
     cmp     x8, x10
-    b.hi    .Lfail
-    b       .Lmatlen_byte
-.Lmatlen_done:
+    b.hi    L(fail)
+    b       L(matlen_byte)
+L(matlen_done):
     add     x14, x14, x8
-.Lslow_mat_ready:
+L(slow_mat_ready):
     add     x14, x14, #4
 
-    cbz     w11, .Lfail
+    cbz     w11, L(fail)
     cmp     x11, x24
-    b.hi    .Lfail
+    b.hi    L(fail)
     add     x12, x24, x14
     cmp     x12, x22
-    b.hi    .Lfail
+    b.hi    L(fail)
 
     add     x13, x21, x24
     sub     x15, x13, x11
     cmp     x11, #32
-    b.lo    .Lslow_near
+    b.lo    L(slow_near)
 
     mov     x2, x14
     mov     x5, #0
-.Lmatcp_block:
+L(matcp_block):
     ldp     q0, q1, [x15]
     stp     q0, q1, [x13]
     add     x5, x5, #32
     cmp     x5, x2
-    b.hs    .Lmatcp_out
+    b.hs    L(matcp_out)
     add     x15, x15, #32
     add     x13, x13, #32
-    b       .Lmatcp_block
-.Lmatcp_out:
+    b       L(matcp_block)
+L(matcp_out):
     mov     x24, x12
-    b       .Lfast
+    b       L(fast)
 
-.Lslow_near:
+L(slow_near):
     mov     x0, x13
     mov     x1, x15
     mov     x2, x11
     mov     x3, x14
-    bl      .Lrepeat
+    bl      L(repeat)
     mov     x24, x12
-    b       .Lfast
+    b       L(fast)
 
-.Ldone:
+L(done):
     cmp     x24, x22
-    b.ne    .Lfail
+    b.ne    L(fail)
     mov     w0, w22
-    b       .Lreturn
+    b       L(return)
 
-.Lfail:
+L(fail):
     mov     w0, wzr
-.Lreturn:
+L(return):
     ldp     x27, x28, [sp, #80]
     ldp     x25, x26, [sp, #64]
     ldp     x23, x24, [sp, #48]
@@ -546,38 +615,38 @@ KEVA_SYM(keva_unpack):
  * bytes the next step is about to read. Widest first, then one rung per
  * remaining bit. A leaf. Clobbers x0, x1, x2, x4, x6, v0, v1.
  */
-.Lexact:
+L(exact):
     mov     x6, x2
-.Lex_32:
+L(ex_32):
     cmp     x6, #32
-    b.lo    .Lex_16
+    b.lo    L(ex_16)
     ldp     q0, q1, [x1]
     stp     q0, q1, [x0]
     add     x1, x1, #32
     add     x0, x0, #32
     sub     x6, x6, #32
-    b       .Lex_32
-.Lex_16:
-    tbz     x6, #4, .Lex_8
+    b       L(ex_32)
+L(ex_16):
+    tbz     x6, #4, L(ex_8)
     ldr     q0, [x1], #16
     str     q0, [x0], #16
-.Lex_8:
-    tbz     x6, #3, .Lex_4
+L(ex_8):
+    tbz     x6, #3, L(ex_4)
     ldr     x4, [x1], #8
     str     x4, [x0], #8
-.Lex_4:
-    tbz     x6, #2, .Lex_2
+L(ex_4):
+    tbz     x6, #2, L(ex_2)
     ldr     w4, [x1], #4
     str     w4, [x0], #4
-.Lex_2:
-    tbz     x6, #1, .Lex_1
+L(ex_2):
+    tbz     x6, #1, L(ex_1)
     ldrh    w4, [x1], #2
     strh    w4, [x0], #2
-.Lex_1:
-    tbz     x6, #0, .Lex_ret
+L(ex_1):
+    tbz     x6, #0, L(ex_ret)
     ldrb    w4, [x1]
     strb    w4, [x0]
-.Lex_ret:
+L(ex_ret):
     ret
 
 /*
@@ -595,48 +664,48 @@ KEVA_SYM(keva_unpack):
  * -- padding, zero fill, long spaces -- and `dup` produces sixteen copies of it
  * in one instruction where the doubling would take four rounds to get there.
  *
- * Not a leaf: it calls .Lexact, so x30 is saved. Clobbers x0-x7, v0, v1, and
- * relies on .Lexact leaving x3, x5 and x7 alone.
+ * Not a leaf: it calls L(exact), so x30 is saved. Clobbers x0-x7, v0, v1, and
+ * relies on L(exact) leaving x3, x5 and x7 alone.
  */
-.Lrepeat:
+L(repeat):
     stp     x29, x30, [sp, #-32]!
     mov     x29, sp
     stp     x0, x1, [sp, #16]           // destination base and source
 
     cmp     x2, #1
-    b.ne    .Lrep_double
+    b.ne    L(rep_double)
 
     ld1r    {v0.16b}, [x1]
     mov     x5, #0
-.Lrep_splat:
+L(rep_splat):
     str     q0, [x0, x5]
     add     x5, x5, #16
     cmp     x5, x3
-    b.lo    .Lrep_splat
-    b       .Lrep_ret
+    b.lo    L(rep_splat)
+    b       L(rep_ret)
 
-.Lrep_double:
+L(rep_double):
     mov     x7, x2                      // this step's width
     mov     x5, #0                      // written so far
-.Lrep_step:
+L(rep_step):
     sub     x6, x3, x5                  // still owed
     cmp     x7, x6
     csel    x6, x7, x6, lo              // take = min(width, owed)
     ldp     x0, x1, [sp, #16]
     add     x0, x0, x5
     mov     x2, x6
-    // Advanced before the call, because .Lexact is free to destroy x2 and x6.
+    // Advanced before the call, because L(exact) is free to destroy x2 and x6.
     add     x5, x5, x6
     lsl     x7, x7, #1
-    bl      .Lexact
+    bl      L(exact)
     cmp     x5, x3
-    b.lo    .Lrep_step
+    b.lo    L(rep_step)
 
-.Lrep_ret:
+L(rep_ret):
     ldp     x29, x30, [sp], #32
     ret
 
 #if !defined(__APPLE__)
-    .size KEVA_SYM(keva_unpack), . - KEVA_SYM(keva_unpack)
+    .size KEVA_NAME(KEVA_ENTRY), . - KEVA_NAME(KEVA_ENTRY)
     .section .note.GNU-stack, "", %progbits
 #endif

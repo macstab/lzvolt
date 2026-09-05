@@ -77,8 +77,13 @@ KEVA_SYM(keva_pack):
     mov     x25, #0                     // at
     mov     x26, #64                    // misses = 1 << SKIP_TRIGGER
 
-    /* ---- header: LEB128 of src_len ---------------------------------- */
-    mov     x9, x20
+    /*
+     * Header: LEB128 of the length, shifted up by one to leave room for the
+     * split bit. This kernel only emits the even split, so the bit is zero --
+     * a value that wants the wide match is packed by the portable packer,
+     * which is the one that decides.
+     */
+    lsl     x9, x20, #1
 .Lvarint:
     and     w10, w9, #0x7F
     lsr     x9, x9, #7
