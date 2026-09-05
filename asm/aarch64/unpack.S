@@ -63,8 +63,13 @@
  * The helpers below are called from the loop, so what each one is allowed to
  * destroy is part of its contract:
  *
- *   .Lextended  x8, x9, x10          .Lwild    x0, x1, x5
- *   .Lexact     x0, x1, x2, x4, x6   .Lrepeat  x0-x7
+ *   .Lexact  x0, x1, x2, x4, x6      .Lrepeat  x0-x7
+ *
+ * The extended-length reader and the block copier used to be two more of these
+ * and are now written out at each of their four sites. On data that compresses
+ * well they ran once or twice per block, and a call for them is a branch out, a
+ * branch back and a return-stack slot -- which measured 18% of the decoder on
+ * such data. liblz4 carries both as self-loops inside its decode loop.
  *
  * Everything the loop needs across a call therefore lives in x11-x17 or in a
  * callee-saved register.
@@ -210,7 +215,29 @@ KEVA_SYM(keva_unpack):
     mov     x15, x5                     // literal length
     cmp     x5, #15
     b.ne    .Lslow_lit_ready
-    bl      .Lextended
+    /*
+     * The extended length, read here rather than called.
+     *
+     * On data that compresses well this runs once per block, and a call for it
+     * is a branch out, a branch back and a return-stack slot to move at most a
+     * couple of bytes. liblz4 has it as a self-loop inside its decode loop for
+     * the same reason.
+     */
+    mov     x8, #0
+.Llitlen_byte:
+    cmp     x23, x20
+    b.hs    .Lfail
+    ldrb    w9, [x19, x23]
+    add     x23, x23, #1
+    add     x8, x8, x9
+    cmp     w9, #255
+    b.ne    .Llitlen_done
+    // A run of 255s on a corrupt stream would otherwise spin until it wrapped.
+    mov     x10, #0x20000000            // MAX_UNPACKED, 512 MiB
+    cmp     x8, x10
+    b.hi    .Lfail
+    b       .Llitlen_byte
+.Llitlen_done:
     add     x15, x15, x8
 
 .Lslow_lit_ready:
@@ -232,7 +259,17 @@ KEVA_SYM(keva_unpack):
     add     x1, x19, x23
     mov     x2, x15
     b.hi    .Lslow_lit_exact
-    bl      .Lwild
+    mov     x5, #0
+.Llitcp_block:
+    ldp     q0, q1, [x1]
+    stp     q0, q1, [x0]
+    add     x5, x5, #32
+    cmp     x5, x2
+    b.hs    .Llitcp_out
+    add     x1, x1, #32
+    add     x0, x0, #32
+    b       .Llitcp_block
+.Llitcp_out:
     b       .Lslow_lit_done
 .Lslow_lit_exact:
     bl      .Lexact
@@ -247,13 +284,35 @@ KEVA_SYM(keva_unpack):
     add     x9, x23, #2
     cmp     x9, x20
     b.hi    .Lfail
-    ldrh    w11, [x19, x23]             // offset, kept clear of .Lextended
+    ldrh    w11, [x19, x23]             // offset, kept clear of the length reader
     mov     x23, x9
 
     mov     x14, x26                    // match length, less MIN_MATCH
     cmp     x26, #15
     b.ne    .Lslow_mat_ready
-    bl      .Lextended
+    /*
+     * The extended length, read here rather than called.
+     *
+     * On data that compresses well this runs once per block, and a call for it
+     * is a branch out, a branch back and a return-stack slot to move at most a
+     * couple of bytes. liblz4 has it as a self-loop inside its decode loop for
+     * the same reason.
+     */
+    mov     x8, #0
+.Lmatlen_byte:
+    cmp     x23, x20
+    b.hs    .Lfail
+    ldrb    w9, [x19, x23]
+    add     x23, x23, #1
+    add     x8, x8, x9
+    cmp     w9, #255
+    b.ne    .Lmatlen_done
+    // A run of 255s on a corrupt stream would otherwise spin until it wrapped.
+    mov     x10, #0x20000000            // MAX_UNPACKED, 512 MiB
+    cmp     x8, x10
+    b.hi    .Lfail
+    b       .Lmatlen_byte
+.Lmatlen_done:
     add     x14, x14, x8
 .Lslow_mat_ready:
     add     x14, x14, #4
@@ -270,10 +329,18 @@ KEVA_SYM(keva_unpack):
     cmp     x11, #32
     b.lo    .Lslow_near
 
-    mov     x0, x13
-    mov     x1, x15
     mov     x2, x14
-    bl      .Lwild
+    mov     x5, #0
+.Lmatcp_block:
+    ldp     q0, q1, [x15]
+    stp     q0, q1, [x13]
+    add     x5, x5, #32
+    cmp     x5, x2
+    b.hs    .Lmatcp_out
+    add     x15, x15, #32
+    add     x13, x13, #32
+    b       .Lmatcp_block
+.Lmatcp_out:
     mov     x24, x12
     b       .Lfast
 
@@ -301,59 +368,6 @@ KEVA_SYM(keva_unpack):
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
     ldp     x29, x30, [sp], #96
-    ret
-
-/*
- * Read an extended length: 255s until a smaller byte, summed.
- *
- *   in  x23 cursor, advanced past what it reads
- *   out x8  the sum
- *   leaves through .Lfail on a truncated or runaway stream
- *
- * Clobbers x8, x9, x10. Called from two places, so it keeps a frame.
- */
-.Lextended:
-    stp     x29, x30, [sp, #-16]!
-    mov     x8, #0
-.Lext_byte:
-    cmp     x23, x20
-    b.hs    .Lext_fail
-    ldrb    w9, [x19, x23]
-    add     x23, x23, #1
-    add     x8, x8, x9
-    cmp     w9, #255
-    b.ne    .Lext_done
-    // A run of 255s on a corrupt stream would otherwise spin until it wrapped.
-    mov     x10, #0x20000000            // MAX_UNPACKED, 512 MiB
-    cmp     x8, x10
-    b.hi    .Lext_fail
-    b       .Lext_byte
-.Lext_done:
-    ldp     x29, x30, [sp], #16
-    ret
-.Lext_fail:
-    ldp     x29, x30, [sp], #16
-    b       .Lfail
-
-/*
- * Copy `x2` bytes from `x1` to `x0` in whole 32-byte blocks.
- *
- * Overruns to the end of the block it is in, which is the entire point: the
- * caller has established the slack, so the last block needs no trimming and the
- * loop needs no tail. A leaf. Clobbers x0, x1, x5, v0, v1.
- */
-.Lwild:
-    mov     x5, #0
-.Lwild_block:
-    ldp     q0, q1, [x1]
-    stp     q0, q1, [x0]
-    add     x5, x5, #32
-    cmp     x5, x2
-    b.hs    .Lwild_ret
-    add     x1, x1, #32
-    add     x0, x0, #32
-    b       .Lwild_block
-.Lwild_ret:
     ret
 
 /*
