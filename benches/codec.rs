@@ -275,10 +275,12 @@ fn against_lz4(c: &mut Criterion) {
 
         let packed = lz4_flex::compress(&data);
         let original = data.len();
+        // Into a buffer that outlives the loop, because our own decompress
+        // benchmark reuses its output too. `decompress` would allocate and free
+        // a `Vec` inside every iteration and charge LZ4 for it.
+        let mut out = vec![0u8; original + 64];
         group.bench_function(BenchmarkId::new("decompress", label), |b| {
-            b.iter(|| {
-                black_box(lz4_flex::decompress(black_box(&packed), original).unwrap());
-            });
+            b.iter(|| black_box(lz4_flex::block::decompress_into(black_box(&packed), &mut out)));
         });
 
         eprintln!(
@@ -323,6 +325,7 @@ fn same_bytes(c: &mut Criterion) {
         assert!(n > 0);
         block.truncate(n as usize);
         let mut theirs = vec![0u8; data.len() + 64];
+        let mut flex = vec![0u8; data.len() + 64];
         let mut mine = vec![0u8; data.len() + 64];
 
         group.throughput(Throughput::Bytes(data.len() as u64));
@@ -330,11 +333,11 @@ fn same_bytes(c: &mut Criterion) {
         // size. No allocation, no Vec bookkeeping, no Result on either.
         // Checked once, outside the loop, so the timed body is the same shape
         // on both sides: one call, and the result handed to `black_box`.
-        assert!(keva_asm::unpack::unpack_into_slice(&block, &mut mine, data.len()));
+        assert!(keva_asm::unpack::unpack_into_slice(&block, &mut mine, data.len(), keva_asm::unpack::Split::Even));
         group.bench_function(BenchmarkId::new("keva", label), |b| {
             b.iter(|| {
                 black_box(keva_asm::unpack::unpack_into_slice(
-                    black_box(&block), &mut mine, data.len()))
+                    black_box(&block), &mut mine, data.len(), keva_asm::unpack::Split::Even))
             });
         });
         group.bench_function(BenchmarkId::new("liblz4", label), |b| {
@@ -342,6 +345,13 @@ fn same_bytes(c: &mut Criterion) {
                 black_box(LZ4_decompress_safe(black_box(block.as_ptr()), theirs.as_mut_ptr(),
                                               block.len() as i32, data.len() as i32))
             });
+        });
+        // `decompress_into` rather than `decompress`, so this arm reuses its
+        // buffer like the other two instead of allocating one per call. The
+        // crate is built without `safe-decode`, which is its fast path.
+        assert_eq!(lz4_flex::block::decompress_into(&block, &mut flex).unwrap(), data.len());
+        group.bench_function(BenchmarkId::new("lz4_flex", label), |b| {
+            b.iter(|| black_box(lz4_flex::block::decompress_into(black_box(&block), &mut flex)));
         });
     }
     group.finish();
