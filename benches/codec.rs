@@ -328,9 +328,12 @@ fn same_bytes(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(data.len() as u64));
         // The same shape of call on both sides: a source, a destination and its
         // size. No allocation, no Vec bookkeeping, no Result on either.
+        // Checked once, outside the loop, so the timed body is the same shape
+        // on both sides: one call, and the result handed to `black_box`.
+        assert!(keva_asm::unpack::unpack_into_slice(&block, &mut mine, data.len()));
         group.bench_function(BenchmarkId::new("keva", label), |b| {
             b.iter(|| {
-                assert!(keva_asm::unpack::unpack_into_slice(
+                black_box(keva_asm::unpack::unpack_into_slice(
                     black_box(&block), &mut mine, data.len()))
             });
         });
