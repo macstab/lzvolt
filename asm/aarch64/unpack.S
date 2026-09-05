@@ -249,14 +249,41 @@ KEVA_SYM(keva_unpack):
     b.hi    .Lfail                      // more output than was declared
 
     cbz     x15, .Lslow_lit_done
+    add     x0, x21, x24
+    add     x1, x19, x23
+
+    /*
+     * One vector move for a short run, before considering the block loop.
+     *
+     * Counting the blocks a real value decomposes into says why: on data that
+     * compresses six-fold the average literal run is 1.4 bytes, and every one
+     * of them was going through a 32-byte block copy. That is 53 KiB of store
+     * traffic to move 2 KiB of literals in a 64 KiB value.
+     *
+     * The destination has room for sixteen whatever the count -- the run was
+     * already checked against the declared length and the buffer carries 64
+     * bytes past it. The source is the only question, and only within sixteen
+     * bytes of the end of the stream.
+     */
+    cmp     x15, #16
+    b.hi    .Lslow_lit_wide
+    add     x9, x23, #16
+    cmp     x9, x20
+    b.hi    .Lslow_lit_narrow
+    ldr     q0, [x1]
+    str     q0, [x0]
+    b       .Lslow_lit_done
+.Lslow_lit_narrow:
+    mov     x2, x15
+    bl      .Lexact
+    b       .Lslow_lit_done
 
     // Wide while a whole block is readable from the input, exact for the tail:
     // overrunning the input would read memory that is not ours. The output side
     // needs no test -- see the header.
+.Lslow_lit_wide:
     add     x9, x16, #32
     cmp     x9, x20
-    add     x0, x21, x24
-    add     x1, x19, x23
     mov     x2, x15
     b.hi    .Lslow_lit_exact
     mov     x5, #0
