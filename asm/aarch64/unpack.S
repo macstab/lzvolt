@@ -100,16 +100,33 @@ KEVA_SYM(keva_unpack):
     /*
      * The zone the fast loop runs in, as two limits computed once.
      *
-     * Inside it a block needs no bound test of its own: the input cursor stays
-     * far enough from the end that a token, fourteen literals, two offset bytes
-     * and a 32-byte block all land inside, and the output cursor stays far
-     * enough that the at-most 32 bytes a fast block produces cannot reach the
-     * declared length. Both clamp to zero for a value too small to hold one,
-     * which then runs entirely on the checked loop.
+     * Inside it a block needs no bound test of its own, and the margins are
+     * exactly what a block reads and writes rather than a round number.
+     *
+     * Input, 17: a token, at most fourteen literals and a two-byte offset. The
+     * literal move reads sixteen bytes from just past the token, which ends at
+     * the same place.
+     *
+     * Output, 32: at most fourteen literals and eighteen match bytes. The moves
+     * themselves reach further -- sixteen and thirty-two bytes -- but into the
+     * 64 bytes of slack the caller provides, which is what that slack is for.
+     * A long match is unbounded and checks the declared length itself.
+     *
+     * These were 48 and 64, and the difference is not cosmetic. A 4 KiB value
+     * of data that compresses six-fold packs to 656 bytes, so a 48-byte input
+     * margin is 7% of the stream: the last eight blocks of a hundred and eight
+     * fell out of the zone into the checked path, which is three times dearer
+     * per block. The profile put 31% of the kernel there for 0.9% of blocks
+     * that genuinely needed it. At 64 KiB the same margin is half a percent,
+     * which is why throughput was flat across sizes while the gap to liblz4
+     * lived entirely at the small end.
+     *
+     * Both clamp to zero for a value too small to hold one block, which then
+     * runs entirely on the checked loop.
      */
-    subs    x25, x20, #48               // input limit
+    subs    x25, x20, #17               // input limit
     csel    x25, x25, xzr, hs
-    subs    x28, x22, #64               // output limit
+    subs    x28, x22, #32               // output limit
     csel    x28, x28, xzr, hs
 
 /*
