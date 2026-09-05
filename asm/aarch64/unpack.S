@@ -168,21 +168,23 @@ KEVA_SYM(keva_unpack):
      * already answered. The long match is handled below instead, inside the
      * loop, which is what liblz4 does and why it carries three block bodies.
      */
-    cmp     w5, #15
-    b.eq    .Lslow
-
     /* ---- the common block -------------------------------------------- */
     add     x7, x23, #1                 // literals start here
-    add     x8, x7, x5                  // and the offset follows them
-    ldrh    w11, [x19, x8]              // offset
-    add     x16, x24, x5                // output position after the literals
-    add     x23, x8, #2                 // cursor past the offset
+    cmp     w5, #15
+    b.eq    .Lfast_litlong
+
+    add     x8, x7, x5                  // the offset follows the literals
+    add     x16, x24, x5                // output position after them
 
     // A short run carries at most fourteen literals, so one 16-byte move covers
     // it whatever the length. Trimming would cost a branch to save nothing: the
     // extra bytes are overwritten by the match that follows.
     ldr     q0, [x19, x7]
     str     q0, [x21, x24]
+
+.Lfast_offset:
+    ldrh    w11, [x19, x8]              // offset
+    add     x23, x8, #2                 // cursor past it
 
     cmp     w26, #15
     b.eq    .Lfast_long
@@ -219,6 +221,58 @@ KEVA_SYM(keva_unpack):
     bl      .Lrepeat
     mov     x24, x12
     b       .Lfast
+
+/*
+ * A long literal run, still inside the loop.
+ *
+ * Half the blocks of data that compresses only two-fold saturate the *literal*
+ * nibble -- 50.8% of them, against 0% saturating the match nibble. Sending
+ * those to the checked path meant half of that shape never used the zone, the
+ * same way all of the six-fold shape did not before the long match moved in
+ * here.
+ *
+ * The trick is that one pair of tests puts the cursors back inside a zone. A
+ * run of at most 269 bytes is read, and both cursors are then checked with the
+ * margin a following block needs -- so everything after this proceeds exactly
+ * as a short block does, with no further questions about ends or lengths. A
+ * run longer than that is rare enough to leave to the checked path, which is
+ * also where the multi-byte length encoding belongs.
+ */
+.Lfast_litlong:
+    add     x9, x23, #1
+    ldrb    w10, [x19, x9]              // the zone covers this byte already
+    cmp     w10, #255
+    b.eq    .Lslow                      // a run past 269 bytes
+    add     x12, x10, #15               // the length this run would have
+    add     x7, x23, #2                 // and it starts past the length byte
+
+    add     x9, x7, x12
+    add     x9, x9, #32
+    cmp     x9, x20
+    b.hi    .Lslow                      // the run, or its block copy, runs off
+    add     x16, x24, x12
+    add     x9, x16, #32
+    cmp     x9, x22
+    b.hi    .Lslow                      // no room for a following block
+
+    // Committed only here. Every exit above goes to the checked path, which
+    // re-reads the token and expects the nibble still to say fifteen -- writing
+    // the decoded length into x5 before those tests made it skip the length
+    // byte and mis-frame the rest of the value.
+    mov     x5, x12
+    add     x8, x7, x5                  // where the offset sits
+    add     x0, x21, x24
+    add     x1, x19, x7
+    mov     x9, #0
+.Lfast_litblk:
+    ldp     q0, q1, [x1]
+    stp     q0, q1, [x0]
+    add     x9, x9, #32
+    cmp     x9, x5
+    b.hs    .Lfast_offset
+    add     x1, x1, #32
+    add     x0, x0, #32
+    b       .Lfast_litblk
 
 /*
  * A long match, still inside the loop.
