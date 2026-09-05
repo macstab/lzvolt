@@ -626,12 +626,20 @@ pub fn unpack(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
 /// destination and its size, because an LZ4 block carries no length of its own.
 /// [`unpack`] reads ours from the varint in front of the stream; this skips it.
 ///
-/// The two differ only in that header. Everything after it is the LZ4 block
-/// format: a token of two nibbles, extended lengths as chains of 255, a
-/// two-byte little-endian offset, and match lengths stored less four. A block
-/// produced by liblz4 decodes here byte for byte, which the interop test
-/// checks — and which is what makes a decoder-against-decoder measurement
-/// possible with no format difference left in it.
+/// The compatibility runs one way only, and it is worth being exact about
+/// which. **Reading**: this decoder accepts any block liblz4 wrote, byte for
+/// byte, which the interop test checks — the even split is the LZ4 token
+/// layout, extended lengths are the same chains of 255, the offset is the same
+/// two little-endian bytes, and match lengths are stored less four. That is
+/// what makes a decoder-against-decoder measurement possible with no format
+/// difference left in it.
+///
+/// **Writing**: our packer's output is not an LZ4 block and liblz4 refuses it.
+/// The layout matches; the constraints do not. LZ4 requires a block to end in a
+/// literal run of at least five bytes with no match inside the last twelve,
+/// while our packer emits matches up to the final byte and then a zero token to
+/// close. Half our values also choose the wide split, whose token is not LZ4's
+/// at all. See `liblz4_refuses_what_we_wrote` for the measurement.
 pub fn unpack_into(block: &[u8], out: &mut Vec<u8>, declared: usize) -> Result<(), PackError> {
     if declared > MAX_UNPACKED {
         return Err(PackError::TooLarge);
@@ -1098,6 +1106,78 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{} bytes from liblz4: {e}", data.len()));
             assert_eq!(&out[..], &data[..], "differs on {} bytes", data.len());
         }
+    }
+
+    /// The other direction, and it does not hold: liblz4 refuses what we wrote.
+    ///
+    /// The even split is the LZ4 token layout, so the body of such a value
+    /// looks like an LZ4 block. It is not one. The format also constrains where
+    /// a block may end -- a literal run of at least five bytes to close, and no
+    /// match inside the last twelve -- and the packer enforces neither. It runs
+    /// matches to the final byte and then writes a zero token, which LZ4 has no
+    /// concept of.
+    ///
+    /// The assertion is inverted on purpose: it pins what is true today rather
+    /// than leaving the question open. Should the packer ever be taught LZ4's
+    /// end rules, this fails, and the fix is to turn it into the positive test
+    /// it is already shaped like.
+    #[cfg(feature = "liblz4")]
+    #[test]
+    fn liblz4_refuses_what_we_wrote() {
+        #[link(name = "lz4")]
+        extern "C" {
+            fn LZ4_decompress_safe(src: *const u8, dst: *mut u8, n: i32, cap: i32) -> i32;
+        }
+
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut noise_byte = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        };
+
+        let mut cases: Vec<Vec<u8>> = Vec::new();
+        for size in [16usize, 17, 63, 64, 65, 1000, 4096, 65_536] {
+            cases.push(records(size));
+            cases.push(vec![b'a'; size]);
+            cases.push((0..size).map(|_| noise_byte()).collect());
+        }
+        cases.push(b"ab".repeat(3000));
+        cases.push(b"abcdefg".repeat(900));
+
+        let mut packed = Vec::new();
+        let (mut even, mut wide, mut refused) = (0, 0, 0);
+        for data in &cases {
+            if !pack(data, &mut packed) {
+                continue;
+            }
+            let (raw, header) = get_varint(&packed).expect("a header");
+            if Split::from_header(raw) != EVEN {
+                wide += 1;
+                continue;
+            }
+            even += 1;
+
+            let body = &packed[header..];
+            let mut out = vec![0u8; data.len()];
+            let n = unsafe {
+                LZ4_decompress_safe(
+                    body.as_ptr(),
+                    out.as_mut_ptr(),
+                    body.len() as i32,
+                    out.len() as i32,
+                )
+            };
+            if n != data.len() as i32 {
+                refused += 1;
+                continue;
+            }
+            assert_eq!(&out[..], &data[..], "liblz4 read {} bytes wrong", data.len());
+        }
+        eprintln!("  even {even}, wide {wide}, refused by liblz4 {refused}");
+        assert!(even > 0, "no case chose the even split, so nothing was tested");
+        assert_eq!(refused, even, "liblz4 accepted one of our blocks -- see the note above");
     }
 
     #[test]
