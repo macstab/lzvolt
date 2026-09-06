@@ -261,10 +261,16 @@ fn ratio(c: &mut Criterion) {
 fn against_lz4(c: &mut Criterion) {
     let mut group = c.benchmark_group("lz4");
 
+    // The same shapes the decompress benchmark uses, all of them. This list was
+    // missing records_512 and records_64k, which are the two where our own
+    // format wins hardest -- so the best number in the file had nothing to be
+    // compared against, and the comparison flattered us by omission.
     for (label, data) in [
+        ("records_512", records(512)),
         ("varied_4k", varied(4096)),
         ("varied_64k", varied(65_536)),
         ("records_4k", records(4096)),
+        ("records_64k", records(65_536)),
         ("noise_4k", noise(4096)),
     ] {
         group.throughput(Throughput::Bytes(data.len() as u64));
