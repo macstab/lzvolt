@@ -370,12 +370,81 @@ fn same_bytes(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("lz4_flex", label), |b| {
             b.iter(|| black_box(lz4_flex::block::decompress_into(black_box(&block), &mut flex)));
         });
+
+    }
+    group.finish();
+}
+
+/// Each side on its own format, and each through a bare call into a library.
+///
+/// This is the comparison a user of either one actually gets, and nothing here
+/// had made it against the reference implementation -- the `lz4` group uses
+/// lz4_flex, which is a Rust port and gets inlined. Both arms here are
+/// `extern "C"` calls with a real ABI prologue, both write into a buffer that
+/// outlives the loop, and both are handed the uncompressed length. What differs
+/// is the format and the packer that produced it, which is the point.
+#[cfg(feature = "liblz4")]
+fn own_format(c: &mut Criterion) {
+    #[link(name = "lz4")]
+    extern "C" {
+        fn LZ4_compress_default(s: *const u8, d: *mut u8, n: i32, cap: i32) -> i32;
+        fn LZ4_decompress_safe(s: *const u8, d: *mut u8, n: i32, cap: i32) -> i32;
+    }
+
+    let mut group = c.benchmark_group("own_format");
+    for (label, data) in [
+        ("records_512", records(512)),
+        ("records_4k", records(4096)),
+        ("records_64k", records(65_536)),
+        ("varied_4k", varied(4096)),
+        ("varied_64k", varied(65_536)),
+    ] {
+        // Ours: the packed body with the header stripped, so the kernel is
+        // handed exactly what liblz4's is -- a block and a length.
+        let mut ours = Vec::new();
+        assert!(pack::pack(&data, &mut ours), "{label} did not pack");
+        let (raw, header) = keva_core::store::entry::get_varint(&ours).expect("a header");
+        let split = if raw & 1 == 1 {
+            keva_asm::unpack::Split::WideMatch
+        } else {
+            keva_asm::unpack::Split::Even
+        };
+        let body = ours[header..].to_vec();
+
+        let mut theirs = vec![0u8; data.len() + 1024];
+        let n = unsafe {
+            LZ4_compress_default(data.as_ptr(), theirs.as_mut_ptr(), data.len() as i32, theirs.len() as i32)
+        };
+        assert!(n > 0);
+        theirs.truncate(n as usize);
+
+        let mut mine = vec![0u8; data.len() + 64];
+        let mut yours = vec![0u8; data.len() + 64];
+        assert!(keva_asm::unpack::unpack_into_slice(&body, &mut mine, data.len(), split));
+
+        group.throughput(Throughput::Bytes(data.len() as u64));
+        group.bench_function(BenchmarkId::new("keva", label), |b| {
+            b.iter(|| {
+                black_box(keva_asm::unpack::unpack_into_slice(
+                    black_box(&body), &mut mine, data.len(), split))
+            });
+        });
+        group.bench_function(BenchmarkId::new("liblz4", label), |b| {
+            b.iter(|| unsafe {
+                black_box(LZ4_decompress_safe(black_box(theirs.as_ptr()), yours.as_mut_ptr(),
+                                              theirs.len() as i32, data.len() as i32))
+            });
+        });
+        eprintln!("  own_format {label}: keva {} B, liblz4 {} B", body.len(), theirs.len());
     }
     group.finish();
 }
 
 #[cfg(not(feature = "liblz4"))]
+fn own_format(_: &mut Criterion) {}
+
+#[cfg(not(feature = "liblz4"))]
 fn same_bytes(_: &mut Criterion) {}
 
-criterion_group!(benches, packing, packing_asm, sizes, unpacking, ratio, against_lz4, same_bytes);
+criterion_group!(benches, packing, packing_asm, sizes, unpacking, ratio, against_lz4, same_bytes, own_format);
 criterion_main!(benches);
