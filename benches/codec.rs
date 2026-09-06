@@ -318,7 +318,18 @@ fn same_bytes(c: &mut Criterion) {
     }
 
     let mut group = c.benchmark_group("same_bytes");
+    // The small sizes are here and not only in the format comparison, because
+    // that comparison cannot be fair at this end. `lz4_flex::decompress_into`
+    // is `#[inline]` Rust, so the compiler folds it into the loop and saves
+    // only the registers it touches; our decoder is an `extern "C"` call into
+    // assembly with a twelve-register prologue that can never be elided. At 512
+    // bytes the fixed cost of a call is 41% of the work, so that difference is
+    // most of what such a comparison measures. liblz4 is the like-for-like
+    // opponent: also a C call, also a real ABI prologue.
     for (label, data) in [
+        ("records_256", records(256)),
+        ("records_512", records(512)),
+        ("records_1k", records(1024)),
         ("varied_4k", varied(4096)),
         ("varied_64k", varied(65_536)),
         ("records_4k", records(4096)),
