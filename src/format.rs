@@ -88,6 +88,28 @@ const HASH_BITS: usize = 12;
 ///
 /// The full table is always allocated; this only narrows how much of it a large
 /// value touches, and touched lines are what the cache actually pays for.
+///
+/// Re-measured against the single-pass packer, because the number above was
+/// settled with a method that could not resolve less than 8%. It holds, and for
+/// a better reason than cache pressure. On 64 KiB of data that compresses
+/// two-fold:
+///
+/// ```text
+///   bits   table    packing    ratio   blocks
+///     11   8 KiB   0.65 GiB/s  1.98x     3618
+///     12  16 KiB   0.52        2.03x     3976
+///     13  32 KiB   0.40        2.08x     4306
+/// ```
+///
+/// A wider table does find more matches -- but they are *short* ones, and a
+/// short match is a whole block: a token decode and an offset load for a
+/// handful of bytes. Nineteen percent more blocks at thirteen bits is nineteen
+/// percent more per-block work on every read, against five percent of ratio
+/// once. Decoding is what this store does most, so the wider table is worse on
+/// the axis that matters and slower to pack besides.
+///
+/// This is the same trade liblz4 makes and loses: 2.00x at 4872 blocks and 5.06
+/// GiB/s decoding, against our 1.98x at 3618 and 7.27.
 const HASH_BITS_LARGE: usize = 11;
 
 /// Where the table stops being free and starts being a rival for cache.
