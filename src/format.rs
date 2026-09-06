@@ -274,16 +274,48 @@ fn pack_with(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> b
     // happen on data that compresses well, where the second is what makes the
     // decoder's fast path reachable at all -- and a store reads far more often
     // than it writes.
-    if pack_pass(input, out, table, EVEN) {
+    if pack_pass(input, out, table, EVEN, LAZY) {
         out.clear();
-        pack_pass(input, out, table, LONG_MATCH);
+        pack_pass(input, out, table, LONG_MATCH, LAZY);
+    }
+    out.len() < input.len()
+}
+
+/// Whether the search may give up a byte to look for a longer match.
+///
+/// A constant with two call sites rather than a setting: the packer always
+/// wants it, and the assembly kernel does not have it, so the differential test
+/// needs a reference that searches the way the kernel does. Without that the
+/// test compares two different algorithms and can only pass by accident -- which
+/// is exactly what it did until a `varied` case was added to its corpus.
+const LAZY: bool = true;
+/// The other value, used only by the differential test below.
+#[cfg(test)]
+const EAGER: bool = false;
+
+/// The packer as the assembly kernel implements it, for the differential test.
+#[cfg(test)]
+fn pack_with_eager(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> bool {
+    out.clear();
+    if input.len() < MIN_MATCH {
+        return false;
+    }
+    if pack_pass(input, out, table, EVEN, EAGER) {
+        out.clear();
+        pack_pass(input, out, table, LONG_MATCH, EAGER);
     }
     out.len() < input.len()
 }
 
 /// One pass with a fixed split. Returns whether the match field overflowed in
 /// more than half the blocks, which is the signal to try the other one.
-fn pack_pass(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE], split: Split) -> bool {
+fn pack_pass(
+    input: &[u8],
+    out: &mut Vec<u8>,
+    table: &mut [u32; HASH_SIZE],
+    split: Split,
+    lazy: bool,
+) -> bool {
     put_varint_into((input.len() as u64) << 1 | split.bit(), out);
 
     out.reserve(input.len() / 4);
@@ -330,6 +362,52 @@ fn pack_pass(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE], spli
             continue;
         }
         misses = 1 << SKIP_TRIGGER;
+
+        // The first match found is not always the one worth taking.
+        //
+        // The search moves forward and commits to whatever it finds, so a
+        // four-byte match at one position hides a forty-byte match starting a
+        // byte later. Giving up the byte to the literal run costs one byte of
+        // ratio and buys the difference between the two lengths.
+        //
+        // This matters here more than it would in an archiver, because block
+        // count is what the decoder is paid by: a longer match is not just
+        // denser, it is one block instead of two, and the two would each have
+        // cost a token decode and an offset load. Counting real blocks put us
+        // 25% above lz4_flex on the same data at the same ratio, and this is
+        // that difference.
+        //
+        // The step repeats while it keeps winning, which terminates because
+        // every round demands a strictly longer match than the last.
+        let mut candidate = candidate;
+        let mut matched = matched;
+        while lazy && at + 1 + MIN_MATCH <= input.len() {
+            let next = at + 1;
+            let slot = hash4(&input[next..], shift);
+            let stored = table[slot];
+            // Inserted whether or not it wins: the position is real and a later
+            // search may want it, and the search itself would never have
+            // visited it.
+            table[slot] = next as u32 + 1;
+
+            let other = stored as usize - 1;
+            let longer = other < next
+                && next - other <= MAX_OFFSET
+                && word4(input, other) == word4(input, next)
+                && {
+                    let len = MIN_MATCH
+                        + common_prefix(&input[other + MIN_MATCH..], &input[next + MIN_MATCH..]);
+                    len > matched && {
+                        matched = len;
+                        true
+                    }
+                };
+            if !longer {
+                break;
+            }
+            candidate = other;
+            at = next;
+        }
 
         // Walk the match backwards into the literals that were about to be
         // emitted. The bytes are already known to be equal there; they were
@@ -1314,6 +1392,24 @@ mod tests {
         edge.extend(std::iter::repeat(b'z').take(3000));
         edge.extend_from_slice(b"suffix");
         cases.push(edge);
+        // Data that keeps the even split and has matches worth a second look.
+        // Without it every case here either fails to pack or takes the wide
+        // split and is skipped below, so the diff had nothing to compare on the
+        // one path the kernel actually implements -- and stayed green through a
+        // change to the search that moved 4 KiB of it by 94 bytes.
+        for size in [1000usize, 4096, 65_536] {
+            let mut mixed = Vec::with_capacity(size);
+            let mut i = 0u64;
+            while mixed.len() < size {
+                mixed.extend_from_slice(
+                    format!("{{\"k\":\"{:08x}\",\"role\":\"member\",\"n\":{}}}", i.wrapping_mul(2654435761), i % 97)
+                        .as_bytes(),
+                );
+                i += 1;
+            }
+            mixed.truncate(size);
+            cases.push(mixed);
+        }
 
         let mut rust_out = Vec::new();
         let mut asm_out = Vec::new();
@@ -1324,7 +1420,9 @@ mod tests {
         let mut round_trip = Vec::new();
 
         for input in &cases {
-            let rust_kept = pack_with(input, &mut rust_out, &mut rust_table);
+            // Against the eager reference, because that is the search the kernel
+            // implements. See LAZY.
+            let rust_kept = pack_with_eager(input, &mut rust_out, &mut rust_table);
             let asm_kept =
                 keva_asm::pack_find::pack_asm(input, &mut asm_out, &mut asm_table).is_some();
 
