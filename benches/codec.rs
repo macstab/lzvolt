@@ -409,7 +409,21 @@ fn own_format(c: &mut Criterion) {
         } else {
             keva_asm::unpack::Split::Even
         };
-        let body = ours[header..].to_vec();
+        let other = if split == keva_asm::unpack::Split::Even {
+            keva_asm::unpack::Split::WideMatch
+        } else {
+            keva_asm::unpack::Split::Even
+        };
+        // A value that changes split partway is two calls, and it is measured as
+        // two -- that is what its reader actually pays.
+        let (body, switch) = if raw & 0b10 != 0 {
+            let cut = ours.len() - 8;
+            let in_at = u32::from_le_bytes(ours[cut..cut + 4].try_into().unwrap()) as usize;
+            let out_at = u32::from_le_bytes(ours[cut + 4..].try_into().unwrap()) as usize;
+            (ours[header..cut].to_vec(), Some((in_at, out_at)))
+        } else {
+            (ours[header..].to_vec(), None)
+        };
 
         let mut theirs = vec![0u8; data.len() + 1024];
         let n = unsafe {
@@ -420,14 +434,20 @@ fn own_format(c: &mut Criterion) {
 
         let mut mine = vec![0u8; data.len() + 64];
         let mut yours = vec![0u8; data.len() + 64];
-        assert!(keva_asm::unpack::unpack_into_slice(&body, &mut mine, data.len(), split));
+        let decode = |body: &[u8], mine: &mut [u8]| match switch {
+            None => keva_asm::unpack::unpack_into_slice(body, mine, data.len(), split),
+            Some((in_at, out_at)) => {
+                keva_asm::unpack::unpack_section(&body[..in_at], mine, out_at, 0, split)
+                    && keva_asm::unpack::unpack_section(
+                        &body[in_at..], mine, data.len(), out_at, other,
+                    )
+            }
+        };
+        assert!(decode(&body, &mut mine));
 
         group.throughput(Throughput::Bytes(data.len() as u64));
         group.bench_function(BenchmarkId::new("keva", label), |b| {
-            b.iter(|| {
-                black_box(keva_asm::unpack::unpack_into_slice(
-                    black_box(&body), &mut mine, data.len(), split))
-            });
+            b.iter(|| black_box(decode(black_box(&body), &mut mine)));
         });
         group.bench_function(BenchmarkId::new("liblz4", label), |b| {
             b.iter(|| unsafe {
@@ -435,7 +455,12 @@ fn own_format(c: &mut Criterion) {
                                               theirs.len() as i32, data.len() as i32))
             });
         });
-        eprintln!("  own_format {label}: keva {} B, liblz4 {} B", body.len(), theirs.len());
+        eprintln!(
+            "  own_format {label}: keva {} B{}, liblz4 {} B",
+            ours.len(),
+            if switch.is_some() { " (two sections)" } else { "" },
+            theirs.len()
+        );
     }
     group.finish();
 }

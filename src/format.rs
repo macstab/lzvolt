@@ -269,17 +269,26 @@ fn pack_with(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> b
         return false;
     }
 
-    // Pack once with the even split, and again with the wide match if the
-    // first pass says the match length kept overflowing. Two passes only ever
-    // happen on data that compresses well, where the second is what makes the
-    // decoder's fast path reachable at all -- and a store reads far more often
-    // than it writes.
-    if pack_pass(input, out, table, EVEN, LAZY) {
-        out.clear();
-        pack_pass(input, out, table, LONG_MATCH, LAZY);
-    }
+    // One pass. The split is decided while packing, not by packing twice.
+    pack_pass(input, out, table, EVEN, LAZY, ADAPTIVE);
     out.len() < input.len()
 }
+
+/// Blocks the running window looks back over before changing the split.
+///
+/// A window rather than a total, because a value is not required to have one
+/// character throughout -- a document with a blob in the middle changes shape
+/// partway, and a decision taken over the whole value gets such a value wrong
+/// no matter which way it goes. Sixteen is short enough that a value of a
+/// hundred blocks still spends most of itself in the right split, and long
+/// enough that a handful of unusual blocks at the start cannot flip it.
+const SPLIT_WINDOW: usize = 16;
+
+/// Whether the pass may change split partway. Off for the reference the
+/// assembly packer is diffed against, which has one split and no window.
+const ADAPTIVE: bool = true;
+#[cfg(test)]
+const FIXED: bool = false;
 
 /// Whether the search may give up a byte to look for a longer match.
 ///
@@ -300,23 +309,42 @@ fn pack_with_eager(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]
     if input.len() < MIN_MATCH {
         return false;
     }
-    if pack_pass(input, out, table, EVEN, EAGER) {
-        out.clear();
-        pack_pass(input, out, table, LONG_MATCH, EAGER);
-    }
+    pack_pass(input, out, table, EVEN, EAGER, FIXED);
     out.len() < input.len()
 }
 
-/// One pass with a fixed split. Returns whether the match field overflowed in
-/// more than half the blocks, which is the signal to try the other one.
+/// One pass, deciding the split as it goes.
+///
+/// The header is written first and patched last, which works because its length
+/// depends only on the declared size -- known at the first byte -- and not on
+/// the two flag bits in it. So the pass commits to nothing up front: it starts
+/// in `split`, watches a running window of how often the match field overflows,
+/// and if it does so in more than half of the last [`SPLIT_WINDOW`] blocks it
+/// changes split there and then, records where, and sets the bit at the end.
+///
+/// This replaces packing the value twice and throwing the first away. It also
+/// answers a question two passes could not: which split fits *this part* of the
+/// value. A sample can be unrepresentative and a total cannot see a change of
+/// character; a window sees both.
 fn pack_pass(
     input: &[u8],
     out: &mut Vec<u8>,
     table: &mut [u32; HASH_SIZE],
-    split: Split,
+    start_split: Split,
     lazy: bool,
-) -> bool {
-    put_varint_into((input.len() as u64) << 1 | split.bit(), out);
+    adaptive: bool,
+) {
+    // Written with the flag bits clear. Their value cannot be known yet, and
+    // does not need to be: the varint's length is fixed by `input.len()`.
+    put_varint_into((input.len() as u64) << 2 | start_split.bit(), out);
+    let header_len = out.len();
+    let mut split = start_split;
+    // Where the second section starts, as (offset into the body, output
+    // position). Both are needed: the decoder splits the input at the first and
+    // resumes producing at the second.
+    let mut switch: Option<(usize, usize)> = None;
+    let mut recent: u32 = 0;
+    let mut seen = 0usize;
 
     out.reserve(input.len() / 4);
 
@@ -427,8 +455,24 @@ fn pack_pass(
         }
 
         blocks += 1;
-        if matched + back - MIN_MATCH >= split.mat_max() {
+        let overflowed = matched + back - MIN_MATCH >= split.mat_max();
+        if overflowed {
             saturated += 1;
+        }
+        // The decision, taken before this block is written so that the block
+        // itself already uses the split it argued for. `literal_start` is the
+        // output position every emitted block has produced so far, and the body
+        // offset is simply how much has been written past the header.
+        if adaptive && switch.is_none() && split == EVEN {
+            recent = (recent << 1) | overflowed as u32;
+            seen += 1;
+            let mask = (1u32 << SPLIT_WINDOW) - 1;
+            if seen >= SPLIT_WINDOW
+                && (recent & mask).count_ones() as usize * 2 > SPLIT_WINDOW
+            {
+                switch = Some((out.len() - header_len, literal_start));
+                split = LONG_MATCH;
+            }
         }
         emit_block(
             &input[literal_start..at - back],
@@ -445,8 +489,22 @@ fn pack_pass(
     // Everything left over is literals, with no match to follow.
     emit_literals_only(&input[literal_start..], out, split);
 
-    split == EVEN && saturated * 2 > blocks
+    if let Some((in_at, out_at)) = switch {
+        // At the end rather than in the header, so a value that never switches
+        // pays nothing for the possibility. Fixed width because a varint cannot
+        // be read backwards without ambiguity -- its continuation bits look no
+        // different from a body byte's high bit.
+        out.extend_from_slice(&(in_at as u32).to_le_bytes());
+        out.extend_from_slice(&(out_at as u32).to_le_bytes());
+        // The low bits live in the first byte whatever the varint's length.
+        out[0] |= HYBRID_BIT as u8;
+    }
+    let _ = (blocks, saturated);
 }
+
+/// Header bit 0: which split the first section uses.
+/// Header bit 1: whether there is a second section.
+const HYBRID_BIT: u64 = 0b10;
 
 fn put_varint_into(value: u64, out: &mut Vec<u8>) {
     let mut buf = [0u8; 10];
@@ -521,6 +579,15 @@ impl Split {
     #[inline]
     fn from_header(bit: u64) -> Split {
         if bit & 1 == 1 {
+            LONG_MATCH
+        } else {
+            EVEN
+        }
+    }
+    /// The other of the two splits.
+    #[inline]
+    fn other(self) -> Split {
+        if self == EVEN {
             LONG_MATCH
         } else {
             EVEN
@@ -679,19 +746,20 @@ pub fn unpack(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
     // decoder that can name what is wrong", which is the one below. So a stream
     // the kernel refuses is never rejected on its word alone.
     if keva_asm::unpack::asm_available() {
-        if let Some((raw, header)) = get_varint(input) {
-            let split = Split::from_header(raw);
-            if let Ok(declared) = usize::try_from(raw >> 1) {
-                if declared <= MAX_UNPACKED
-                    && keva_asm::unpack::unpack_asm(
-                        &input[header..],
-                        out,
-                        declared,
-                        split.kernel(),
-                    )
-                {
-                    return Ok(());
-                }
+        if let Ok(f) = frame(input) {
+            let ok = match f.switch {
+                None => keva_asm::unpack::unpack_asm(f.body, out, f.declared, f.split.kernel()),
+                Some(switch) => keva_asm::unpack::unpack_asm_hybrid(
+                    f.body,
+                    out,
+                    f.declared,
+                    switch,
+                    f.split.kernel(),
+                    f.split.other().kernel(),
+                ),
+            };
+            if ok {
+                return Ok(());
             }
         }
     }
@@ -729,9 +797,47 @@ pub fn unpack_into(block: &[u8], out: &mut Vec<u8>, declared: usize) -> Result<(
     }
     // The portable decoder wants the header, so give it one.
     let mut framed = Vec::with_capacity(block.len() + 10);
-    put_varint_into((declared as u64) << 1 | EVEN.bit(), &mut framed);
+    put_varint_into((declared as u64) << 2 | EVEN.bit(), &mut framed);
     framed.extend_from_slice(block);
     unpack_portable(&framed, out)
+}
+
+/// What a packed value's frame says: the declared size, the body, and where the
+/// split changes if it does.
+struct Frame<'a> {
+    declared: usize,
+    body: &'a [u8],
+    split: Split,
+    /// `(offset into body, output position)` where the second section starts.
+    switch: Option<(usize, usize)>,
+}
+
+/// Read the header, and the trailer if the header says there is one.
+///
+/// Both offsets come off the wire. They are range-checked here so that
+/// everything downstream can treat them as ordinary positions, and anything
+/// inconsistent is a truncated stream rather than a silent mis-decode.
+fn frame(input: &[u8]) -> Result<Frame<'_>, PackError> {
+    let (raw, header) = get_varint(input).ok_or(PackError::Truncated)?;
+    let declared = usize::try_from(raw >> 2).map_err(|_| PackError::TooLarge)?;
+    if declared > MAX_UNPACKED {
+        return Err(PackError::TooLarge);
+    }
+    let split = Split::from_header(raw);
+    let rest = input.get(header..).ok_or(PackError::Truncated)?;
+
+    if raw & HYBRID_BIT == 0 {
+        return Ok(Frame { declared, body: rest, split, switch: None });
+    }
+
+    let cut = rest.len().checked_sub(8).ok_or(PackError::Truncated)?;
+    let (body, tail) = rest.split_at(cut);
+    let in_at = u32::from_le_bytes(tail[..4].try_into().unwrap()) as usize;
+    let out_at = u32::from_le_bytes(tail[4..].try_into().unwrap()) as usize;
+    if in_at > body.len() || out_at == 0 || out_at >= declared {
+        return Err(PackError::Truncated);
+    }
+    Ok(Frame { declared, body, split, switch: Some((in_at, out_at)) })
 }
 
 /// The decoder every kernel is diffed against, and the only place an error is
@@ -739,20 +845,27 @@ pub fn unpack_into(block: &[u8], out: &mut Vec<u8>, declared: usize) -> Result<(
 fn unpack_portable(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
     out.clear();
 
-    let (raw, header) = get_varint(input).ok_or(PackError::Truncated)?;
-    let split = Split::from_header(raw);
-    let declared = usize::try_from(raw >> 1).map_err(|_| PackError::TooLarge)?;
-    if declared > MAX_UNPACKED {
-        return Err(PackError::TooLarge);
-    }
+    let f = frame(input)?;
+    let (declared, body) = (f.declared, f.body);
+    let mut split = f.split;
+    let switch_at = f.switch.map(|(_, out_at)| out_at);
     out.reserve(declared + OVERRUN);
 
     let capacity = out.capacity();
     let base = out.as_mut_ptr();
     let mut produced = 0usize;
-    let mut at = header;
+    let mut at = 0usize;
+    let input = body;
 
     while produced < declared {
+        // The second section begins on a block boundary, so this is the only
+        // place the split can change. A stream that steps over the boundary
+        // instead of landing on it decodes the rest with the wrong split and
+        // fails the length check below, which is the same outcome as any other
+        // corruption.
+        if switch_at == Some(produced) {
+            split = split.other();
+        }
         let token = *input.get(at).ok_or(PackError::Truncated)?;
 
         // The common block: neither length escaped its nibble, and there is
@@ -1079,15 +1192,19 @@ mod tests {
             let _ = unpack(&broken, &mut out);
         }
 
-        // A believable declared length in front of noise.
+        // A believable declared length in front of noise, in every combination
+        // of the two header flags -- a stream claiming a second section it does
+        // not have has to be refused like any other corruption.
         for len in [0u64, 1, 64, 4096, 1 << 20] {
+            for flags in 0u64..4 {
             for _ in 0..200 {
                 let mut stream = Vec::new();
-                put_varint_into(len, &mut stream);
+                put_varint_into(len << 2 | flags, &mut stream);
                 for _ in 0..(next() % 200) {
                     stream.push(next() as u8);
                 }
                 let _ = unpack(&stream, &mut out);
+            }
             }
         }
 
@@ -1294,14 +1411,23 @@ mod tests {
             if !pack(input, &mut packed) {
                 continue;
             }
-            let (raw, header) = get_varint(&packed).expect("the packer wrote a header");
-            let split = Split::from_header(raw);
-            let declared = (raw >> 1) as usize;
-
+            let f = frame(&packed).expect("the packer wrote a header");
+            let took = match f.switch {
+                None => keva_asm::unpack::unpack_asm(f.body, &mut asm_out, f.declared, f.split.kernel()),
+                Some(switch) => keva_asm::unpack::unpack_asm_hybrid(
+                    f.body,
+                    &mut asm_out,
+                    f.declared,
+                    switch,
+                    f.split.kernel(),
+                    f.split.other().kernel(),
+                ),
+            };
             assert!(
-                keva_asm::unpack::unpack_asm(&packed[header..], &mut asm_out, declared, split.kernel()),
-                "the kernel declined a stream the packer produced, {} bytes",
-                input.len()
+                took,
+                "the kernel declined a stream the packer produced, {} bytes ({})",
+                input.len(),
+                if f.switch.is_some() { "two sections" } else { "one section" }
             );
             unpack_portable(&packed, &mut ref_out).expect("the portable decoder accepts it");
 
@@ -1347,13 +1473,27 @@ mod tests {
                 continue;
             };
             let split = Split::from_header(raw);
-            let Ok(declared) = usize::try_from(raw >> 1) else {
+            let Ok(declared) = usize::try_from(raw >> 2) else {
                 continue;
             };
             if declared > MAX_UNPACKED {
                 continue;
             }
-            if !keva_asm::unpack::unpack_asm(&case[header..], &mut asm_out, declared, split.kernel()) {
+            let Ok(f) = frame(case) else {
+                continue;
+            };
+            let took = match f.switch {
+                None => keva_asm::unpack::unpack_asm(f.body, &mut asm_out, f.declared, f.split.kernel()),
+                Some(switch) => keva_asm::unpack::unpack_asm_hybrid(
+                    f.body,
+                    &mut asm_out,
+                    f.declared,
+                    switch,
+                    f.split.kernel(),
+                    f.split.other().kernel(),
+                ),
+            };
+            if !took {
                 continue; // refused, which the portable decoder is free to name
             }
             let reference = unpack_portable(case, &mut ref_out);
@@ -1464,7 +1604,7 @@ mod tests {
         // Declared length 8, one literal, then a match reaching back further
         // than anything produced.
         let mut stream = Vec::new();
-        put_varint_into(8, &mut stream);
+        put_varint_into(8 << 2, &mut stream); // declared 8, even split, one section
         stream.push(1 << 4); // one literal, and a match-length nibble of zero
         stream.push(b'a');
         stream.extend_from_slice(&99u16.to_le_bytes()); // offset far too large

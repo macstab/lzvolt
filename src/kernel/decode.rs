@@ -37,6 +37,7 @@ extern "C" {
         dst: *mut u8,
         dst_cap: usize,
         declared: usize,
+        start: usize,
     ) -> u32;
 
     /// The same decoder assembled for the wide split -- two bits of literal
@@ -47,6 +48,7 @@ extern "C" {
         dst: *mut u8,
         dst_cap: usize,
         declared: usize,
+        start: usize,
     ) -> u32;
 }
 
@@ -73,30 +75,123 @@ pub enum Split {
 /// otherwise. Returns whether it decoded; a `false` means the caller should run
 /// the portable decoder, exactly as with [`unpack_asm`].
 pub fn unpack_into_slice(src: &[u8], dst: &mut [u8], declared: usize, split: Split) -> bool {
+    unpack_section(src, dst, declared, 0, split)
+}
+
+/// Decode one section of a value, producing `dst[start..declared]`.
+///
+/// A value whose token split changes partway is two sections, decoded by two
+/// calls into the two kernels. The second is handed the same `dst` and the
+/// output position the first stopped at, so its backward references reach into
+/// what the first wrote -- the window does not restart at the boundary.
+///
+/// `start == 0` is the whole-value case and is what [`unpack_into_slice`] and
+/// [`unpack_asm`] use.
+pub fn unpack_section(
+    src: &[u8],
+    dst: &mut [u8],
+    declared: usize,
+    start: usize,
+    split: Split,
+) -> bool {
     #[cfg(not(all(keva_asm, target_arch = "aarch64")))]
     {
-        let _ = (src, dst, declared, split);
+        let _ = (src, dst, declared, start, split);
         false
     }
 
     #[cfg(all(keva_asm, target_arch = "aarch64"))]
     {
-        if declared == 0 {
+        if declared == 0 || start >= declared {
             return false;
         }
         // SAFETY: `dst.len()` is the true length of the buffer, and the kernel
         // writes below it or returns zero.
         let produced = unsafe {
             match split {
-                Split::Even => {
-                    keva_unpack(src.as_ptr(), src.len(), dst.as_mut_ptr(), dst.len(), declared)
-                }
-                Split::WideMatch => {
-                    keva_unpack_wide(src.as_ptr(), src.len(), dst.as_mut_ptr(), dst.len(), declared)
-                }
+                Split::Even => keva_unpack(
+                    src.as_ptr(), src.len(), dst.as_mut_ptr(), dst.len(), declared, start,
+                ),
+                Split::WideMatch => keva_unpack_wide(
+                    src.as_ptr(), src.len(), dst.as_mut_ptr(), dst.len(), declared, start,
+                ),
             }
         } as usize;
         produced == declared
+    }
+}
+
+/// Decode a value whose token split changes partway, as two kernel calls.
+///
+/// `switch` is `(offset into body, output position)` where the second section
+/// begins. The two calls share one destination, so the second section's
+/// backward references reach into what the first wrote -- the match window does
+/// not restart at the boundary, which is what makes switching cheap enough to
+/// be worth doing at all.
+///
+/// Both offsets come off the wire and are treated as hostile: they are checked
+/// against the body and the declared length here, and everything past that is
+/// the kernel's own bounds. A `false` means "run the portable decoder", exactly
+/// as with [`unpack_asm`].
+pub fn unpack_asm_hybrid(
+    body: &[u8],
+    out: &mut Vec<u8>,
+    declared: usize,
+    switch: (usize, usize),
+    first: Split,
+    second: Split,
+) -> bool {
+    #[cfg(not(all(keva_asm, target_arch = "aarch64")))]
+    {
+        let _ = (body, out, declared, switch, first, second);
+        false
+    }
+
+    #[cfg(all(keva_asm, target_arch = "aarch64"))]
+    {
+        let (in_at, out_at) = switch;
+        if declared == 0 || out_at == 0 || out_at >= declared || in_at > body.len() {
+            return false;
+        }
+
+        out.clear();
+        out.reserve(declared + UNPACK_SLACK);
+        let cap = out.capacity();
+
+        // SAFETY: `cap` is the real capacity and is at least `declared + 64`,
+        // which the kernel re-checks. The first call is given `out_at` as its
+        // declared length, so it writes below `out_at + 64 <= declared + 64`;
+        // the second starts at `out_at` and stops at `declared`. Nothing reads
+        // the slack: the length is only ever set to `declared`.
+        let ok = unsafe {
+            let dst = out.as_mut_ptr();
+            let first_len = match first {
+                Split::Even => keva_unpack(body.as_ptr(), in_at, dst, cap, out_at, 0),
+                Split::WideMatch => keva_unpack_wide(body.as_ptr(), in_at, dst, cap, out_at, 0),
+            } as usize;
+            if first_len != out_at {
+                false
+            } else {
+                let tail = body.as_ptr().add(in_at);
+                let tail_len = body.len() - in_at;
+                let total = match second {
+                    Split::Even => keva_unpack(tail, tail_len, dst, cap, declared, out_at),
+                    Split::WideMatch => {
+                        keva_unpack_wide(tail, tail_len, dst, cap, declared, out_at)
+                    }
+                } as usize;
+                total == declared
+            }
+        };
+
+        if !ok {
+            out.clear();
+            return false;
+        }
+        // SAFETY: both calls reported reaching their targets, so every byte
+        // below `declared` was written by one of them.
+        unsafe { out.set_len(declared) };
+        true
     }
 }
 
@@ -139,10 +234,10 @@ pub fn unpack_asm(body: &[u8], out: &mut Vec<u8>, declared: usize, split: Split)
         let produced = unsafe {
             match split {
                 Split::Even => {
-                    keva_unpack(body.as_ptr(), body.len(), out.as_mut_ptr(), cap, declared)
+                    keva_unpack(body.as_ptr(), body.len(), out.as_mut_ptr(), cap, declared, 0)
                 }
                 Split::WideMatch => {
-                    keva_unpack_wide(body.as_ptr(), body.len(), out.as_mut_ptr(), cap, declared)
+                    keva_unpack_wide(body.as_ptr(), body.len(), out.as_mut_ptr(), cap, declared, 0)
                 }
             }
         } as usize;

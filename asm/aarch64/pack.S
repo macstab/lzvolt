@@ -83,7 +83,7 @@ KEVA_SYM(keva_pack):
      * a value that wants the wide match is packed by the portable packer,
      * which is the one that decides.
      */
-    lsl     x9, x20, #1
+    lsl     x9, x20, #2                 // two flag bits now: split and hybrid
 .Lvarint:
     and     w10, w9, #0x7F
     lsr     x9, x9, #7

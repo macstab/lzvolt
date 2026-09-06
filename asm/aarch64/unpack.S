@@ -3,7 +3,15 @@
  *
  *   uint32_t keva_unpack(const uint8_t *src, uintptr_t src_len,
  *                        uint8_t *dst, uintptr_t dst_cap,
- *                        uintptr_t declared);
+ *                        uintptr_t declared, uintptr_t start);
+ *
+ * `start` is where in `dst` this call begins producing, and it is zero for a
+ * value that uses one token split throughout. A value that switches split
+ * partway is decoded by two calls: the first produces [0, switch) with one
+ * kernel, the second [switch, declared) with the other, and the second is
+ * handed the same `dst` so its backward references reach into what the first
+ * wrote. Nothing else in the loop changes -- the zone limits already derive
+ * from `declared`, and the end test already compares against it.
  *
  * `src` points past the length header, which the caller has already decoded
  * into `declared`. Returns `declared` on success, or 0 to mean "this needs the
@@ -13,7 +21,8 @@
  * corrupt, so paying for that twice costs nothing that matters, and it keeps
  * every error message in one place.
  *
- * AAPCS64: x0 src, x1 src_len, x2 dst, x3 dst_cap, x4 declared. Result in w0.
+ * AAPCS64: x0 src, x1 src_len, x2 dst, x3 dst_cap, x4 declared, x5 start.
+ * Result in w0.
  *
  * # Why the decoder is worth hand-writing
  *
@@ -139,6 +148,9 @@ KEVA_NAME(KEVA_ENTRY):
     mov     x20, x1
     mov     x21, x2
     mov     x22, x4
+    // Before x5 is used as scratch below: it carries where this call starts
+    // writing, which for a single-split value is zero.
+    mov     x24, x5                     // produced
 
 L(entry):
     // The one capacity check. Everything below leans on it.
@@ -147,7 +159,6 @@ L(entry):
     b.lo    L(fail)
 
     mov     x23, #0                     // at
-    mov     x24, #0                     // produced
 
     /*
      * The zone the fast loop runs in, as two limits computed once.
