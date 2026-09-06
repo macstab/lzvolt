@@ -240,6 +240,31 @@ L(fast_offset):
     ldrh    w11, [x19, x8]              // offset
     add     x23, x8, #2                 // cursor past it
 
+    /*
+     * This branch is the most expensive one in the loop and it stays.
+     *
+     * Counters put 4.0% of all cycles on data that compresses six-fold into
+     * branch mispredicts, and this is where they are: the test is taken 26.7% of
+     * the time there, close enough to a coin flip to beat the predictor, while
+     * every other shape measures 0.0 to 0.1%. It is worth 0.36 cycles a block,
+     * which is the whole of the remaining gap to liblz4 on that shape.
+     *
+     * The obvious removal was tried and measured. Read the extension byte
+     * whether or not there is one, fold it in with `csel`, and branch instead on
+     * whether the fixed move still covers the result -- which on that data is
+     * never, since every long match there lands between 67 and 96 bytes and the
+     * move already writes 96. Mispredicts fell from 4.0% to 0.6% exactly as
+     * intended, and throughput fell with them: records_4k -9.0%, records_64k
+     * -7.3%, varied_4k -18.0%, varied_64k -18.4%.
+     *
+     * The reason is the address. That byte sits at `at + 3 + literals`, so
+     * loading it unconditionally puts a second dependent L1 load into every
+     * block's chain -- token load, literal count, address, load -- where before
+     * three quarters of blocks had none. Three cycles of latency to save 0.36 of
+     * misprediction. The branch is cheaper than the load it would replace, and
+     * that stays true for any scheme that reads the byte before knowing whether
+     * it exists.
+     */
     cmp     w26, #MAT_MAX
     b.eq    L(fast_long)
 
