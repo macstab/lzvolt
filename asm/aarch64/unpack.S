@@ -204,6 +204,29 @@ L(entry):
  */
     .p2align 4
 L(fast):
+    /*
+     * Four instructions for the two zone tests, and they stay four.
+     *
+     * `cmp x23,x25 / ccmp x24,x28,#2,lo / b.hs` is the same question in three,
+     * and it was built and measured rather than argued about this time: the
+     * short block went from 35 instructions to 34, verified in the
+     * disassembly, and throughput did not move -- varied_64k -1.7%,
+     * records_64k +1.6%, and every shape on identical LZ4 blocks between -0.1%
+     * and -1.5%. Contradictory signs at that size are noise.
+     *
+     * The counters say why, and it is worth more than the instruction. Cycles
+     * per block stayed at 8.6 to 9.0 while instructions per block fell, so IPC
+     * fell with them: 4.67 to 4.52 on varied_64k, 5.48 to 5.31 on records_64k.
+     * The loop is not issue-bound at the margin -- there was already slack in
+     * the issue width, and handing one instruction back does not buy a cycle.
+     *
+     * That kills the whole class. Between the 5-cycle latency floor of the
+     * token recurrence and the ~7-cycle issue floor of 40 instructions, this
+     * loop sits at 8.7, and neither model explains the rest. Shaving single
+     * instructions does not reach it. What has reached it, twice, is fewer and
+     * bigger blocks: the wide split and lazy matching each bought about 19%,
+     * and both work on the numerator.
+     */
     cmp     x23, x25
     b.hs    L(tail)
     cmp     x24, x28
