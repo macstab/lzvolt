@@ -467,8 +467,14 @@ fn pack_pass(
             recent = (recent << 1) | overflowed as u32;
             seen += 1;
             let mask = (1u32 << SPLIT_WINDOW) - 1;
+            let fits = |v: usize| v < 1 << (8 * switch_width(input.len()));
             if seen >= SPLIT_WINDOW
                 && (recent & mask).count_ones() as usize * 2 > SPLIT_WINDOW
+                // The window sits at the front of the value, so this holds in
+                // practice; it is checked rather than argued because the
+                // trailer's width cannot represent more.
+                && fits(out.len() - header_len)
+                && fits(literal_start)
             {
                 switch = Some((out.len() - header_len, literal_start));
                 split = LONG_MATCH;
@@ -494,8 +500,9 @@ fn pack_pass(
         // pays nothing for the possibility. Fixed width because a varint cannot
         // be read backwards without ambiguity -- its continuation bits look no
         // different from a body byte's high bit.
-        out.extend_from_slice(&(in_at as u32).to_le_bytes());
-        out.extend_from_slice(&(out_at as u32).to_le_bytes());
+        let w = switch_width(input.len());
+        put_switch(in_at, w, out);
+        put_switch(out_at, w, out);
         // The low bits live in the first byte whatever the varint's length.
         out[0] |= HYBRID_BIT as u8;
     }
@@ -505,6 +512,47 @@ fn pack_pass(
 /// Header bit 0: which split the first section uses.
 /// Header bit 1: whether there is a second section.
 const HYBRID_BIT: u64 = 0b10;
+
+/// Bytes each of the two switch offsets takes at the end of a hybrid stream.
+///
+/// Both are bounded by the value: the output position is below `declared` and
+/// the body offset below the body, which is shorter still. So a value that fits
+/// in sixteen bits needs two bytes per field rather than four, and since the
+/// window is fixed at the front of the value the offsets are small whatever the
+/// value's size.
+///
+/// The width follows from `declared` alone, which the decoder reads before it
+/// needs the trailer. It is not a flag, because a flag would be another bit to
+/// get wrong.
+///
+/// This is worth being careful about. Measured against the two-pass packer, the
+/// eight-byte trailer *was* the entire ratio cost of switching -- 272 to 279
+/// bytes at 1 KiB, 599 to 607 at 4 KiB, 6784 to 6791 at 64 KiB. The prefix left
+/// in the assumed split costs nothing; it comes out a byte ahead.
+#[inline]
+fn switch_width(declared: usize) -> usize {
+    if declared <= 0x1_0000 {
+        2
+    } else {
+        4
+    }
+}
+
+#[inline]
+fn put_switch(value: usize, width: usize, out: &mut Vec<u8>) {
+    match width {
+        2 => out.extend_from_slice(&(value as u16).to_le_bytes()),
+        _ => out.extend_from_slice(&(value as u32).to_le_bytes()),
+    }
+}
+
+#[inline]
+fn get_switch(bytes: &[u8]) -> usize {
+    match bytes.len() {
+        2 => u16::from_le_bytes(bytes.try_into().unwrap()) as usize,
+        _ => u32::from_le_bytes(bytes.try_into().unwrap()) as usize,
+    }
+}
 
 fn put_varint_into(value: u64, out: &mut Vec<u8>) {
     let mut buf = [0u8; 10];
@@ -830,10 +878,11 @@ fn frame(input: &[u8]) -> Result<Frame<'_>, PackError> {
         return Ok(Frame { declared, body: rest, split, switch: None });
     }
 
-    let cut = rest.len().checked_sub(8).ok_or(PackError::Truncated)?;
+    let w = switch_width(declared);
+    let cut = rest.len().checked_sub(2 * w).ok_or(PackError::Truncated)?;
     let (body, tail) = rest.split_at(cut);
-    let in_at = u32::from_le_bytes(tail[..4].try_into().unwrap()) as usize;
-    let out_at = u32::from_le_bytes(tail[4..].try_into().unwrap()) as usize;
+    let in_at = get_switch(&tail[..w]);
+    let out_at = get_switch(&tail[w..]);
     if in_at > body.len() || out_at == 0 || out_at >= declared {
         return Err(PackError::Truncated);
     }

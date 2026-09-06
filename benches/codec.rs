@@ -417,9 +417,17 @@ fn own_format(c: &mut Criterion) {
         // A value that changes split partway is two calls, and it is measured as
         // two -- that is what its reader actually pays.
         let (body, switch) = if raw & 0b10 != 0 {
-            let cut = ours.len() - 8;
-            let in_at = u32::from_le_bytes(ours[cut..cut + 4].try_into().unwrap()) as usize;
-            let out_at = u32::from_le_bytes(ours[cut + 4..].try_into().unwrap()) as usize;
+            let w = if data.len() <= 0x1_0000 { 2 } else { 4 };
+            let cut = ours.len() - 2 * w;
+            let rd = |b: &[u8]| -> usize {
+                if b.len() == 2 {
+                    u16::from_le_bytes(b.try_into().unwrap()) as usize
+                } else {
+                    u32::from_le_bytes(b.try_into().unwrap()) as usize
+                }
+            };
+            let in_at = rd(&ours[cut..cut + w]);
+            let out_at = rd(&ours[cut + w..]);
             (ours[header..cut].to_vec(), Some((in_at, out_at)))
         } else {
             (ours[header..].to_vec(), None)
