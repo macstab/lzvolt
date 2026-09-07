@@ -463,6 +463,19 @@ fn own_format(c: &mut Criterion) {
                                               theirs.len() as i32, data.len() as i32))
             });
         });
+        // The Rust port on its own blocks too. It is `#[inline]`, so the
+        // compiler folds it into the loop where the other two pay for a call --
+        // an advantage that is real for its users and worth naming rather than
+        // engineering away.
+        let flexed = lz4_flex::compress(&data);
+        let mut flexout = vec![0u8; data.len() + 64];
+        assert_eq!(
+            lz4_flex::block::decompress_into(&flexed, &mut flexout).unwrap(),
+            data.len()
+        );
+        group.bench_function(BenchmarkId::new("lz4_flex", label), |b| {
+            b.iter(|| black_box(lz4_flex::block::decompress_into(black_box(&flexed), &mut flexout)));
+        });
         eprintln!(
             "  own_format {label}: keva {} B{}, liblz4 {} B",
             ours.len(),
@@ -476,8 +489,74 @@ fn own_format(c: &mut Criterion) {
 #[cfg(not(feature = "liblz4"))]
 fn own_format(_: &mut Criterion) {}
 
+/// All three packers over the same input, in one run.
+///
+/// The packing comparison had only ever been against lz4_flex, which is a Rust
+/// port; the reference implementation was never in it. Each writes into a
+/// destination that outlives the loop, so no arm is charged for an allocation
+/// the others do not make.
+///
+/// One asymmetry is left standing because it is real: ours writes through a
+/// `Vec`, which is its API, and profiling puts about 9% of the packer in that
+/// bookkeeping. The other two write into a slice.
+#[cfg(feature = "liblz4")]
+fn three_packers(c: &mut Criterion) {
+    #[link(name = "lz4")]
+    extern "C" {
+        fn LZ4_compress_default(s: *const u8, d: *mut u8, n: i32, cap: i32) -> i32;
+    }
+
+    let mut group = c.benchmark_group("compress3");
+    for (label, data) in [
+        ("records_512", records(512)),
+        ("records_4k", records(4096)),
+        ("records_64k", records(65_536)),
+        ("varied_4k", varied(4096)),
+        ("varied_64k", varied(65_536)),
+        ("noise_4k", noise(4096)),
+    ] {
+        group.throughput(Throughput::Bytes(data.len() as u64));
+
+        let mut ours = Vec::with_capacity(data.len() * 2);
+        let mut packer = pack::Packer::new();
+        packer.pack(&data, &mut ours);
+        let keva_len = ours.len();
+        group.bench_function(BenchmarkId::new("keva", label), |b| {
+            b.iter(|| black_box(packer.pack(black_box(&data), &mut ours)));
+        });
+
+        let mut cbuf = vec![0u8; lz4_flex::block::get_maximum_output_size(data.len())];
+        let n = unsafe {
+            LZ4_compress_default(data.as_ptr(), cbuf.as_mut_ptr(), data.len() as i32, cbuf.len() as i32)
+        };
+        assert!(n > 0);
+        let lib_len = n as usize;
+        group.bench_function(BenchmarkId::new("liblz4", label), |b| {
+            b.iter(|| unsafe {
+                black_box(LZ4_compress_default(
+                    black_box(data.as_ptr()),
+                    cbuf.as_mut_ptr(),
+                    data.len() as i32,
+                    cbuf.len() as i32,
+                ))
+            });
+        });
+
+        let flex_len = lz4_flex::block::compress_into(&data, &mut cbuf).expect("sized by its own bound");
+        group.bench_function(BenchmarkId::new("lz4_flex", label), |b| {
+            b.iter(|| black_box(lz4_flex::block::compress_into(black_box(&data), &mut cbuf)));
+        });
+
+        eprintln!("  compress3 {label}: keva {keva_len} B, liblz4 {lib_len} B, lz4_flex {flex_len} B");
+    }
+    group.finish();
+}
+
+#[cfg(not(feature = "liblz4"))]
+fn three_packers(_: &mut Criterion) {}
+
 #[cfg(not(feature = "liblz4"))]
 fn same_bytes(_: &mut Criterion) {}
 
-criterion_group!(benches, packing, packing_asm, sizes, unpacking, ratio, against_lz4, same_bytes, own_format);
+criterion_group!(benches, packing, packing_asm, sizes, unpacking, ratio, against_lz4, same_bytes, own_format, three_packers);
 criterion_main!(benches);
