@@ -278,12 +278,16 @@ unsafe fn word4(input: &[u8], at: usize) -> u32 {
 const SKIP_TRIGGER: usize = 6;
 
 /// Write a length that did not fit in a nibble: 255s until a smaller byte.
-fn put_extended(mut remaining: usize, out: &mut Vec<u8>) {
+/// # Safety
+///
+/// The cursor must have room for the chain; [`Cursor::room`] provides it.
+#[inline]
+unsafe fn put_extended(mut remaining: usize, out: &mut Cursor) {
     while remaining >= 255 {
-        out.push(255);
+        out.byte(255);
         remaining -= 255;
     }
-    out.push(remaining as u8);
+    out.byte(remaining as u8);
 }
 
 /// Read the counterpart of [`put_extended`], bounded so a run of 255s cannot
@@ -422,6 +426,10 @@ fn pack_pass(
     // does not need to be: the varint's length is fixed by `input.len()`.
     put_varint_into((input.len() as u64) << 2 | start_split.bit(), out);
     let header_len = out.len();
+    // Reserved once, so nothing below has to ask again.
+    out.reserve(Cursor::room(input.len()));
+    // SAFETY: the reserve above is exactly what the cursor's writes assume.
+    let mut cur = unsafe { Cursor::new(out) };
     let mut split = start_split;
     // Where the second section starts, as (offset into the body, output
     // position). Both are needed: the decoder splits the input at the first and
@@ -430,7 +438,6 @@ fn pack_pass(
     let mut recent: u32 = 0;
     let mut seen = 0usize;
 
-    out.reserve(input.len() / 4);
 
     let mut blocks = 0usize;
     let mut saturated = 0usize;
@@ -595,23 +602,25 @@ fn pack_pass(
                 // The window sits at the front of the value, so this holds in
                 // practice; it is checked rather than argued because the
                 // trailer's width cannot represent more.
-                && fits(out.len() - header_len)
+                && fits(cur.len() - header_len)
                 && fits(literal_start)
             {
-                switch = Some((out.len() - header_len, literal_start));
+                switch = Some((cur.len() - header_len, literal_start));
                 split = LONG_MATCH;
             }
         }
         let literals = &input[literal_start..at - back];
         let wide = wide_literals_fit(literals, at - back, input.len());
-        emit_block(literals, at - candidate, matched + back, out, split, wide);
+        emit_block(literals, at - candidate, matched + back, &mut cur, split, wide);
 
         at += matched;
         literal_start = at;
     }
 
     // Everything left over is literals, with no match to follow.
-    emit_literals_only(&input[literal_start..], out, split);
+    emit_literals_only(&input[literal_start..], &mut cur, split);
+    // SAFETY: every byte below the cursor was written by the calls above.
+    unsafe { out.set_len(cur.len()) };
 
     if let Some((in_at, out_at)) = switch {
         // At the end rather than in the header, so a value that never switches
@@ -787,32 +796,16 @@ impl Split {
     }
 }
 
-/// Copy a literal run of at most [`WIDE_LITERAL`] bytes as one fixed-width move.
+
+/// Bytes the fixed-width literal move writes, whatever the run's true length.
 ///
 /// `extend_from_slice` compiles to a call to `memmove` with a length the
 /// compiler cannot see, and a literal run averages six bytes -- so the call
-/// costs more than the copy. Profiling the packer put 19.5% of it there, in
-/// 3618 calls moving 21 KB on a 64 KiB value: eighteen cycles apiece, nearly all
-/// of it getting into and out of the call.
-///
-/// A move of a constant width has no call in it. It reads past the run, so the
-/// caller must show that those bytes are inside the input, and it writes past
-/// the output, so the space must be reserved first. Both are cheap to arrange
-/// and neither is a guess: the reserve is one branch per block that is almost
-/// never taken, and the read is in bounds for every block but the last few.
-///
-/// # Safety
-///
-/// `src` must be readable for [`WIDE_LITERAL`] bytes and `out` must have that
-/// much spare capacity past its length.
+/// costs more than the copy. Profiling found 19.5% of the packer there. A move
+/// of constant width has no call in it; it reads past the run, so the caller
+/// shows that those bytes are inside the input, and it writes past the output,
+/// which the reserve covers.
 const WIDE_LITERAL: usize = 16;
-
-#[inline]
-unsafe fn push_literals_wide(src: &[u8], out: &mut Vec<u8>) {
-    let len = out.len();
-    std::ptr::copy_nonoverlapping(src.as_ptr(), out.as_mut_ptr().add(len), WIDE_LITERAL);
-    out.set_len(len + src.len());
-}
 
 /// Whether a literal run ending at `end` can be copied the wide way.
 ///
@@ -823,47 +816,133 @@ fn wide_literals_fit(literals: &[u8], end: usize, input_len: usize) -> bool {
     literals.len() <= WIDE_LITERAL && end + WIDE_LITERAL <= input_len
 }
 
+/// A write cursor into the output, past the point where its size is in doubt.
+///
+/// Every `push` and `extend_from_slice` in the block writer carries a capacity
+/// check, and profiling put 9.4% of the packer in that bookkeeping -- for a
+/// buffer whose worst case is known before the pass starts.
+///
+/// The bound is the whole input as literals, plus a token and an offset for
+/// each block, plus the chains of 255s, plus the overshoot the fixed-width
+/// literal move makes. A block covers at least [`MIN_MATCH`] output bytes, so
+/// there are at most `n / MIN_MATCH` of them. In a debug build every write
+/// checks itself against the reserve, so an overrun is a failing test rather
+/// than a corrupted heap.
+struct Cursor {
+    p: *mut u8,
+    base: *mut u8,
+    #[cfg(debug_assertions)]
+    limit: *mut u8,
+}
+
+impl Cursor {
+    #[inline]
+    fn room(n: usize) -> usize {
+        n + n / MIN_MATCH * 3 + n / 128 + WIDE_LITERAL + 64
+    }
+
+    /// # Safety
+    ///
+    /// `out` must have [`Cursor::room`] spare capacity past its length.
+    unsafe fn new(out: &mut Vec<u8>) -> Cursor {
+        let base = out.as_mut_ptr();
+        Cursor {
+            p: base.add(out.len()),
+            base,
+            #[cfg(debug_assertions)]
+            limit: base.add(out.capacity()),
+        }
+    }
+
+    #[inline]
+    fn guard(&self, _n: usize) {
+        #[cfg(debug_assertions)]
+        debug_assert!(
+            unsafe { self.p.add(_n) } <= self.limit,
+            "the packer wrote past its reserve"
+        );
+    }
+
+    #[inline]
+    unsafe fn byte(&mut self, b: u8) {
+        self.guard(1);
+        *self.p = b;
+        self.p = self.p.add(1);
+    }
+
+    #[inline]
+    unsafe fn offset(&mut self, v: u16) {
+        self.guard(2);
+        self.p.cast::<u16>().write_unaligned(v.to_le());
+        self.p = self.p.add(2);
+    }
+
+    /// Copies a fixed width and advances by the true length. See
+    /// [`WIDE_LITERAL`].
+    #[inline]
+    unsafe fn literals_wide(&mut self, src: &[u8]) {
+        self.guard(WIDE_LITERAL);
+        std::ptr::copy_nonoverlapping(src.as_ptr(), self.p, WIDE_LITERAL);
+        self.p = self.p.add(src.len());
+    }
+
+    #[inline]
+    unsafe fn literals(&mut self, src: &[u8]) {
+        self.guard(src.len());
+        std::ptr::copy_nonoverlapping(src.as_ptr(), self.p, src.len());
+        self.p = self.p.add(src.len());
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        // SAFETY: `p` never moves below `base`.
+        unsafe { self.p.offset_from(self.base) as usize }
+    }
+}
+
 fn emit_block(
     literals: &[u8],
     offset: usize,
     matched: usize,
-    out: &mut Vec<u8>,
+    out: &mut Cursor,
     split: Split,
     wide: bool,
 ) {
     let match_extra = matched - MIN_MATCH;
     let lit_field = literals.len().min(split.lit_max());
     let mat_field = match_extra.min(split.mat_max());
-    out.push(((lit_field as u8) << split.shift()) | mat_field as u8);
-
-    if literals.len() >= split.lit_max() {
-        put_extended(literals.len() - split.lit_max(), out);
-    }
-    if wide {
-        // One reserve covers the wide move and the offset that follows it.
-        out.reserve(WIDE_LITERAL + 2);
-        // SAFETY: `wide` is the caller's proof that the source has WIDE_LITERAL
-        // readable bytes, and the reserve above is the room to write them.
-        unsafe { push_literals_wide(literals, out) };
-    } else {
-        out.extend_from_slice(literals);
-    }
-
-    out.extend_from_slice(&(offset as u16).to_le_bytes());
-    if match_extra >= split.mat_max() {
-        put_extended(match_extra - split.mat_max(), out);
+    // SAFETY: the pass reserved `Cursor::room` before the first block, and a
+    // debug build checks every write against it.
+    unsafe {
+        out.byte(((lit_field as u8) << split.shift()) | mat_field as u8);
+        if literals.len() >= split.lit_max() {
+            put_extended(literals.len() - split.lit_max(), out);
+        }
+        if wide {
+            out.literals_wide(literals);
+        } else {
+            out.literals(literals);
+        }
+        out.offset(offset as u16);
+        if match_extra >= split.mat_max() {
+            put_extended(match_extra - split.mat_max(), out);
+        }
     }
 }
 
-fn emit_literals_only(literals: &[u8], out: &mut Vec<u8>, split: Split) {
+fn emit_literals_only(literals: &[u8], out: &mut Cursor, split: Split) {
     let lit_field = literals.len().min(split.lit_max());
-    // A zero match field with no offset following is what marks the tail; the
-    // decoder knows to stop because the declared length has been reached.
-    out.push((lit_field as u8) << split.shift());
-    if literals.len() >= split.lit_max() {
-        put_extended(literals.len() - split.lit_max(), out);
+    // SAFETY: as in `emit_block`.
+    unsafe {
+        // A zero match field with no offset following is what marks the tail;
+        // the decoder knows to stop because the declared length has been
+        // reached.
+        out.byte((lit_field as u8) << split.shift());
+        if literals.len() >= split.lit_max() {
+            put_extended(literals.len() - split.lit_max(), out);
+        }
+        out.literals(literals);
     }
-    out.extend_from_slice(literals);
 }
 
 /// Lay down a match whose source overlaps the output it is producing.
