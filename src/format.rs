@@ -149,11 +149,15 @@ const HASH_SIZE: usize = 1 << HASH_BITS;
 /// have to ask "is this slot empty" before asking "is this candidate usable",
 /// and the first question is only ever asked to avoid mis-answering the second.
 ///
-/// Any value far above the largest reachable position folds the two into one.
-/// The usability test computes `at - stored` and rejects anything at or past
-/// the window; a sentinel this large makes that subtraction wrap, so an empty
-/// slot fails the test already there. No position can collide with it, since a
-/// value would have to be two gigabytes long to reach it.
+/// Any value far above the largest reachable position folds the two into one:
+/// the search rejects a candidate that is not behind the cursor, and this one
+/// never is. No position can collide with it, since a value would have to be
+/// two gigabytes long to reach it.
+///
+/// The table used to hold the position *plus one*, left from when zero was the
+/// empty marker, and the search subtracted it back on every position visited --
+/// two instructions of the fourteen in the inner loop, for a distinction the
+/// sentinel had already made unnecessary.
 const EMPTY: u32 = 0x8000_0000;
 
 /// The match-finding table, held across calls.
@@ -170,7 +174,7 @@ const EMPTY: u32 = 0x8000_0000;
 /// trade for removing the setup entirely.
 #[derive(Debug)]
 pub struct Packer {
-    /// Position plus one, with [`EMPTY`] for a slot never written.
+    /// The position, with [`EMPTY`] for a slot never written.
     table: Box<[u32; HASH_SIZE]>,
 }
 
@@ -438,12 +442,15 @@ fn pack_pass(
     let mut misses = 1usize << SKIP_TRIGGER;
     let shift = hash_shift(input.len());
 
-    while at + MIN_MATCH <= input.len() {
+    // Hoisted: the loop asked `at + MIN_MATCH <= input.len()` and paid an `add`
+    // for it on every position visited.
+    let last = input.len() - MIN_MATCH;
+    while at <= last {
         // SAFETY: the loop condition is `at + MIN_MATCH <= input.len()`.
         let here = unsafe { word4(input, at) };
         let slot = hash4(here, shift);
         let stored = table[slot];
-        table[slot] = at as u32 + 1;
+        table[slot] = at as u32;
 
         // A slot holds a position from this value or a previous one, and only
         // positions behind the cursor are usable. An untouched slot holds
@@ -456,7 +463,7 @@ fn pack_pass(
         // to find that out. Since the hash is of exactly these four bytes, a
         // candidate that disagrees on them cannot match at all, so this rejects
         // without touching the extension loop.
-        let candidate = stored as usize - 1;
+        let candidate = stored as usize;
         let matched = if candidate < at
             && at - candidate <= MAX_OFFSET
             // SAFETY: `candidate < at`, and `at + MIN_MATCH <= input.len()`.
@@ -504,7 +511,7 @@ fn pack_pass(
             // leaves behind is one a later search can use.
             for step in 1..=LAZY_REACH {
                 let next = at + step;
-                if next + MIN_MATCH > input.len() {
+                if next > last {
                     break 'lazy;
                 }
                 // SAFETY: `next + MIN_MATCH <= input.len()` was tested above.
@@ -514,9 +521,9 @@ fn pack_pass(
                 // Inserted whether or not it wins: the position is real and a
                 // later search may want it, and the search itself would never
                 // have visited it.
-                table[slot] = next as u32 + 1;
+                table[slot] = next as u32;
 
-                let other = stored as usize - 1;
+                let other = stored as usize;
                 if other < next
                     && next - other <= MAX_OFFSET
                     // SAFETY: `other < next` and `next + MIN_MATCH <= input.len()`.
