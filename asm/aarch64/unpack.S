@@ -96,6 +96,50 @@
 #endif
 
 /*
+ * Bytes the fixed match move writes, which is a property of the code below and
+ * not of the format: one vector pair under the even split, three under the wide
+ * one, because that is what covers a match the split can carry inline.
+ */
+#if MAT_CAP > 64
+#  define COPY_MAX   96
+#elif MAT_CAP > 32
+#  define COPY_MAX   64
+#else
+#  define COPY_MAX   32
+#endif
+
+/*
+ * How far short of the declared length the fast loop stops.
+ *
+ * Two things have to hold, and the margin used to be derived from neither. It
+ * was LIT_MAX + MAT_CAP -- "what a block writes" -- which is 34 under the even
+ * split and 70 under the wide one.
+ *
+ * The first is a bound: the widest thing a fast block writes is its literals
+ * plus COPY_MAX, and it must land inside the 64 bytes of slack the caller
+ * provides past `declared`. That gives LIT_MAX + COPY_MAX - 64, which is 35 for
+ * the wide split and negative -- so no constraint at all -- for the even one.
+ *
+ * The second is not a bound but a heuristic. A value ends in a literal run with
+ * no offset after it, and the fast path always reads an offset, so the loop has
+ * to stop before that last block. It stops when `produced` reaches this margin
+ * short of the end, which covers any final run at least this long. A longer one
+ * is not a correctness problem -- the block decodes to nonsense, the length
+ * check at the end fails, and the caller runs the portable decoder -- it is
+ * simply slow, so the margin wants to be a comfortable upper bound on a final
+ * literal run and no more.
+ *
+ * Sixteen over the bound is that. Every byte of it costs: at 512 bytes and 36
+ * bytes to a block, the old 34 put a whole block on the checked path, which is
+ * three times dearer, and a call's fixed cost is 41% of the work at that size.
+ */
+#if (LIT_MAX + COPY_MAX) > 64
+#  define OUT_MARGIN (LIT_MAX + COPY_MAX - 64 + 16)
+#else
+#  define OUT_MARGIN 16
+#endif
+
+/*
  * KEVA_SYM pastes with ##, which means its argument is not expanded first --
  * KEVA_NAME(KEVA_ENTRY) would name the symbol after the macro rather than after
  * what it stands for. One more level fixes it, because an argument to a macro
@@ -190,10 +234,9 @@ L(entry):
      * literal move reads sixteen bytes from just past the token, which ends at
      * the same place.
      *
-     * Output, 32: at most fourteen literals and eighteen match bytes. The moves
-     * themselves reach further -- sixteen and thirty-two bytes -- but into the
-     * 64 bytes of slack the caller provides, which is what that slack is for.
-     * A long match is unbounded and checks the declared length itself.
+     * Output, OUT_MARGIN: see the constant. It is what the fixed match move
+     * needs to stay inside the caller's slack, plus enough that the closing
+     * literal run lands on the checked path rather than the fast one.
      *
      * These were 48 and 64, and the difference is not cosmetic. A 4 KiB value
      * of data that compresses six-fold packs to 656 bytes, so a 48-byte input
@@ -211,7 +254,7 @@ L(entry):
     // bytes of literals unconditionally, and the offset sits inside that reach.
     subs    x25, x20, #17               // input limit
     csel    x25, x25, xzr, hs
-    subs    x28, x22, #(LIT_MAX + MAT_CAP)  // output limit
+    subs    x28, x22, #OUT_MARGIN           // output limit
     csel    x28, x28, xzr, hs
 
 /*
