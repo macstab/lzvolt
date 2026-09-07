@@ -205,14 +205,19 @@ impl std::error::Error for PackError {}
 /// would otherwise reserve gigabytes before failing.
 const MAX_UNPACKED: usize = 512 * 1024 * 1024;
 
-/// Hash the four bytes at the start of `bytes`.
+/// Hash four bytes the caller has already read.
 ///
-/// Read as one word rather than four indexed bytes: the indexed form is four
-/// bounds checks and four loads that the compiler is not always willing to
-/// merge, and this runs once per position in the input.
+/// It takes the word rather than a slice because the search needs those same
+/// four bytes a moment later to reject a candidate, and a slice-taking hash
+/// read them a second time.
+///
+/// That was measured and it is neutral: LLVM already folded the second read
+/// away, since the only write between the two is to the table, which it can
+/// prove does not alias the input. The redundancy was in the source and never
+/// reached the machine code. Kept because saying it once is clearer than
+/// relying on the compiler to notice, not because it is faster.
 #[inline]
-fn hash4(bytes: &[u8], shift: u32) -> usize {
-    let word = u32::from_le_bytes(bytes[..4].try_into().unwrap());
+fn hash4(word: u32, shift: u32) -> usize {
     (word.wrapping_mul(0x9E37_79B1) >> shift) as usize
 }
 
@@ -381,7 +386,8 @@ fn pack_pass(
     let shift = hash_shift(input.len());
 
     while at + MIN_MATCH <= input.len() {
-        let slot = hash4(&input[at..], shift);
+        let here = word4(input, at);
+        let slot = hash4(here, shift);
         let stored = table[slot];
         table[slot] = at as u32 + 1;
 
@@ -399,7 +405,7 @@ fn pack_pass(
         let candidate = stored as usize - 1;
         let matched = if candidate < at
             && at - candidate <= MAX_OFFSET
-            && word4(input, candidate) == word4(input, at)
+            && word4(input, candidate) == here
         {
             MIN_MATCH + common_prefix(&input[candidate + MIN_MATCH..], &input[at + MIN_MATCH..])
         } else {
@@ -433,7 +439,8 @@ fn pack_pass(
         let mut matched = matched;
         while lazy && at + 1 + MIN_MATCH <= input.len() {
             let next = at + 1;
-            let slot = hash4(&input[next..], shift);
+            let ahead = word4(input, next);
+            let slot = hash4(ahead, shift);
             let stored = table[slot];
             // Inserted whether or not it wins: the position is real and a later
             // search may want it, and the search itself would never have
@@ -443,7 +450,7 @@ fn pack_pass(
             let other = stored as usize - 1;
             let longer = other < next
                 && next - other <= MAX_OFFSET
-                && word4(input, other) == word4(input, next)
+                && word4(input, other) == ahead
                 && {
                     let len = MIN_MATCH
                         + common_prefix(&input[other + MIN_MATCH..], &input[next + MIN_MATCH..]);
