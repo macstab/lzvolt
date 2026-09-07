@@ -538,6 +538,20 @@ fn pack_pass(
             break;
         }
 
+        // The bounds checks in this loop stay, and that is measured rather than
+        // assumed. In the disassembly it is eleven instructions per byte walked
+        // where six do the work, with a range check per iteration whose answer
+        // the loop conditions already guarantee. Hoisting them into an unsafe
+        // helper was tried twice: folding the two conditions into a `min` up
+        // front cost 4.8% on varied_64k for 2 to 4% on records, and keeping the
+        // short circuit while dropping only the checks was worse than either --
+        // 4.72 cycles a byte against 4.42. Three runs each.
+        //
+        // The reason the disassembly misleads is that this loop usually runs
+        // zero times: a match found by a forward search rarely extends
+        // backwards on data that does not repeat, so what the body costs per
+        // iteration hardly matters and disturbing the code around it does.
+        //
         // Walk the match backwards into the literals that were about to be
         // emitted. The bytes are already known to be equal there; they were
         // simply never looked at, because the search only ever moves forward.
