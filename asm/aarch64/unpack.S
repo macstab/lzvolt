@@ -136,12 +136,30 @@
  * callee-saved register.
  */
 KEVA_NAME(KEVA_ENTRY):
-    stp     x29, x30, [sp, #-96]!
+    /*
+     * Nine registers, saved in five slots. x27 used to be the tenth and was
+     * never written -- it was saved and restored on every call for nothing.
+     *
+     * Removing it does not shorten the prologue, because the ABI saves in
+     * pairs and nine registers fill five pairs exactly as ten do. Getting to
+     * eight would: the match nibble is the only one that lives for less than
+     * the whole call, but every caller-saved register it could move to (x8
+     * through x17) is already live across a call in the checked path.
+     * Recomputing `src_len` and `declared` from the zone limits would free two
+     * more, at the price of an `add` in the long-match path -- which is 27% of
+     * blocks on data that compresses well, so it loses at every size but the
+     * smallest.
+     *
+     * Worth roughly 2 to 3 cycles of the 70 a call costs. The rest of that
+     * number is elsewhere: about a third in this prologue and its epilogue,
+     * about a third in the one block that the output margin always pushes onto
+     * the checked path.
+     */
+    stp     x29, x30, [sp, #-80]!
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
     stp     x23, x24, [sp, #48]
     stp     x25, x26, [sp, #64]
-    stp     x27, x28, [sp, #80]
     mov     x29, sp
 
     mov     x19, x0
@@ -195,6 +213,25 @@ L(entry):
     csel    x28, x28, xzr, hs
 
 /*
+ * Decoding two values at once was measured and is not worth a third loop.
+ *
+ * The block loop has a five-cycle recurrence -- the next token's address is
+ * this block's literal count -- and runs at IPC 4.7 on an eight-wide machine,
+ * so about 40% of the issue width sits idle waiting for that chain. Nothing
+ * inside one value can fill it, and two values have no dependency on each
+ * other, so interleaving them ought to.
+ *
+ * It buys about 7%, and only between roughly 4 and 32 KiB of input. Below that
+ * the loop is too short for two chains to overlap before it ends; above it the
+ * two working sets evict each other and the gain is gone. Two values decoded by
+ * two ordinary calls measured 7.46 GiB/s against 7.51 for one, so nothing
+ * overlaps across a call boundary today -- the gain would have to come from a
+ * kernel carrying two cursor sets, which is a second full state in registers
+ * and a second copy of the fast and checked paths.
+ *
+ * Seven percent in a band, for that. And it does nothing at the small sizes
+ * that motivated it, where 41% of a call is its fixed cost.
+ *
  * Two loops over the same format, and that is the whole shape of this file.
  *
  * The fast one runs while both cursors sit inside the zone above. It asks
@@ -658,12 +695,11 @@ L(done):
 L(fail):
     mov     w0, wzr
 L(return):
-    ldp     x27, x28, [sp, #80]
     ldp     x25, x26, [sp, #64]
     ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #96
+    ldp     x29, x30, [sp], #80
     ret
 
 /*
