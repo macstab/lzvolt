@@ -1562,6 +1562,53 @@ mod tests {
         assert_eq!(refused, even, "liblz4 accepted one of our blocks -- see the note above");
     }
 
+    /// The kernel must *accept* what the packer writes, not merely agree with
+    /// the portable decoder about the answer.
+    ///
+    /// Those are different claims, and the difference hid a register-clobbering
+    /// bug for three commits. A kernel that declines returns zero, the caller
+    /// runs the portable decoder, and the bytes come out right -- so every test
+    /// that compares output passes while the assembly is never exercised at
+    /// all. This one fails instead.
+    #[test]
+    fn the_kernel_accepts_every_stream_the_packer_writes() {
+        if !keva_asm::unpack::asm_available() {
+            return;
+        }
+        let mut packed = Vec::new();
+        let mut out = Vec::new();
+        let mut sizes: Vec<usize> = vec![256, 512, 1000, 1024, 4096, 16_384, 65_536];
+        sizes.extend([5usize, 17, 64, 100]);
+        for size in sizes {
+            for input in [records(size), vec![b'a'; size]] {
+                if !pack(&input, &mut packed) {
+                    continue;
+                }
+                let f = frame(&packed).expect("the packer wrote a header");
+                let took = match f.switch {
+                    None => keva_asm::unpack::unpack_asm(
+                        f.body, &mut out, f.declared, f.split.kernel(),
+                    ),
+                    Some(switch) => keva_asm::unpack::unpack_asm_hybrid(
+                        f.body,
+                        &mut out,
+                        f.declared,
+                        switch,
+                        f.split.kernel(),
+                        f.split.other().kernel(),
+                    ),
+                };
+                assert!(
+                    took,
+                    "the kernel declined {} bytes ({})",
+                    input.len(),
+                    if f.switch.is_some() { "two sections" } else { "one section" }
+                );
+                assert_eq!(&out[..], &input[..], "and then lost bytes");
+            }
+        }
+    }
+
     #[test]
     fn the_assembly_decoder_agrees_with_the_portable_one() {
         if !keva_asm::unpack::asm_available() {

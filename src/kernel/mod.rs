@@ -431,3 +431,48 @@ mod tests {
         assert_eq!(mask.to_dense(), u16::MAX);
     }
 }
+
+#[cfg(test)]
+mod abi {
+    /// Every callee-saved register the kernels write must be saved on entry.
+    ///
+    /// This is checked in the source rather than by running anything, because
+    /// running cannot check it. A kernel that clobbers a callee-saved register
+    /// corrupts its *caller*, so whether the damage shows depends on whether
+    /// that caller happened to be using the register -- the same build passes
+    /// or fails depending on code that is not being tested. It cost three
+    /// commits once: `stp x27, x28` was removed because x27 was dead, which
+    /// dropped x28's save with it, and every output-comparing test stayed green
+    /// because the kernel merely declined and the portable decoder answered.
+    #[test]
+    fn callee_saved_registers_are_all_saved() {
+        for file in ["asm/aarch64/unpack.S", "asm/aarch64/pack.S"] {
+            let src = std::fs::read_to_string(file).expect(file);
+            // Only x19-x28 matter; x29 and x30 are the frame and link, and the
+            // prologue would not assemble without them.
+            for n in 19..=28u32 {
+                let written = src.lines().any(|l| {
+                    let l = l.trim();
+                    !l.starts_with("//")
+                        && !l.starts_with('*')
+                        && !l.starts_with("st")
+                        && !l.starts_with("ld")
+                        && l.split_once(char::is_whitespace).is_some_and(|(_, rest)| {
+                            let first = rest.trim_start().split(',').next().unwrap_or("").trim();
+                            first == format!("x{n}") || first == format!("w{n}")
+                        })
+                });
+                if !written {
+                    continue;
+                }
+                let saved = src.lines().any(|l| {
+                    let l = l.trim();
+                    (l.starts_with("stp") || l.starts_with("str"))
+                        && l.contains("[sp")
+                        && (l.contains(&format!("x{n},")) || l.contains(&format!("x{n} ")))
+                });
+                assert!(saved, "{file} writes x{n} and never saves it");
+            }
+        }
+    }
+}
