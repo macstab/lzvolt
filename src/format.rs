@@ -301,6 +301,36 @@ fn pack_with(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> b
     out.len() < input.len()
 }
 
+/// How far past a match the search looks for a longer one.
+///
+/// One, and the reason two is not better is worth writing down, because the
+/// obvious argument says it should be. A longer match is one block instead of
+/// two and the decoder is paid by blocks, so reaching further ought to pay
+/// twice over. Measured at two:
+///
+/// ```text
+///   varied_64k   3618 -> 3428 blocks   18.1 -> 19.1 B/block   1.98x -> 1.99x
+///   decoding                                                   7.51 -> 7.51
+///   packing records_64k                                        2.74 -> 2.27
+/// ```
+///
+/// Five percent fewer blocks, five percent more bytes in each, and not one
+/// percent of decoding. The block counts moved and the cost per block moved
+/// with them: extended match lengths went from 16.8% of blocks to 18.0% and
+/// extended literal runs from 15.3% to 17.4%, because a longer match overflows
+/// its field and the bytes the step turns loose lengthen the literal run past
+/// its own. Every one of those is a chain of 255s -- a dependent load in the
+/// decoder's block, which is exactly what the wide split was introduced to
+/// remove.
+///
+/// So bytes per block is not the lever by itself. It is bytes per block *at a
+/// fixed cost per block*, and a block pushed over a field boundary is not fixed
+/// cost. The wide split worked because it removed chains; the first lazy step
+/// worked because it lengthened matches that still fit. This one lengthens them
+/// past the fit and gives the gain straight back, and costs 17% of packing to
+/// do it.
+const LAZY_REACH: usize = 1;
+
 /// Blocks the running window looks back over before changing the split.
 ///
 /// A window rather than a total, because a value is not required to have one
@@ -437,33 +467,47 @@ fn pack_pass(
         // every round demands a strictly longer match than the last.
         let mut candidate = candidate;
         let mut matched = matched;
-        while lazy && at + 1 + MIN_MATCH <= input.len() {
-            let next = at + 1;
-            let ahead = word4(input, next);
-            let slot = hash4(ahead, shift);
-            let stored = table[slot];
-            // Inserted whether or not it wins: the position is real and a later
-            // search may want it, and the search itself would never have
-            // visited it.
-            table[slot] = next as u32 + 1;
+        'lazy: while lazy {
+            // One byte on, and if that finds nothing better, two.
+            //
+            // Stepping only by one gives up as soon as the very next position
+            // fails, which loses a long match sitting two bytes away -- and a
+            // long match is what the decoder is paid by, since it is one block
+            // instead of two. The second probe costs a hash and a lookup on a
+            // position the search would otherwise have skipped, and the entry it
+            // leaves behind is one a later search can use.
+            for step in 1..=LAZY_REACH {
+                let next = at + step;
+                if next + MIN_MATCH > input.len() {
+                    break 'lazy;
+                }
+                let ahead = word4(input, next);
+                let slot = hash4(ahead, shift);
+                let stored = table[slot];
+                // Inserted whether or not it wins: the position is real and a
+                // later search may want it, and the search itself would never
+                // have visited it.
+                table[slot] = next as u32 + 1;
 
-            let other = stored as usize - 1;
-            let longer = other < next
-                && next - other <= MAX_OFFSET
-                && word4(input, other) == ahead
-                && {
+                let other = stored as usize - 1;
+                if other < next
+                    && next - other <= MAX_OFFSET
+                    && word4(input, other) == ahead
+                {
                     let len = MIN_MATCH
                         + common_prefix(&input[other + MIN_MATCH..], &input[next + MIN_MATCH..]);
-                    len > matched && {
+                    // Strictly longer, and by enough to pay for the literals the
+                    // step turns loose: moving `step` bytes out of a match and
+                    // into the literal run costs about that many bytes.
+                    if len > matched + step - 1 {
                         matched = len;
-                        true
+                        candidate = other;
+                        at = next;
+                        continue 'lazy;
                     }
-                };
-            if !longer {
-                break;
+                }
             }
-            candidate = other;
-            at = next;
+            break;
         }
 
         // Walk the match backwards into the literals that were about to be
