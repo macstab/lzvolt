@@ -64,6 +64,24 @@ const MAX_OFFSET: usize = 65_535;
 /// A single slot per hash, so a collision simply loses a match rather than
 /// costing a search. That is the trade that keeps packing near memory speed.
 ///
+/// A second candidate per slot -- keeping the previous occupant and taking
+/// whichever gives the longer match -- was built and measured twice, and
+/// neither form pays.
+///
+/// Used wherever it matches, it does not lengthen matches, it creates them:
+/// where the newer candidate lost to a collision the older one wins, at a
+/// position the search would have walked past. varied_64k went to 2.07x from
+/// 1.98x and to 3945 blocks from 3618. Denser and slower to read, which is the
+/// trade this format exists to refuse.
+///
+/// Restricted to positions that already matched, so it can only lengthen, the
+/// shape is right -- 3503 blocks at 18.7 bytes each and 2.02x -- and it still
+/// does not pay: decoding records_64k fell 11% and packing varied_64k 23%, for
+/// two table loads and two verifies on every position visited.
+///
+/// Three attempts on this axis now, counting reaching two bytes past a match
+/// (see [`LAZY_REACH`]). Each moved the ratio and left decoding where it was.
+///
 /// Eleven bits, not twelve, and the reason is the cache rather than the hash.
 /// The table shares L1 with the data it indexes, so every slot it gains is a
 /// line the input loses. Measured on a 64 KiB value, where the two are actually
