@@ -252,11 +252,16 @@ fn hash_shift(len: usize) -> u32 {
 
 /// The four bytes at `at`, as one word.
 ///
-/// `at + 4` is within the input at every call site: the main loop runs while
-/// `at + MIN_MATCH <= input.len()`, and a candidate is always behind `at`.
+/// # Safety
+///
+/// `at + 4 <= input.len()`. Every caller is inside the search loop, whose
+/// condition is `at + MIN_MATCH <= input.len()`, or is reading a candidate
+/// position which is strictly behind `at`.
 #[inline]
-fn word4(input: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(input[at..at + 4].try_into().unwrap())
+unsafe fn word4(input: &[u8], at: usize) -> u32 {
+    // The checked form goes through `try_into` and a `Result`, which profiling
+    // found at 3.8% of the packer -- for a bound the loop has already tested.
+    u32::from_le(input.as_ptr().add(at).cast::<u32>().read_unaligned())
 }
 
 /// How fast the search gives up. After `1 << SKIP_TRIGGER` consecutive misses
@@ -434,7 +439,8 @@ fn pack_pass(
     let shift = hash_shift(input.len());
 
     while at + MIN_MATCH <= input.len() {
-        let here = word4(input, at);
+        // SAFETY: the loop condition is `at + MIN_MATCH <= input.len()`.
+        let here = unsafe { word4(input, at) };
         let slot = hash4(here, shift);
         let stored = table[slot];
         table[slot] = at as u32 + 1;
@@ -453,9 +459,11 @@ fn pack_pass(
         let candidate = stored as usize - 1;
         let matched = if candidate < at
             && at - candidate <= MAX_OFFSET
-            && word4(input, candidate) == here
+            // SAFETY: `candidate < at`, and `at + MIN_MATCH <= input.len()`.
+            && unsafe { word4(input, candidate) } == here
         {
-            MIN_MATCH + common_prefix(&input[candidate + MIN_MATCH..], &input[at + MIN_MATCH..])
+            // SAFETY: same, and `candidate + MIN_MATCH < at + MIN_MATCH`.
+            MIN_MATCH + unsafe { common_prefix(input, candidate + MIN_MATCH, at + MIN_MATCH) }
         } else {
             0
         };
@@ -499,7 +507,8 @@ fn pack_pass(
                 if next + MIN_MATCH > input.len() {
                     break 'lazy;
                 }
-                let ahead = word4(input, next);
+                // SAFETY: `next + MIN_MATCH <= input.len()` was tested above.
+                let ahead = unsafe { word4(input, next) };
                 let slot = hash4(ahead, shift);
                 let stored = table[slot];
                 // Inserted whether or not it wins: the position is real and a
@@ -510,10 +519,11 @@ fn pack_pass(
                 let other = stored as usize - 1;
                 if other < next
                     && next - other <= MAX_OFFSET
-                    && word4(input, other) == ahead
+                    // SAFETY: `other < next` and `next + MIN_MATCH <= input.len()`.
+                    && unsafe { word4(input, other) } == ahead
                 {
                     let len = MIN_MATCH
-                        + common_prefix(&input[other + MIN_MATCH..], &input[next + MIN_MATCH..]);
+                        + unsafe { common_prefix(input, other + MIN_MATCH, next + MIN_MATCH) };
                     // Strictly longer, and by enough to pay for the literals the
                     // step turns loose: moving `step` bytes out of a match and
                     // into the literal run costs about that many bytes.
@@ -653,13 +663,27 @@ fn put_varint_into(value: u64, out: &mut Vec<u8>) {
 /// load turns eight of those into one XOR whose trailing zero count gives the
 /// exact position of the first difference. The tail below eight bytes falls
 /// back to the simple loop.
-fn common_prefix(a: &[u8], b: &[u8]) -> usize {
-    let limit = a.len().min(b.len());
+/// Length of the run shared by `input[a..]` and `input[b..]`, with `a < b`.
+///
+/// Takes positions rather than two slices. Building the slices cost two range
+/// checks and a `min` of their lengths on every match found -- profiling put
+/// 3.8% of the packer in that `min` alone -- and the caller already knows both
+/// facts: the later position bounds the comparison, and it is the later one by
+/// construction.
+///
+/// # Safety
+///
+/// `a < b` and `b <= input.len()`.
+unsafe fn common_prefix(input: &[u8], a: usize, b: usize) -> usize {
+    let limit = input.len() - b;
+    let base = input.as_ptr();
     let mut i = 0;
 
     while i + 8 <= limit {
-        let left = u64::from_le_bytes(a[i..i + 8].try_into().unwrap());
-        let right = u64::from_le_bytes(b[i..i + 8].try_into().unwrap());
+        // SAFETY: `b + i + 8 <= input.len()` from the loop condition, and
+        // `a < b`, so both reads are inside the slice.
+        let left = u64::from_le(base.add(a + i).cast::<u64>().read_unaligned());
+        let right = u64::from_le(base.add(b + i).cast::<u64>().read_unaligned());
         let diff = left ^ right;
         if diff != 0 {
             // Little-endian, so the first differing byte is the lowest set bit.
@@ -668,7 +692,7 @@ fn common_prefix(a: &[u8], b: &[u8]) -> usize {
         i += 8;
     }
 
-    while i < limit && a[i] == b[i] {
+    while i < limit && *base.add(a + i) == *base.add(b + i) {
         i += 1;
     }
     i
