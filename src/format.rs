@@ -491,6 +491,27 @@ fn pack_pass(
         // where the table holds stale entries and neither test predicts, does
         // the fold pay.
         //
+        // Two candidates for a different search were built. Neither wins.
+        //
+        // Folding the two tests into `(at - candidate - 1) < MAX_OFFSET`,
+        // measured back to back against this in one sitting: noise_4k 0.748 ->
+        // 0.734 cycles per byte, varied_64k 3.853 -> 4.331, records_4k 1.014 ->
+        // 1.024. Two percent on the target, twelve against everywhere else.
+        //
+        // Reading the candidate unconditionally and branching only on whether
+        // four bytes agree -- which is what liblz4 does, and why it executes
+        // more instructions per byte than we do: noise_4k flat, varied_64k 11%
+        // worse, worse on every other shape. The unconditional read costs more
+        // where the branch would have predicted than it saves where it would
+        // not, and predictable positions are the overwhelming majority
+        // everywhere except noise.
+        //
+        // A second search remains the right idea -- which search found a match
+        // is invisible to the decoder, so switching costs nothing in the format
+        // and could ride the miss streak the way the split rides the saturation
+        // window. What is missing is a second search that wins on its own
+        // target. These two do not.
+        //
         // Which is where the real gap is, and it is not this. Profiling both
         // packers over the same 4 KiB of noise:
         //
