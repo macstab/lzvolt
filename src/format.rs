@@ -424,7 +424,7 @@ fn pack_pass(
 ) {
     // Written with the flag bits clear. Their value cannot be known yet, and
     // does not need to be: the varint's length is fixed by `input.len()`.
-    put_varint_into((input.len() as u64) << 2 | start_split.bit(), out);
+    put_varint_into(((input.len() as u64) << 2) | start_split.bit(), out);
     let header_len = out.len();
     // Reserved once, so nothing below has to ask again.
     out.reserve(Cursor::room(input.len()));
@@ -507,49 +507,53 @@ fn pack_pass(
         // every round demands a strictly longer match than the last.
         let mut candidate = candidate;
         let mut matched = matched;
-        'lazy: while lazy {
-            // One byte on, and if that finds nothing better, two.
-            //
-            // Stepping only by one gives up as soon as the very next position
-            // fails, which loses a long match sitting two bytes away -- and a
-            // long match is what the decoder is paid by, since it is one block
-            // instead of two. The second probe costs a hash and a lookup on a
-            // position the search would otherwise have skipped, and the entry it
-            // leaves behind is one a later search can use.
-            for step in 1..=LAZY_REACH {
-                let next = at + step;
-                if next > last {
-                    break 'lazy;
-                }
-                // SAFETY: `next + MIN_MATCH <= input.len()` was tested above.
-                let ahead = unsafe { word4(input, next) };
-                let slot = hash4(ahead, shift);
-                let stored = table[slot];
-                // Inserted whether or not it wins: the position is real and a
-                // later search may want it, and the search itself would never
-                // have visited it.
-                table[slot] = next as u32;
+        // A guard on the outside and a loop on the inside, because `lazy` never
+        // changes and `while lazy` reads as though it might.
+        if lazy {
+            'lazy: loop {
+                // One byte on, and if that finds nothing better, two.
+                //
+                // Stepping only by one gives up as soon as the very next position
+                // fails, which loses a long match sitting two bytes away -- and a
+                // long match is what the decoder is paid by, since it is one block
+                // instead of two. The second probe costs a hash and a lookup on a
+                // position the search would otherwise have skipped, and the entry it
+                // leaves behind is one a later search can use.
+                for step in 1..=LAZY_REACH {
+                    let next = at + step;
+                    if next > last {
+                        break 'lazy;
+                    }
+                    // SAFETY: `next + MIN_MATCH <= input.len()` was tested above.
+                    let ahead = unsafe { word4(input, next) };
+                    let slot = hash4(ahead, shift);
+                    let stored = table[slot];
+                    // Inserted whether or not it wins: the position is real and a
+                    // later search may want it, and the search itself would never
+                    // have visited it.
+                    table[slot] = next as u32;
 
-                let other = stored as usize;
-                if other < next
-                    && next - other <= MAX_OFFSET
-                    // SAFETY: `other < next` and `next + MIN_MATCH <= input.len()`.
-                    && unsafe { word4(input, other) } == ahead
-                {
-                    let len = MIN_MATCH
-                        + unsafe { common_prefix(input, other + MIN_MATCH, next + MIN_MATCH) };
-                    // Strictly longer, and by enough to pay for the literals the
-                    // step turns loose: moving `step` bytes out of a match and
-                    // into the literal run costs about that many bytes.
-                    if len > matched + step - 1 {
-                        matched = len;
-                        candidate = other;
-                        at = next;
-                        continue 'lazy;
+                    let other = stored as usize;
+                    if other < next
+                        && next - other <= MAX_OFFSET
+                        // SAFETY: `other < next` and `next + MIN_MATCH <= input.len()`.
+                        && unsafe { word4(input, other) } == ahead
+                    {
+                        let len = MIN_MATCH
+                            + unsafe { common_prefix(input, other + MIN_MATCH, next + MIN_MATCH) };
+                        // Strictly longer, and by enough to pay for the literals the
+                        // step turns loose: moving `step` bytes out of a match and
+                        // into the literal run costs about that many bytes.
+                        if len > matched + step - 1 {
+                            matched = len;
+                            candidate = other;
+                            at = next;
+                            continue 'lazy;
+                        }
                     }
                 }
+                break;
             }
-            break;
         }
 
         // The bounds checks in this loop stay, and that is measured rather than
@@ -1107,7 +1111,7 @@ pub fn unpack_into(block: &[u8], out: &mut Vec<u8>, declared: usize) -> Result<(
     }
     // The portable decoder wants the header, so give it one.
     let mut framed = Vec::with_capacity(block.len() + 10);
-    put_varint_into((declared as u64) << 2 | EVEN.bit(), &mut framed);
+    put_varint_into(((declared as u64) << 2) | EVEN.bit(), &mut framed);
     framed.extend_from_slice(block);
     unpack_portable(&framed, out)
 }
@@ -1510,7 +1514,7 @@ mod tests {
             for flags in 0u64..4 {
             for _ in 0..200 {
                 let mut stream = Vec::new();
-                put_varint_into(len << 2 | flags, &mut stream);
+                put_varint_into((len << 2) | flags, &mut stream);
                 for _ in 0..(next() % 200) {
                     stream.push(next() as u8);
                 }
@@ -1827,16 +1831,6 @@ mod tests {
         let mut asm_out = Vec::new();
         let mut ref_out = Vec::new();
         for case in &broken {
-            let Some((raw, header)) = get_varint(case) else {
-                continue;
-            };
-            let split = Split::from_header(raw);
-            let Ok(declared) = usize::try_from(raw >> 2) else {
-                continue;
-            };
-            if declared > MAX_UNPACKED {
-                continue;
-            }
             let Ok(f) = frame(case) else {
                 continue;
             };
