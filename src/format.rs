@@ -475,6 +475,33 @@ fn pack_pass(
         // to find that out. Since the hash is of exactly these four bytes, a
         // candidate that disagrees on them cannot match at all, so this rejects
         // without touching the extension loop.
+        // Two tests, and they stay two.
+        //
+        // "Behind the cursor" and "inside the window" are one question asked of
+        // the distance -- `(at - candidate - 1) < MAX_OFFSET` in unsigned
+        // arithmetic covers both, since an empty or ahead slot wraps to
+        // something enormous. That was built and measured: noise_4k improved 3%
+        // and everything else got worse, varied_64k by 5%, varied_4k by 4%,
+        // records_4k by 3%. Three runs each.
+        //
+        // The reason is the short circuit. Once the table is warm the first
+        // test is almost always true and almost always predicted, so the second
+        // is cheap; folding them makes both arithmetic on every position
+        // whether or not it is needed. Only on data that does not compress,
+        // where the table holds stale entries and neither test predicts, does
+        // the fold pay.
+        //
+        // Which is where the real gap is, and it is not this. Profiling both
+        // packers over the same 4 KiB of noise:
+        //
+        //     keva     0.740 cycles/byte   IPC 3.13   2.3 instr/byte   16.5% mispredicts
+        //     liblz4   0.539               IPC 6.12   3.3             2.1%
+        //
+        // liblz4 executes half again as many instructions per byte and is 27%
+        // faster, at twice the issue rate, because it loses almost nothing to
+        // misprediction. Ours is a search whose branches depend on what the
+        // table happens to hold; theirs is shaped so that they do not. Closing
+        // that is a different loop, not a smaller one.
         let candidate = stored as usize;
         let matched = if candidate < at
             && at - candidate <= MAX_OFFSET
