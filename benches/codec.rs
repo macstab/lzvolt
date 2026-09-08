@@ -394,6 +394,7 @@ fn own_format(c: &mut Criterion) {
     let mut group = c.benchmark_group("own_format");
     for (label, data) in [
         ("records_512", records(512)),
+        ("varied_512", varied(512)),
         ("records_4k", records(4096)),
         ("records_64k", records(65_536)),
         ("varied_4k", varied(4096)),
@@ -507,8 +508,14 @@ fn three_packers(c: &mut Criterion) {
     }
 
     let mut group = c.benchmark_group("compress3");
+    // Three shapes at 512 bytes, not one. A cache stores short values far more
+    // often than long ones, so that is the size any claim about this packer
+    // rests on -- and it rested on `records` alone, which is the shape it
+    // handles best.
     for (label, data) in [
         ("records_512", records(512)),
+        ("varied_512", varied(512)),
+        ("noise_512", noise(512)),
         ("records_4k", records(4096)),
         ("records_64k", records(65_536)),
         ("varied_4k", varied(4096)),
