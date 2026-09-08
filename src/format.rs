@@ -426,8 +426,13 @@ fn pack_pass(
     // does not need to be: the varint's length is fixed by `input.len()`.
     put_varint_into(((input.len() as u64) << 2) | start_split.bit(), out);
     let header_len = out.len();
-    // Reserved once, so nothing below has to ask again.
-    out.reserve(Cursor::room(input.len()));
+    // Reserved once, so nothing below has to ask again -- and asked about
+    // first, because the caller reuses its buffer and growth is the case that
+    // never happens. `Vec::reserve` is a call; a capacity compare is not.
+    let want = Cursor::room(input.len());
+    if out.capacity() - out.len() < want {
+        out.reserve(want);
+    }
     // SAFETY: the reserve above is exactly what the cursor's writes assume.
     let mut cur = unsafe { Cursor::new(out) };
     let mut split = start_split;

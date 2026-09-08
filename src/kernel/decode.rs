@@ -155,7 +155,13 @@ pub fn unpack_asm_hybrid(
         }
 
         out.clear();
-        out.reserve(declared + UNPACK_SLACK);
+        // `Vec::reserve` is a call whose body handles growth, and the caller
+        // reuses its buffer, so growth is the case that never happens. Asking
+        // about the capacity first keeps the common path to a compare.
+        let want = declared + UNPACK_SLACK;
+        if out.capacity() < want {
+            out.reserve(want);
+        }
         let cap = out.capacity();
 
         // SAFETY: `cap` is the real capacity and is at least `declared + 64`,
@@ -223,7 +229,13 @@ pub fn unpack_asm(body: &[u8], out: &mut Vec<u8>, declared: usize, split: Split)
         }
 
         out.clear();
-        out.reserve(declared + UNPACK_SLACK);
+        // `Vec::reserve` is a call whose body handles growth, and the caller
+        // reuses its buffer, so growth is the case that never happens. Asking
+        // about the capacity first keeps the common path to a compare.
+        let want = declared + UNPACK_SLACK;
+        if out.capacity() < want {
+            out.reserve(want);
+        }
         let cap = out.capacity();
 
         // SAFETY: `cap` is the real capacity, so the whole range handed to the
