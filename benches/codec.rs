@@ -521,6 +521,10 @@ fn three_packers(c: &mut Criterion) {
         ("varied_4k", varied(4096)),
         ("varied_64k", varied(65_536)),
         ("noise_4k", noise(4096)),
+        // A large value that will not compress: an image, a ciphertext, an
+        // already packed blob. All three packers give up on it -- the question
+        // is how much of the value each one reads before it does.
+        ("noise_64k", noise(65_536)),
     ] {
         group.throughput(Throughput::Bytes(data.len() as u64));
 
