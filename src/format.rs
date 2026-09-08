@@ -320,10 +320,81 @@ pub fn pack(input: &[u8], out: &mut Vec<u8>) -> bool {
     pack_with(input, out, &mut table)
 }
 
+/// How far the probe reads before writing a value off, and how many slots it
+/// reads it into.
+///
+/// A kilobyte, split across two windows, because the question is only whether
+/// the value repeats itself at all. Nine bits because the table is zeroed on
+/// every call: two kilobytes costs a couple of hundred cycles, sixteen would
+/// cost more than the probe saves. Collisions do not cost accuracy the way they
+/// would in the search -- equal words always land in the same slot, and data
+/// that compresses repeats often enough that one pair survives.
+const PROBE: usize = 1024;
+const PROBE_BITS: u32 = 9;
+
+/// Only values above this are probed. Below it a full search is a few thousand
+/// cycles and there is nothing worth saving.
+const PROBE_ABOVE: usize = 4096;
+
+/// Whether the value repeats itself inside its first [`PROBE`] bytes.
+///
+/// A value that does not is not going to compress, and searching the rest of it
+/// produces a stream longer than the input that [`pack_with`] then throws away.
+/// That is the shape this packer was furthest behind on: 0.22 cycles per byte
+/// spent on 64 KiB of noise to answer a question a kilobyte could answer.
+///
+/// The probe has its own table and runs before the search, so the search sees
+/// exactly the slots it would have seen and the packed bytes are unchanged. Two
+/// attempts to answer this inside the search instead -- one testing a byte
+/// budget on the miss path, one running the loop to a checkpoint and continuing
+/// past it -- both cost 7.5% on compressible 64 KiB, because splitting that
+/// loop in two costs more than the branch did.
+///
+/// It skips on misses exactly as the search does, so it is cheap from both
+/// ends: on data that repeats it returns on one of the first few positions, and
+/// on data that does not it accelerates away rather than walking the kilobyte.
+#[inline(never)]
+fn worth_packing(input: &[u8]) -> bool {
+    if input.len() <= PROBE_ABOVE {
+        return true;
+    }
+    let mut seen = [0u32; 1 << PROBE_BITS];
+    // Two windows rather than one long one, so a value is not written off on
+    // the strength of its head: a random header in front of a compressible body
+    // is a real shape, and half a kilobyte of it would otherwise decide the
+    // whole value. Positions are absolute, so a word in the second window still
+    // matches one recorded in the first.
+    let half = PROBE / 2;
+    for start in [0, input.len() / 2] {
+        let last = (start + half).min(input.len() - MIN_MATCH);
+        let mut at = start;
+        let mut misses = 1usize << SKIP_TRIGGER;
+        while at <= last {
+            // SAFETY: `at <= last` is `at + MIN_MATCH <= input.len()`.
+            let here = unsafe { word4(input, at) };
+            let slot = hash4(here, 32 - PROBE_BITS);
+            let stored = seen[slot];
+            // Stored one past the position, so an untouched slot is zero and
+            // position zero is not mistaken for one.
+            seen[slot] = at as u32 + 1;
+            // SAFETY: `stored - 1` is a position one of these loops read at.
+            if stored != 0 && unsafe { word4(input, stored as usize - 1) } == here {
+                return true;
+            }
+            at += misses >> SKIP_TRIGGER;
+            misses += 1;
+        }
+    }
+    false
+}
+
 /// The body, with the match table supplied so it can outlive one call.
 fn pack_with(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> bool {
     out.clear();
     if input.len() < MIN_MATCH {
+        return false;
+    }
+    if !worth_packing(input) {
         return false;
     }
 
@@ -1741,6 +1812,40 @@ mod tests {
         eprintln!("  even {even}, wide {wide}, refused by liblz4 {refused}");
         assert!(even > 0, "no case chose the even split, so nothing was tested");
         assert_eq!(refused, even, "liblz4 accepted one of our blocks -- see the note above");
+    }
+
+    /// What the probe is allowed to get wrong, and what it is not.
+    ///
+    /// [`worth_packing`] refuses a value on the strength of two kilobyte-wide
+    /// windows, and refusing wrongly is expensive in a way that being slow is
+    /// not: the value is stored whole, so the cost is the entire compression
+    /// ratio, not a few percent of pack throughput. A random header in front of
+    /// a body that repeats is a real shape -- a nonce, a checksum block, an
+    /// embedded thumbnail -- and judging the value on its head alone would lose
+    /// it. The second window is what this holds in place.
+    #[test]
+    fn a_random_head_does_not_write_off_the_body() {
+        let mut st = 0x2545_F491_4F6C_DD1Du64;
+        let mut input: Vec<u8> = (0..4096)
+            .map(|_| {
+                st ^= st << 13;
+                st ^= st >> 7;
+                st ^= st << 17;
+                st as u8
+            })
+            .collect();
+        while input.len() < 64 * 1024 {
+            input.extend_from_slice(b"the body of this value repeats itself, ");
+        }
+
+        let mut out = Vec::new();
+        assert!(pack(&input, &mut out), "refused a value that compresses");
+        assert!(
+            out.len() * 4 < input.len(),
+            "{} of {} bytes: the body was not searched",
+            out.len(),
+            input.len()
+        );
     }
 
     /// The kernel must *accept* what the packer writes, not merely agree with
