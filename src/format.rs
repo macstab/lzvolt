@@ -324,17 +324,40 @@ pub fn pack(input: &[u8], out: &mut Vec<u8>) -> bool {
 /// reads it into.
 ///
 /// A kilobyte, split across two windows, because the question is only whether
-/// the value repeats itself at all. Nine bits because the table is zeroed on
-/// every call: two kilobytes costs a couple of hundred cycles, sixteen would
-/// cost more than the probe saves. Collisions do not cost accuracy the way they
-/// would in the search -- equal words always land in the same slot, and data
-/// that compresses repeats often enough that one pair survives.
+/// the value repeats itself at all.
+///
+/// Eight bits, not more, because the table is zeroed on every call and that is
+/// the probe's whole fixed cost -- it returns on one of the first few positions
+/// whenever the data repeats, so the memset is what a compressible value
+/// actually pays. Halving it from nine bits halves that: with nine, probing
+/// costs 2.9% on `records_4k` and 3.1% on `varied_4k`; with eight, 1.6% and
+/// 2.0%, at identical output on every shape in the corpus.
+///
+/// Collisions do not cost accuracy the way they would in the search -- equal
+/// words always land in the same slot, and data that compresses repeats often
+/// enough that one pair survives a quarter of the slots.
 const PROBE: usize = 1024;
-const PROBE_BITS: u32 = 9;
+const PROBE_BITS: u32 = 8;
 
-/// Only values above this are probed. Below it a full search is a few thousand
-/// cycles and there is nothing worth saving.
-const PROBE_ABOVE: usize = 4096;
+/// Only values above this are probed. Below it a full search is a couple of
+/// thousand cycles and there is nothing worth saving.
+///
+/// Two kilobytes rather than four, because four leaves the one shape the probe
+/// was built for outside it: a 4 KiB value that does not compress is exactly
+/// the size the threshold excluded, and it packs at 0.709 cycles per byte
+/// unprobed against 0.362 probed. Rather than one, because a value of exactly
+/// two kilobytes then stays outside and keeps its speed -- probing from one
+/// kilobyte costs `records_2k` 3.9% and buys nothing it does not already get
+/// here.
+///
+/// ```text
+///                unprobed   >4096   >2048   >1024
+///   noise_4k        0.709   0.709   0.362   0.371
+///   records_2k      1.134   1.134   1.126   1.178
+///   records_4k      0.979   0.979   0.995   1.013
+///   varied_4k       2.657   2.657   2.711   2.761
+/// ```
+const PROBE_ABOVE: usize = 2048;
 
 /// Whether the value repeats itself inside its first [`PROBE`] bytes.
 ///
