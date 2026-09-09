@@ -175,21 +175,16 @@ L(block):
     cmp     %r12, %rdi
     jae     L(done)
 
+    cmp     %r13, %r14
+    jae     L(fail)
+    movzbl  (%r14), %eax                    /* token */
+
     /* ---- fast path -------------------------------------------------- */
 
-    /*
-     * Both limits are tested before the token is read, not after, which is
-     * what lets the read happen without a bound of its own: past this point
-     * FAST_IN bytes are known to be there. The checked path tests the real
-     * end of the stream itself, once, where it is not on anyone's critical
-     * path.
-     */
     cmp     %rbp, %rdi
-    ja      L(slow_entry)                   /* too near the end to read ahead */
+    ja      L(slow)                         /* too near the end to read ahead */
     cmp     %r15, %r14
-    ja      L(slow_entry)                   /* too near the end of the stream */
-
-    movzbl  (%r14), %eax                    /* token */
+    ja      L(slow)                         /* too near the end of the stream */
 
     mov     %eax, %r10d
     shr     $LIT_SHIFT, %r10d               /* short literal */
@@ -201,19 +196,8 @@ L(block):
     cmp     $MAT_MAX, %r11d
     je      L(slow)
 
+    movzwl  1(%r14,%r10,1), %ecx            /* offset */
     lea     (%rdi,%r10,1), %r8              /* dst after the literals */
-
-    /* The literal copy reads from the token's own address, so it does not wait
-     * for this. Advancing the cursor first turns the offset's address from
-     * base-plus-index into a displacement, which is one address-generation
-     * micro-op rather than two. */
-#ifdef KEVA_AVX2
-    vmovdqu 1(%r14), %xmm0
-#else
-    movdqu  1(%r14), %xmm0
-#endif
-    lea     3(%r14,%r10,1), %r14            /* token + literals + offset */
-    movzwl  -2(%r14), %ecx                  /* offset */
 
     /*
      * One comparison for both halves of what an offset must be. `available` is
@@ -234,12 +218,16 @@ L(block):
     /* Fixed width on purpose -- the guards above paid for not asking again.
      * Sixteen literal bytes are stored whether or not that many were meant;
      * the surplus is overwritten by the next block or falls in the slack the
-     * caller trims. The load for it was issued above, as early as it could be. */
+     * caller trims. */
 #ifdef KEVA_AVX2
+    vmovdqu 1(%r14), %xmm0
     vmovdqu %xmm0, (%rdi)
 #else
+    movdqu  1(%r14), %xmm0
     movdqu  %xmm0, (%rdi)
 #endif
+
+    lea     3(%r14,%r10,1), %r14            /* token + literals + offset */
 
     mov     %r8, %rsi
     sub     %rcx, %rsi                      /* the match source */
@@ -342,11 +330,6 @@ L(splat_ret):
     ret
 
     /* ---- exact path ------------------------------------------------- */
-
-L(slow_entry):
-    cmp     %r13, %r14
-    jae     L(fail)
-    movzbl  (%r14), %eax
 
 L(slow):
     inc     %r14
