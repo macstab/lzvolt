@@ -38,7 +38,7 @@
  * consts. `the_duplicated_constants_still_hold` fails if they drift.
  *
  *   HASH_BITS 12 -> shift 20, or 11 -> 21 above 8192 bytes; see .Lshift_ready
- *   MAX_OFFSET 65535   MIN_MATCH 4   SKIP_TRIGGER 6   EMPTY 0x80000000
+ *   MAX_OFFSET 65535   MIN_MATCH 4   SKIP_TRIGGER 5   EMPTY 0x80000000
  */
 
 #include "../common.h"
@@ -75,7 +75,7 @@ KEVA_SYM(keva_pack):
     mov     x23, #0                     // out cursor
     mov     x24, #0                     // literal_start
     mov     x25, #0                     // at
-    mov     x26, #64                    // misses = 1 << SKIP_TRIGGER
+    mov     x26, #32                    // misses = 1 << SKIP_TRIGGER
 
     /*
      * Header: LEB128 of the length, shifted up by one to leave room for the
@@ -234,11 +234,11 @@ KEVA_SYM(keva_pack):
 
     add     x25, x25, x17               // at += matched (forward part only)
     mov     x24, x25                    // literal_start = at
-    mov     x26, #64                    // misses reset
+    mov     x26, #32                    // misses reset
     b       .Lscan
 
 .Lmiss:
-    lsr     x9, x26, #6
+    lsr     x9, x26, #5
     add     x25, x25, x9
     add     x26, x26, #1
     b       .Lscan

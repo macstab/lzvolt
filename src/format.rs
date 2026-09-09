@@ -274,8 +274,53 @@ unsafe fn word4(input: &[u8], at: usize) -> u32 {
 /// Without it, data that does not compress is walked one byte at a time to no
 /// purpose — and even data that does compress spends most positions between
 /// matches. The cost is a slightly worse ratio, since a skipped position is a
-/// match never looked for; LZ4 uses the same trigger for the same reason.
-const SKIP_TRIGGER: usize = 6;
+/// match never looked for. LZ4 waits for sixty-four misses and we waited with
+/// it, which was inherited rather than measured. Thirty-two is better on every
+/// shape here, and on two of them it is better on *both* axes -- skipping
+/// sooner changes which positions get visited, and on `records` the ones it
+/// lands on happen to be worth more:
+///
+/// ```text
+///   misses before skipping        64      32      16
+///     noise_512                1.597   1.200   0.910
+///     noise_4k                 0.375   0.276   0.202
+///     records_512     cycles   1.765   1.598   1.578
+///                     bytes      191     192     191
+///     records_2k      cycles   1.210   1.079   1.098
+///                     bytes      394     392     400
+///     records_4k      cycles   1.046   0.962   0.958
+///                     bytes      603     601     609
+/// ```
+///
+/// Sixteen is faster still and would halve noise again, but it starts costing
+/// ratio on the values a store actually keeps -- one and a half percent on
+/// `records_2k`. Density is what this is being sold on and packing happens once
+/// per write, so that is the wrong side to spend on.
+const SKIP_TRIGGER: usize = 5;
+
+/// How long a match has to be before lazy stops looking for a better one.
+///
+/// Lazy matching pays for itself when the match in hand is short, because the
+/// one a byte later can be much longer. Once it is already long the second
+/// search is nearly always wasted: on 64 KiB of `varied` the probe runs 4138
+/// times and wins 521, and on `records`, where matches average nineteen bytes,
+/// it is worse than that.
+///
+/// The gate costs one comparison and buys, against no gate at all:
+///
+/// ```text
+///   gate at              none      12      16      20      24
+///     records_4k        1.046   0.945   0.962   0.949   0.976
+///     records_2k        1.210   1.080   1.079   1.092   1.090
+///     records_64k       1.081   0.999   1.009   1.001   1.022
+///     varied_64k        3.766   3.509   3.617   3.669   3.748
+///     varied_64k    B   33117   33283   33237   33161   33123
+/// ```
+///
+/// Twelve is a shade faster and a shade worse on ratio; sixteen is where the
+/// two stop trading against each other. Matches shorter than this are exactly
+/// the ones worth improving, and they are the ones the gate lets through.
+const LAZY_UNTIL: usize = 16;
 
 /// Write a length that did not fit in a nibble: 255s until a smaller byte.
 /// # Safety
@@ -656,7 +701,7 @@ fn pack_pass(
         let mut matched = matched;
         // A guard on the outside and a loop on the inside, because `lazy` never
         // changes and `while lazy` reads as though it might.
-        if lazy {
+        if lazy && matched < LAZY_UNTIL {
             'lazy: loop {
                 // One byte on, and if that finds nothing better, two.
                 //
