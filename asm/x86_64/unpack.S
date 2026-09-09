@@ -381,7 +381,37 @@ L(fast_litbyte):
     jnz     L(fast_litbyte)
     jmp     L(fast_litdone)
 
+/*
+ * The first extension byte, which is nearly always the only one.
+ *
+ * A match length escapes as soon as it passes what the token carries -- 18
+ * bytes under the even split -- and on an LZ4 block, whose token is always 4/4,
+ * that is most matches. This is the hot path of the shape that is furthest
+ * behind, and it was written as a loop paying loop prices on a body that runs
+ * once: a test against the end of the output per byte, and a jump back.
+ *
+ * The output test is not needed for the first byte, and that is provable rather
+ * than likely. After one byte the length is at most MIN_MATCH + MAT_MAX + 254 --
+ * 273 under either split -- and `L(fast_matgo)` already forms `dst + length` and
+ * rejects it against `dst_end`. An addition that small cannot carry past the end
+ * of the address space, so the test here is the same test done twice.
+ *
+ * It stays in the loop below, because a chain of 255s has no bound of its own
+ * and that is where a length could grow until it wraps.
+ *
+ * So the common case reads, adds, and falls through on a not-taken compare: six
+ * instructions and two branches where there were eleven and three.
+ */
 L(fast_matext):
+    cmp     %r13, %r14
+    jae     L(fail)
+    movzbl  (%r14), %edx
+    inc     %r14
+    add     %rdx, %r9
+    cmp     $255, %edx
+    jne     L(fast_matgo)
+
+L(fast_matchain):
     cmp     %r13, %r14
     jae     L(fail)
     movzbl  (%r14), %edx
@@ -398,7 +428,7 @@ L(fast_matext):
     cmp     %rax, %r9
     ja      L(fail)
     cmp     $255, %edx
-    je      L(fast_matext)
+    je      L(fast_matchain)
     jmp     L(fast_matgo)
 
 L(fast_long):
