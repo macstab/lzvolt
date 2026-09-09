@@ -39,11 +39,24 @@
  * lengths again. That is where LZ4 gets most of its decode speed and it is the
  * whole reason this file exists.
  *
- * Everything else copies with `rep movsb`. For the match that is not a
- * concession, it is the definition: a match may overlap the output it is still
- * producing, and byte-at-a-time forward copying is exactly the pattern
- * replication the encoder meant. For long literal runs it is a memcpy that the
- * hardware already knows how to do.
+ * Off the fast path, both copies run in 32-byte blocks and overrun freely --
+ * the same shape the portable decoder and the AArch64 kernel use, and for the
+ * same reason. `rep movsb` was the first version of this and it is the wrong
+ * instruction here: its startup is twenty to forty cycles on most parts, and
+ * the exact path is entered precisely when a literal run reached LIT_MAX, so
+ * the runs it copies are tens of bytes -- long enough to matter, far too short
+ * to amortise a string operation.
+ *
+ * It stays for the two cases where blocks are unsound. A match closer than one
+ * block to what it copies would read bytes it has not written, and byte at a
+ * time forward is exactly the pattern replication the encoder meant. And the
+ * tail of a stream, where overrunning the input would read memory that is not
+ * ours.
+ *
+ * Overrunning the *output* needs no test at all: `dst_cap >= declared + 64` on
+ * entry and `produced + len <= declared` before the copy give
+ * `produced + round_up(len, 32) <= declared + 31 < dst_cap`. The guard is the
+ * entry check, already paid for.
  *
  * # Measurement
  *
@@ -247,6 +260,28 @@ L(lit_len):
 
     mov     %r14, %rsi
     lea     (%rbx,%r12,1), %rdi
+
+    /* Blocks only while a whole one is readable; `rax` is the end of the run. */
+    lea     OVERRUN(%rax), %r8
+    cmp     %r15, %r8
+    ja      L(lit_bytes)
+
+    mov     %r10, %rcx
+L(lit_wide):
+    movdqu  (%rsi), %xmm0
+    movdqu  16(%rsi), %xmm1
+    movdqu  %xmm0, (%rdi)
+    movdqu  %xmm1, 16(%rdi)
+    add     $OVERRUN, %rsi
+    add     $OVERRUN, %rdi
+    sub     $OVERRUN, %rcx
+    /* Signed: a length below one block lands at or under zero and stops. An
+     * unsigned test here would wrap and never terminate, which is what the
+     * first version of this loop did. */
+    jg      L(lit_wide)
+    jmp     L(lit_done)
+
+L(lit_bytes):
     mov     %r10, %rcx
     rep movsb
 
@@ -298,8 +333,25 @@ L(mat_len):
     lea     (%rbx,%rsi,1), %rsi
     lea     (%rbx,%r12,1), %rdi
     mov     %r10, %rcx
+
+    cmp     $OVERRUN, %r8
+    jb      L(mat_bytes)
+
+L(mat_wide):
+    movdqu  (%rsi), %xmm0
+    movdqu  16(%rsi), %xmm1
+    movdqu  %xmm0, (%rdi)
+    movdqu  %xmm1, 16(%rdi)
+    add     $OVERRUN, %rsi
+    add     $OVERRUN, %rdi
+    sub     $OVERRUN, %rcx
+    jg      L(mat_wide)
+    jmp     L(mat_done)
+
+L(mat_bytes):
     rep movsb
 
+L(mat_done):
     mov     %r9, %r12
     jmp     L(block)
 
