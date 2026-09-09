@@ -6,6 +6,11 @@
 #   scripts/bench-on-gce.sh intel      # just one of them
 #   scripts/bench-on-gce.sh arm
 #   KEEP=1 scripts/bench-on-gce.sh     # leave the machines running
+#   PROJECT=my-project scripts/bench-on-gce.sh
+#
+# The project is named on every call rather than taken from whatever gcloud
+# happens to have configured. A script that creates instances in an unstated
+# project is a way to bill the wrong one.
 #
 # Everything this project claims about the packer was measured on one laptop,
 # on one microarchitecture. That is a limit on what the numbers are evidence
@@ -48,6 +53,37 @@ case "${1:-both}" in
 esac
 
 command -v gcloud >/dev/null || { echo "gcloud is not installed" >&2; exit 1; }
+
+PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
+if [ -z "$PROJECT" ] || [ "$PROJECT" = "(unset)" ]; then
+    echo "no project. Set one:" >&2
+    echo "    PROJECT=<id> $0 ${1:-}" >&2
+    echo "  or  gcloud config set project <id>" >&2
+    echo >&2
+    gcloud projects list --format='table(projectId,name)' >&2 || true
+    exit 1
+fi
+# A project *number* is configured often enough to be worth catching here:
+# gcloud takes it in some places and refuses it in others, and the refusal
+# arrives halfway through creating an instance.
+case "$PROJECT" in
+    ''|*[!0-9]*) ;;
+    *)
+        resolved="$(gcloud projects describe "$PROJECT" --format='value(projectId)' 2>/dev/null || true)"
+        if [ -n "$resolved" ]; then
+            echo "== $PROJECT is a project number; using $resolved"
+            PROJECT="$resolved"
+        fi
+        ;;
+esac
+GC=(gcloud --project="$PROJECT")
+
+echo "== project $PROJECT"
+"${GC[@]}" compute zones list --limit=1 --format='value(name)' >/dev/null 2>&1 || {
+    echo "cannot reach Compute Engine in $PROJECT -- is the API enabled?" >&2
+    echo "    gcloud services enable compute.googleapis.com --project=$PROJECT" >&2
+    exit 1
+}
 git rev-parse --verify "$BRANCH" >/dev/null 2>&1 || {
     echo "no such branch: $BRANCH" >&2; exit 1; }
 
@@ -140,12 +176,12 @@ one () {
             echo "== keeping $vm (KEEP=1)"
         else
             echo "== deleting $vm"
-            gcloud compute instances delete "$vm" --zone="$zone" --quiet >/dev/null 2>&1 || true
+            "${GC[@]}" compute instances delete "$vm" --zone="$zone" --quiet >/dev/null 2>&1 || true
         fi
     }
     trap 'cleanup; rm -f "$ARCHIVE" "$RUNNER"' EXIT
 
-    gcloud compute instances create "$vm" \
+    "${GC[@]}" compute instances create "$vm" \
         --zone="$zone" --machine-type="$mtype" \
         --image-family="$image" --image-project=debian-cloud \
         --boot-disk-size=50GB --boot-disk-type=pd-balanced \
@@ -153,24 +189,24 @@ one () {
 
     echo "== waiting for ssh"
     local tries=0
-    until gcloud compute ssh "$vm" --zone="$zone" --quiet --command=true >/dev/null 2>&1; do
+    until "${GC[@]}" compute ssh "$vm" --zone="$zone" --quiet --command=true >/dev/null 2>&1; do
         tries=$((tries + 1))
         [ "$tries" -lt 40 ] || { echo "ssh never came up" >&2; return 1; }
         sleep 5
     done
 
     echo "== uploading"
-    gcloud compute scp "$ARCHIVE" "$vm:~/keva-packer.tar.gz" --zone="$zone" --quiet >/dev/null
-    gcloud compute scp "$RUNNER" "$vm:~/run.sh" --zone="$zone" --quiet >/dev/null
+    "${GC[@]}" compute scp "$ARCHIVE" "$vm:~/keva-packer.tar.gz" --zone="$zone" --quiet >/dev/null
+    "${GC[@]}" compute scp "$RUNNER" "$vm:~/run.sh" --zone="$zone" --quiet >/dev/null
 
     echo "== running (this takes a while: apt, rustc, then the benchmarks)"
-    gcloud compute ssh "$vm" --zone="$zone" --quiet \
+    "${GC[@]}" compute ssh "$vm" --zone="$zone" --quiet \
         --command="bash ~/run.sh $RUNS" || echo "== the remote run reported a failure"
 
     echo "== downloading"
-    gcloud compute scp "$vm:~/report.txt" "$OUTDIR/report-$label-$COMMIT.txt" \
+    "${GC[@]}" compute scp "$vm:~/report.txt" "$OUTDIR/report-$label-$COMMIT.txt" \
         --zone="$zone" --quiet >/dev/null || echo "== no report came back"
-    gcloud compute scp "$vm:~/run-*.txt" "$OUTDIR/" --zone="$zone" --quiet >/dev/null 2>&1 || true
+    "${GC[@]}" compute scp "$vm:~/run-*.txt" "$OUTDIR/" --zone="$zone" --quiet >/dev/null 2>&1 || true
     for f in "$OUTDIR"/run-*.txt; do
         [ -e "$f" ] || continue
         mv "$f" "$OUTDIR/$label-$COMMIT-$(basename "$f")"
