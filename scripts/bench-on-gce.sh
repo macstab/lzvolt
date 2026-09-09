@@ -43,7 +43,10 @@ BRANCH="${BRANCH:-packer}"
 REVS="${REVS:-}"
 KEEP="${KEEP:-0}"
 RUNS="${RUNS:-3}"
-PREFIX="${PREFIX:-keva-bench}"
+# Unique per invocation, so two runs at once do not fight over one name --
+# which they did, and the loser reported "already exists" from inside the
+# zone loop as though the zone were full.
+PREFIX="${PREFIX:-keva-bench-$$}"
 OUTDIR="${OUTDIR:-bench-results}"
 
 # Compute-optimised on purpose: a shared core gives a number that says more
@@ -207,7 +210,8 @@ REMOTE
 one () {
     local label="$1" zones="$2" mtype="$3" image="$4" disk="$5"
     local vm="$PREFIX-$label"
-    local zone=""
+    zone=""                                   # global on purpose: the EXIT trap
+                                              # reads it after this returns
 
     echo
     echo "=============================================================="
@@ -216,7 +220,7 @@ one () {
 
     local keep="$KEEP"
     cleanup () {
-        [ -n "$zone" ] || return 0
+        [ -n "${zone:-}" ] || return 0
         if [ "$keep" = "1" ]; then
             echo "== keeping $vm (KEEP=1)"
         else
@@ -301,6 +305,16 @@ case "${1:-both}" in
         one arm   "$ARM_ZONES"   "$ARM_TYPE"   "$ARM_IMAGE"   "$ARM_DISK" || true
         ;;
 esac
+
+# Anything still standing from an earlier crash, whatever it was called.
+stragglers="$("${GC[@]}" compute instances list --filter='name~^keva-bench' \
+    --format='value(name,zone)' 2>/dev/null || true)"
+if [ -n "$stragglers" ]; then
+    echo
+    echo "== instances still up from an earlier run:"
+    echo "$stragglers" | sed 's/^/   /'
+    echo "   delete them with: gcloud --project=$PROJECT compute instances delete NAME --zone=ZONE"
+fi
 
 echo
 echo "== results in $OUTDIR"
