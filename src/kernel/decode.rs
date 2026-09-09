@@ -52,12 +52,10 @@ extern "C" {
     ) -> u32;
 }
 
-/// The same two kernels with 256-bit moves.
-///
-/// Same format, same bounds, same branches -- only the fixed match move and the
-/// block copies are wider, which on x86 is two micro-ops where SSE2 needs four,
-/// and six where it needs twelve under the wide split. AVX2 is not part of the
-/// x86-64 baseline, so which pair runs is decided once, on the first call.
+// The same two kernels with 256-bit moves. Same format, same bounds, same
+// branches -- only the fixed match move and the block copies are wider. AVX2 is
+// not part of the x86-64 baseline, so which pair runs is decided on the first
+// call. Rustdoc does not document extern blocks, so this is a plain comment.
 #[cfg(all(keva_asm, target_arch = "x86_64"))]
 extern "C" {
     fn keva_unpack_avx2(
