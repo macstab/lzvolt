@@ -159,6 +159,30 @@ KEVA_NAME(KEVA_ENTRY):
      * the checked path, which is what a value that short wants anyway. */
     lea     -OUT_MARGIN(%r12), %rbp
     lea     -FAST_IN(%r13), %r15
+    jmp     L(block)
+
+    /*
+     * Relays.
+     *
+     * Every branch leaving the loop targets something hundreds of bytes away,
+     * so each was encoded with a 32-bit displacement -- six bytes where two
+     * would do, nine times in a fast path of 227 bytes. Forty-seven bytes of
+     * jump encoding, which is a whole fetch window and a half spent on how the
+     * jumps are written rather than on work.
+     *
+     * A relay within reach makes the conditional branch two bytes and puts the
+     * long jump on the cold side, where it is never fetched. They come in two
+     * groups because one cannot serve both ends: a hundred and fifty bytes of
+     * loop is further than a short branch reaches, so the head has its own set
+     * in front and the tail has another behind.
+     *
+     * The cost is a second jump on the paths that leave, and the counting says
+     * those are very nearly none of them.
+     */
+L(rh_done): jmp     L(done)
+L(rh_fail): jmp     L(fail)
+L(rh_slow): jmp     L(slow)
+L(rh_litext): jmp   L(fast_litext)
 
 /*
  * The loop head is aligned because the micro-op cache is fed in 32-byte
@@ -168,18 +192,18 @@ KEVA_NAME(KEVA_ENTRY):
     .p2align 5
 L(block):
     cmp     %r12, %rdi
-    jae     L(done)
+    jae     L(rh_done)
 
     cmp     %r13, %r14
-    jae     L(fail)
+    jae     L(rh_fail)
     movzbl  (%r14), %eax                    /* token */
 
     /* ---- fast path -------------------------------------------------- */
 
     cmp     %rbp, %rdi
-    ja      L(slow)                         /* too near the end to read ahead */
+    ja      L(rh_slow)                      /* too near the end to read ahead */
     cmp     %r15, %r14
-    ja      L(slow)                         /* too near the end of the stream */
+    ja      L(rh_slow)                      /* too near the end of the stream */
 
     mov     %eax, %r10d
     shr     $LIT_SHIFT, %r10d               /* short literal */
@@ -187,7 +211,7 @@ L(block):
     and     $MAT_MAX, %r11d                 /* short match */
     lea     1(%r14), %rsi                   /* where the literals begin */
     cmp     $LIT_MAX, %r10d
-    je      L(fast_litext)
+    je      L(rh_litext)
 
     movzwl  (%rsi,%r10,1), %ecx             /* offset */
     lea     (%rdi,%r10,1), %r8              /* dst after the literals */
@@ -201,7 +225,7 @@ L(block):
     sub     %rbx, %rax                      /* available */
     lea     -1(%rcx), %rdx
     cmp     %rax, %rdx
-    jae     L(fail)
+    jae     L(rh_fail)
 
     /*
      * A match whose length escaped the token used to leave for the checked
@@ -249,19 +273,19 @@ L(fast_litdone):
      */
     lea     MIN_MATCH(%r11), %r9            /* match length, so far */
     cmp     $MAT_MAX, %r11d
-    je      L(fast_matext)
+    je      L(rt_matext)
 
 L(fast_matgo):
     lea     (%r8,%r9,1), %rax               /* dst after the match */
     cmp     %r12, %rax
-    ja      L(fail)
+    ja      L(rt_fail)
 
     mov     %r8, %rsi
     sub     %rcx, %rsi                      /* the match source */
     cmp     $OVERRUN, %rcx
-    jb      L(near)
+    jb      L(rt_near)
     cmp     $COPY_MAX, %r9
-    ja      L(fast_long)
+    ja      L(rt_long)
 
     movdqu  (%rsi), %xmm0
     movdqu  16(%rsi), %xmm1
@@ -281,6 +305,11 @@ L(fast_matgo):
 #endif
     mov     %rax, %rdi
     jmp     L(block)
+
+L(rt_fail):   jmp   L(fail)
+L(rt_matext): jmp   L(fast_matext)
+L(rt_near):   jmp   L(near)
+L(rt_long):   jmp   L(fast_long)
 
 L(fast_litext):
     /*
