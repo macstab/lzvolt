@@ -220,6 +220,16 @@ L(block):
      * Sixteen literal bytes are stored whether or not that many were meant;
      * the surplus is overwritten by the next block or falls in the slack the
      * caller trims. */
+    /*
+     * A quarter of blocks carry no literals at all -- 25% on 4 KiB of records,
+     * 23% on 64 KiB of varied -- and the store below writes sixteen bytes for
+     * every one of them. Skipping it costs a test that predicts well, since
+     * whether a block has literals is a property of the data rather than a coin
+     * flip, and saves a store port slot plus the only chance this loop has of
+     * making the next block's match source overlap a store it just issued.
+     */
+    test    %r10, %r10
+    je      L(fast_litdone)
     movdqu  (%rsi), %xmm0
     movdqu  %xmm0, (%rdi)
 
