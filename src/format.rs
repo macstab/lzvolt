@@ -1941,6 +1941,74 @@ mod tests {
         }
     }
 
+    /// Adopting this format needs no flag day, and that is the point of
+    /// reading LZ4 at all.
+    ///
+    /// A store whose values are LZ4 blocks can move to this one value at a
+    /// time: the old bytes still decode, and whatever gets rewritten comes back
+    /// in the new format. No offline conversion, no second decoder linked
+    /// forever to read the past, no moment where both must be true at once.
+    ///
+    /// Two things the caller still owes, neither of them ours. The uncompressed
+    /// length, because the LZ4 *block* format has never carried it -- anyone
+    /// storing blocks already keeps it. And a bit saying which format an entry
+    /// is in, because the two are not distinguishable by inspection: ours opens
+    /// with a length varint and an LZ4 block opens with a token, and no byte
+    /// value separates them.
+    #[cfg(feature = "liblz4")]
+    #[test]
+    fn an_lz4_store_migrates_one_value_at_a_time() {
+        #[link(name = "lz4")]
+        extern "C" {
+            fn LZ4_compress_default(src: *const u8, dst: *mut u8, n: i32, cap: i32) -> i32;
+        }
+
+        let mut cases: Vec<Vec<u8>> = Vec::new();
+        for size in [512usize, 1024, 4096, 65_536] {
+            cases.push(records(size));
+        }
+
+        let (mut was, mut now, mut migrated) = (0usize, 0usize, 0usize);
+        let mut value = Vec::new();
+        let mut repacked = Vec::new();
+        let mut check = Vec::new();
+
+        for original in &cases {
+            // What is already on disk: an LZ4 block and a length beside it.
+            let mut legacy = vec![0u8; original.len() + 1024];
+            let n = unsafe {
+                LZ4_compress_default(
+                    original.as_ptr(),
+                    legacy.as_mut_ptr(),
+                    original.len() as i32,
+                    legacy.len() as i32,
+                )
+            };
+            assert!(n > 0, "liblz4 refused {} bytes", original.len());
+            legacy.truncate(n as usize);
+
+            // A read: the old entry decodes with no LZ4 library present.
+            unpack_into(&legacy, &mut value, original.len())
+                .unwrap_or_else(|e| panic!("legacy entry of {} bytes: {e}", original.len()));
+            assert_eq!(&value[..], &original[..], "the old value came back wrong");
+
+            // A write: it goes back in the new format.
+            assert!(pack(&value, &mut repacked), "{} bytes did not pack", value.len());
+            unpack(&repacked, &mut check).expect("what we just wrote");
+            assert_eq!(&check[..], &original[..], "the migrated value came back wrong");
+
+            was += legacy.len();
+            now += repacked.len();
+            migrated += 1;
+        }
+
+        eprintln!(
+            "  migrated {migrated} values: {was} bytes of LZ4 -> {now} of ours, {:.1}% smaller",
+            100.0 * (1.0 - now as f64 / was as f64)
+        );
+        assert!(now < was, "the rewrite must not cost space: {was} -> {now}");
+    }
+
     /// The other direction, and it does not hold: liblz4 refuses what we wrote.
     ///
     /// The even split is the LZ4 token layout, so the body of such a value
