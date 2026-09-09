@@ -17,60 +17,42 @@
  * for the checks below to be sufficient. The caller then runs the Rust decoder,
  * which produces the precise error, so every message stays in one place.
  *
- * SSE2 only, no runtime dispatch: a 16-byte store is all this needs and SSE2 is
+ * SSE2 only, no runtime dispatch: 16-byte moves are all this needs and SSE2 is
  * the x86-64 baseline, so nothing tests for a feature in front of the call.
+ *
+ * # The same work per block as the AArch64 kernel, with one exception
+ *
+ * Both limits the fast path tests are loop-invariant, and AArch64 keeps both in
+ * registers because it has thirty-one of them. Here one is precomputed and the
+ * other costs an extra `lea` per block, which is the price of sixteen registers
+ * rather than a shortcut. Everything else is the same shape -- the split-sized
+ * match move, the derived output margin, the doubling splat for near matches --
+ * because none of it was ever AArch64-specific.
  *
  * # What is checked, and what is checked once
  *
  * Values arrive from sockets and snapshot files, so every length here is
  * attacker-controlled and this kernel is the boundary.
  *
- * Requiring `dst_cap >= declared + 64` on entry makes the per-block output
- * check answer itself: `produced < declared` holds at the top of every block,
- * so `produced + 64 < declared + 64 <= dst_cap`. Every store below is inside
- * that window and the loop carries no capacity test. The input side is checked
- * per block, because `src_len` bounds nothing about how far a chain of length
- * bytes can run.
+ * Requiring `dst_cap >= declared + 64` on entry is what lets the exact path
+ * carry no capacity test: `produced + len <= declared` is checked before every
+ * copy, and a copy rounded up to whole blocks then ends by
+ * `declared + OVERRUN - 1 < dst_cap`. The fast path can write more than that at
+ * once under the wide split, which is what OUT_MARGIN is for.
  *
- * # Why the copies are shaped the way they are
- *
- * The fast path stores fixed widths -- sixteen literal bytes and one 32-byte
- * block -- because its guard has already bought the right not to ask about
- * lengths again. That is where LZ4 gets most of its decode speed and it is the
- * whole reason this file exists.
- *
- * Off the fast path, both copies run in 32-byte blocks and overrun freely --
- * the same shape the portable decoder and the AArch64 kernel use, and for the
- * same reason. `rep movsb` was the first version of this and it is the wrong
- * instruction here: its startup is twenty to forty cycles on most parts, and
- * the exact path is entered precisely when a literal run reached LIT_MAX, so
- * the runs it copies are tens of bytes -- long enough to matter, far too short
- * to amortise a string operation.
- *
- * It stays for the two cases where blocks are unsound. A match closer than one
- * block to what it copies would read bytes it has not written, and byte at a
- * time forward is exactly the pattern replication the encoder meant. And the
- * tail of a stream, where overrunning the input would read memory that is not
- * ours.
- *
- * Overrunning the *output* needs no test at all: `dst_cap >= declared + 64` on
- * entry and `produced + len <= declared` before the copy give
- * `produced + round_up(len, 32) <= declared + 31 < dst_cap`. The guard is the
- * entry check, already paid for.
+ * The input side is checked per block, because `src_len` bounds nothing about
+ * how far a chain of length bytes can run.
  *
  * # Measurement
  *
  * Written on Apple silicon, where x86 runs only under a binary translator.
  * Correctness is verified there against the portable decoder -- byte for byte,
- * including every truncation and every single-bit flip -- but the timing of a
- * translated instruction stream means nothing, so none of the choices here are
- * tuned. They mirror the AArch64 kernel and the portable decoder, both of which
- * were tuned by measurement.
- *
- * The x86-64 CI job runs scripts/packer-report.sh. That is where a number for
- * this file comes from. Until then the only claim made for it is correctness.
- *
- *   OVERRUN 32   FAST_LITERAL 16   FAST_INPUT_SLACK 32   MIN_MATCH 4
+ * over every truncation and every single-bit flip -- but the timing of a
+ * translated instruction stream means nothing, so nothing here rests on a
+ * measurement taken on this architecture. What it rests on is the AArch64
+ * kernel and the portable decoder, where each of these shapes was measured. The
+ * x86-64 CI job runs scripts/packer-report.sh; that is where a number for this
+ * file comes from.
  */
 
 #include "../common.h"
@@ -89,6 +71,51 @@
 #  define MAT_MAX    15
 #endif
 
+#define MIN_MATCH         4
+#define OVERRUN           32
+#define FAST_INPUT_SLACK  32
+#define MAT_CAP           (MAT_MAX + MIN_MATCH)
+
+/*
+ * How much the fixed match move copies. A property of the hardware and not of
+ * the format: one vector pair under the even split, three under the wide one,
+ * because that is what covers a match the split can carry inline. Without it
+ * the wide split would send every match past twenty-eight bytes to the checked
+ * path -- which is the shape it exists to encode.
+ */
+#if MAT_CAP > 64
+#  define COPY_MAX   96
+#elif MAT_CAP > 32
+#  define COPY_MAX   64
+#else
+#  define COPY_MAX   32
+#endif
+
+/*
+ * How far short of the declared length the fast loop stops.
+ *
+ * A bound and a heuristic. The bound: the widest thing a fast block writes is
+ * its literals plus COPY_MAX, and that has to land inside the 64 bytes of slack
+ * the caller provides past `declared` -- so LIT_MAX + COPY_MAX - 64, which is
+ * 35 under the wide split and negative, meaning no constraint, under the even
+ * one.
+ *
+ * The heuristic: a value ends in a literal run with no offset after it, and the
+ * fast path always reads an offset, so it has to stop before that last block. A
+ * longer final run is not a correctness problem -- the block decodes to
+ * nonsense, the length check at the end fails, and the caller runs the portable
+ * decoder -- it is only slow, so this wants to be a comfortable upper bound on
+ * a final run and no more.
+ */
+#if (LIT_MAX + COPY_MAX) > 64
+#  define OUT_MARGIN (LIT_MAX + COPY_MAX - 64 + 16)
+#else
+#  define OUT_MARGIN 16
+#endif
+
+/* Input the fast path may read past the cursor, at its widest literal run. */
+#define FAST_IN (1 + (LIT_MAX - 1) + 2 + FAST_INPUT_SLACK)
+
 /*
  * KEVA_SYM pastes with ##, so its argument is not expanded first --
  * KEVA_SYM(KEVA_ENTRY) would name the symbol after the macro rather than after
@@ -105,20 +132,16 @@
 #define L1(p, n) L2(p, n)
 #define L(n) L1(KEVA_PFX, n)
 
-#define OVERRUN           32
-#define FAST_INPUT_SLACK  32
-#define MIN_MATCH         4
-
 /*
  * Held for the whole call:
  *
  *   rbx  dst base        r13  declared      r15  src end
- *   r12  produced        r14  src cursor     r11  token, on the exact path
+ *   rbp  output limit    r14  src cursor    r11  token, on the exact path
+ *   r12  produced
  *
  * Everything else is scratch, which matters because `rep movsb` takes rsi, rdi
  * and rcx and returns them spent -- so nothing that has to survive a copy may
- * live there. `dst_cap` is read once on entry and never again; the check it
- * feeds is what makes that possible.
+ * live there.
  */
 
     .text
@@ -127,6 +150,7 @@
 
 KEVA_NAME(KEVA_ENTRY):
     push    %rbx
+    push    %rbp
     push    %r12
     push    %r13
     push    %r14
@@ -138,10 +162,22 @@ KEVA_NAME(KEVA_ENTRY):
     mov     %r8,  %r13                      /* declared */
     mov     %r9,  %r12                      /* produced = start */
 
-    /* The one output check; see the note above. */
+    /* The entry check the loop then never repeats. */
     lea     64(%r13), %rax
     cmp     %rax, %rcx                      /* dst_cap, still in its argument */
     jb      L(fail)
+
+    /* Loop-invariant, so it is derived once.
+     *
+     * It may go negative, for a value shorter than the margin, and that case
+     * wants no special handling: the comparison against it below is signed, so
+     * a negative limit is simply below every position and sends every block to
+     * the checked path. An unsigned comparison would wrap it to enormous and
+     * send the first block down the fast path instead, which is the bug this
+     * replaced. Both fit comfortably in a signed word -- MAX_UNPACKED is half a
+     * gigabyte. */
+    mov     %r13, %rbp
+    sub     $OUT_MARGIN, %rbp
 
 L(block):
     cmp     %r13, %r12
@@ -153,6 +189,13 @@ L(block):
 
     /* ---- fast path -------------------------------------------------- */
 
+    cmp     %rbp, %r12
+    jg      L(slow)                         /* too near the end to read ahead */
+
+    lea     FAST_IN(%r14), %rcx
+    cmp     %r15, %rcx
+    ja      L(slow)                         /* too near the end of the stream */
+
     mov     %eax, %r10d
     shr     $LIT_SHIFT, %r10d               /* short literal */
     cmp     $LIT_MAX, %r10d
@@ -162,15 +205,6 @@ L(block):
     and     $MAT_MAX, %r11d                 /* short match */
     cmp     $MAT_MAX, %r11d
     je      L(slow)
-
-    /* One fixed block is all the match copy below moves. */
-    cmp     $(OVERRUN - MIN_MATCH), %r11d
-    ja      L(slow)
-
-    /* token + literals + offset + one readable block */
-    lea     (1 + 2 + FAST_INPUT_SLACK)(%r14,%r10,1), %rcx
-    cmp     %r15, %rcx
-    ja      L(slow)
 
     movzwl  1(%r14,%r10,1), %ecx            /* offset */
     lea     (%r12,%r10,1), %r8              /* after_literals */
@@ -187,38 +221,97 @@ L(block):
     cmp     %r13, %rax
     ja      L(fail)
 
-    /* Fixed width on purpose -- the guard above paid for not asking again.
+    /* Fixed width on purpose -- the guards above paid for not asking again.
      * Sixteen literal bytes are stored whether or not that many were meant;
      * the surplus is overwritten by the next block or falls in the slack the
      * caller trims. */
     movdqu  1(%r14), %xmm0
     movdqu  %xmm0, (%rbx,%r12,1)
 
-    /* at = token + literals + offset, before rcx is spent below. */
-    lea     3(%r14,%r10,1), %r14
+    lea     3(%r14,%r10,1), %r14            /* token + literals + offset */
 
-    mov     %r8, %rdi
-    sub     %rcx, %rdi                      /* after_literals - offset */
+    mov     %r8, %r10
+    sub     %rcx, %r10                      /* after_literals - offset */
+    lea     (%rbx,%r10,1), %rsi
+    lea     (%rbx,%r8,1), %rdi
     cmp     $OVERRUN, %rcx
-    jb      L(fast_near)
+    jb      L(near)
 
-    movdqu  (%rbx,%rdi,1), %xmm0
-    movdqu  16(%rbx,%rdi,1), %xmm1
-    movdqu  %xmm0, (%rbx,%r8,1)
-    movdqu  %xmm1, 16(%rbx,%r8,1)
+    movdqu  (%rsi), %xmm0
+    movdqu  16(%rsi), %xmm1
+    movdqu  %xmm0, (%rdi)
+    movdqu  %xmm1, 16(%rdi)
+#if COPY_MAX > 32
+    movdqu  32(%rsi), %xmm2
+    movdqu  48(%rsi), %xmm3
+    movdqu  %xmm2, 32(%rdi)
+    movdqu  %xmm3, 48(%rdi)
+#endif
+#if COPY_MAX > 64
+    movdqu  64(%rsi), %xmm4
+    movdqu  80(%rsi), %xmm5
+    movdqu  %xmm4, 64(%rdi)
+    movdqu  %xmm5, 80(%rdi)
+#endif
     jmp     L(fast_end)
 
-L(fast_near):
-    /* Closer than a block, so a wide load would read bytes not yet written.
-     * Forward, byte at a time, is the pattern replication the encoder meant. */
-    lea     (%rbx,%rdi,1), %rsi
-    lea     (%rbx,%r8,1), %rdi
+L(near):
     mov     %r9, %rcx
-    rep movsb
+    call    L(splat)
 
 L(fast_end):
     lea     (%r8,%r9,1), %r12               /* produced = after + match */
     jmp     L(block)
+
+    /* ---- the pattern splat ------------------------------------------ */
+
+/*
+ * Fill `rcx` bytes at `rdi` from `rsi`, the two closer together than one block.
+ *
+ * A wide load here would read bytes that have not been written, so the run is
+ * grown instead: what is already there is copied onto itself, doubling the
+ * distance each time, until the gap is wide enough for vector moves. From an
+ * offset of one that is 1 + 2 + 4 + 8 byte moves before the loop below takes
+ * over -- against one byte move per output byte, which is what this replaced.
+ *
+ * Reached by `call` from two sites rather than written twice. Nothing else here
+ * touches the stack, so the return address is all that is on it.
+ */
+L(splat):
+    mov     %rdi, %rdx
+    sub     %rsi, %rdx                      /* gap */
+
+L(splat_grow):
+    cmp     $16, %rdx
+    jae     L(splat_wide)
+    mov     %rdx, %r10                      /* append `gap` bytes */
+    mov     %rdi, %rsi
+    sub     %rdx, %rsi
+L(splat_byte):
+    movzbl  (%rsi), %eax
+    mov     %al, (%rdi)
+    inc     %rsi
+    inc     %rdi
+    dec     %r10
+    jnz     L(splat_byte)
+    sub     %rdx, %rcx
+    jle     L(splat_ret)
+    add     %rdx, %rdx                      /* the gap has doubled */
+    jmp     L(splat_grow)
+
+L(splat_wide):
+    mov     %rdi, %rsi
+    sub     %rdx, %rsi
+L(splat_loop):
+    movdqu  (%rsi), %xmm0
+    movdqu  %xmm0, (%rdi)
+    add     $16, %rsi
+    add     $16, %rdi
+    sub     $16, %rcx
+    jg      L(splat_loop)
+
+L(splat_ret):
+    ret
 
     /* ---- exact path ------------------------------------------------- */
 
@@ -247,11 +340,10 @@ L(lit_ext):
     add     $LIT_MAX, %r10
 
 L(lit_len):
-    /* The run must be readable, and must fit what is left to produce. */
     lea     (%r14,%r10,1), %rax
     cmp     %r15, %rax
     ja      L(fail)
-    lea     (%r12,%r10,1), %r9              /* produced after the literals */
+    lea     (%r12,%r10,1), %r9
     cmp     %r13, %r9
     ja      L(fail)
 
@@ -276,8 +368,7 @@ L(lit_wide):
     add     $OVERRUN, %rdi
     sub     $OVERRUN, %rcx
     /* Signed: a length below one block lands at or under zero and stops. An
-     * unsigned test here would wrap and never terminate, which is what the
-     * first version of this loop did. */
+     * unsigned test wraps and never terminates, which the first version did. */
     jg      L(lit_wide)
     jmp     L(lit_done)
 
@@ -292,11 +383,10 @@ L(lit_done):
     cmp     %r13, %r12
     je      L(done)
 
-    /* offset */
     lea     2(%r14), %rax
     cmp     %r15, %rax
     ja      L(fail)
-    movzwl  (%r14), %r8d
+    movzwl  (%r14), %r8d                    /* offset */
     mov     %rax, %r14
 
     mov     %r11d, %r10d
@@ -335,7 +425,7 @@ L(mat_len):
     mov     %r10, %rcx
 
     cmp     $OVERRUN, %r8
-    jb      L(mat_bytes)
+    jb      L(mat_near)
 
 L(mat_wide):
     movdqu  (%rsi), %xmm0
@@ -348,8 +438,8 @@ L(mat_wide):
     jg      L(mat_wide)
     jmp     L(mat_done)
 
-L(mat_bytes):
-    rep movsb
+L(mat_near):
+    call    L(splat)
 
 L(mat_done):
     mov     %r9, %r12
@@ -369,5 +459,6 @@ L(ret):
     pop     %r14
     pop     %r13
     pop     %r12
+    pop     %rbp
     pop     %rbx
     ret
