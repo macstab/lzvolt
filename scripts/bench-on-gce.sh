@@ -2,8 +2,9 @@
 #
 # Run the packer report on rented hardware, once per architecture.
 #
-#   scripts/bench-on-gce.sh            # Intel, then ARM
+#   scripts/bench-on-gce.sh            # Intel, AMD, then ARM
 #   scripts/bench-on-gce.sh intel      # just one of them
+#   scripts/bench-on-gce.sh amd
 #   scripts/bench-on-gce.sh arm
 #   KEEP=1 scripts/bench-on-gce.sh     # leave the machines running
 #   PROJECT=my-project scripts/bench-on-gce.sh
@@ -56,6 +57,11 @@ INTEL_IMAGE="${INTEL_IMAGE:-debian-12}"
 # c3 takes the ordinary balanced disk.
 INTEL_DISK="${INTEL_DISK:-pd-balanced}"
 
+AMD_ZONES="${AMD_ZONES:-europe-west4-a europe-west4-b europe-west1-b us-central1-a}"
+AMD_TYPE="${AMD_TYPE:-c3d-standard-4}"
+AMD_IMAGE="${AMD_IMAGE:-debian-12}"
+AMD_DISK="${AMD_DISK:-pd-balanced}"
+
 ARM_ZONES="${ARM_ZONES:-europe-west4-c europe-west4-b europe-west4-a europe-west1-b europe-west3-a us-central1-a}"
 ARM_TYPE="${ARM_TYPE:-c4a-standard-4}"
 ARM_IMAGE="${ARM_IMAGE:-debian-12-arm64}"
@@ -64,7 +70,7 @@ ARM_IMAGE="${ARM_IMAGE:-debian-12-arm64}"
 ARM_DISK="${ARM_DISK:-hyperdisk-balanced}"
 
 case "${1:-both}" in
-    intel|arm|both) ;;
+    intel|amd|arm|both) ;;
     *) echo "usage: $0 [intel|arm|both]" >&2; exit 1 ;;
 esac
 
@@ -118,6 +124,7 @@ echo "== packing $BRANCH at $COMMIT, $(du -h "$ARCHIVE" | cut -f1)"
 cat > "$RUNNER" <<'REMOTE'
 set -uo pipefail
 runs="${1:-3}"
+export KEVA_COMMIT="${2:-unknown}"
 report="$HOME/report.txt"
 
 exec > >(tee "$report") 2>&1
@@ -241,7 +248,7 @@ one () {
 
     echo "== running (this takes a while: apt, rustc, then the benchmarks)"
     "${GC[@]}" compute ssh "$vm" --zone="$zone" --quiet \
-        --command="bash ~/run.sh $RUNS" || echo "== the remote run reported a failure"
+        --command="bash ~/run.sh $RUNS $COMMIT" || echo "== the remote run reported a failure"
 
     echo "== downloading"
     "${GC[@]}" compute scp "$vm:~/report.txt" "$OUTDIR/report-$label-$COMMIT.txt" \
@@ -258,11 +265,13 @@ one () {
 
 case "${1:-both}" in
     intel) one intel "$INTEL_ZONES" "$INTEL_TYPE" "$INTEL_IMAGE" "$INTEL_DISK" ;;
+    amd)   one amd   "$AMD_ZONES"   "$AMD_TYPE"   "$AMD_IMAGE"   "$AMD_DISK" ;;
     arm)   one arm   "$ARM_ZONES"   "$ARM_TYPE"   "$ARM_IMAGE"   "$ARM_DISK" ;;
     both)
         # One failing must not take the other with it: the point of two
         # machines is two independent data points.
         one intel "$INTEL_ZONES" "$INTEL_TYPE" "$INTEL_IMAGE" "$INTEL_DISK" || true
+        one amd   "$AMD_ZONES"   "$AMD_TYPE"   "$AMD_IMAGE"   "$AMD_DISK" || true
         one arm   "$ARM_ZONES"   "$ARM_TYPE"   "$ARM_IMAGE"   "$ARM_DISK" || true
         ;;
 esac
