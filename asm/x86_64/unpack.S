@@ -110,8 +110,7 @@
 #define KEVA_NAME1(n) KEVA_SYM(n)
 #define KEVA_NAME(n) KEVA_NAME1(n)
 
-#define L2(p, n) .L ## p ## _ ## n
-#define L1(p, n) L2(p, n)
+#define L1(p, n) KEVA_LABEL(p, n)
 #define L(n) L1(KEVA_PFX, n)
 
 /*
