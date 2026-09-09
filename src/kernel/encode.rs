@@ -82,7 +82,6 @@ pub fn new_table() -> Vec<u32> {
     vec![EMPTY; TABLE_SIZE]
 }
 
-
 #[cfg(all(keva_asm, target_arch = "aarch64"))]
 extern "C" {
     fn keva_pack_find(input: *const u8, len: usize, table: *mut u32, state: *mut PackState);
@@ -161,7 +160,10 @@ pub fn pack_asm(input: &[u8], out: &mut Vec<u8>, table: &mut [u32]) -> Option<us
             out.clear();
             return None;
         }
-        assert!(written <= cap, "the kernel reported writing past the buffer");
+        assert!(
+            written <= cap,
+            "the kernel reported writing past the buffer"
+        );
         // SAFETY: the kernel wrote `written` bytes starting at the pointer, and
         // `written <= cap` was just checked.
         unsafe { out.set_len(written) };
@@ -371,7 +373,11 @@ mod tests {
     fn the_duplicated_constants_still_hold() {
         assert_eq!(TABLE_SIZE, 4096);
         assert_eq!(32 - HASH_BITS, 20, "the small-value shift in the .S file");
-        assert_eq!(32 - HASH_BITS_LARGE, 21, "the large-value shift in the .S file");
+        assert_eq!(
+            32 - HASH_BITS_LARGE,
+            21,
+            "the large-value shift in the .S file"
+        );
         assert_eq!(NARROW_TABLE_ABOVE, 8192, "the threshold in the .S file");
         assert_eq!(EMPTY, 0x8000_0000, "the sentinel the .S file relies on");
         assert_eq!(MIN_MATCH, 4);

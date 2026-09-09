@@ -29,7 +29,7 @@
 /// size at the end, so nothing ever reads what they wrote past it.
 pub const UNPACK_SLACK: usize = 64;
 
-#[cfg(all(keva_asm, target_arch = "aarch64"))]
+#[cfg(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
 extern "C" {
     fn keva_unpack(
         src: *const u8,
@@ -94,13 +94,13 @@ pub fn unpack_section(
     start: usize,
     split: Split,
 ) -> bool {
-    #[cfg(not(all(keva_asm, target_arch = "aarch64")))]
+    #[cfg(not(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
     {
         let _ = (src, dst, declared, start, split);
         false
     }
 
-    #[cfg(all(keva_asm, target_arch = "aarch64"))]
+    #[cfg(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         if declared == 0 || start >= declared {
             return false;
@@ -110,10 +110,20 @@ pub fn unpack_section(
         let produced = unsafe {
             match split {
                 Split::Even => keva_unpack(
-                    src.as_ptr(), src.len(), dst.as_mut_ptr(), dst.len(), declared, start,
+                    src.as_ptr(),
+                    src.len(),
+                    dst.as_mut_ptr(),
+                    dst.len(),
+                    declared,
+                    start,
                 ),
                 Split::WideMatch => keva_unpack_wide(
-                    src.as_ptr(), src.len(), dst.as_mut_ptr(), dst.len(), declared, start,
+                    src.as_ptr(),
+                    src.len(),
+                    dst.as_mut_ptr(),
+                    dst.len(),
+                    declared,
+                    start,
                 ),
             }
         } as usize;
@@ -141,13 +151,13 @@ pub fn unpack_asm_hybrid(
     first: Split,
     second: Split,
 ) -> bool {
-    #[cfg(not(all(keva_asm, target_arch = "aarch64")))]
+    #[cfg(not(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
     {
         let _ = (body, out, declared, switch, first, second);
         false
     }
 
-    #[cfg(all(keva_asm, target_arch = "aarch64"))]
+    #[cfg(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         let (in_at, out_at) = switch;
         if declared == 0 || out_at == 0 || out_at >= declared || in_at > body.len() {
@@ -203,7 +213,10 @@ pub fn unpack_asm_hybrid(
 
 /// Whether this build has an assembly decoder.
 pub const fn asm_available() -> bool {
-    cfg!(all(keva_asm, target_arch = "aarch64"))
+    cfg!(all(
+        keva_asm,
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))
 }
 
 /// Decode `body` — the packed stream with its length header already removed —
@@ -214,13 +227,13 @@ pub const fn asm_available() -> bool {
 /// definitely corrupt, so the caller must fall back rather than report an
 /// error.
 pub fn unpack_asm(body: &[u8], out: &mut Vec<u8>, declared: usize, split: Split) -> bool {
-    #[cfg(not(all(keva_asm, target_arch = "aarch64")))]
+    #[cfg(not(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
     {
         let _ = (body, out, declared, split);
         false
     }
 
-    #[cfg(all(keva_asm, target_arch = "aarch64"))]
+    #[cfg(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         // Zero is how the kernel says it declined, so it cannot also be how it
         // reports success. An empty value is the portable decoder's business.
@@ -245,12 +258,22 @@ pub fn unpack_asm(body: &[u8], out: &mut Vec<u8>, declared: usize, split: Split)
         // every byte below it was written by this call.
         let produced = unsafe {
             match split {
-                Split::Even => {
-                    keva_unpack(body.as_ptr(), body.len(), out.as_mut_ptr(), cap, declared, 0)
-                }
-                Split::WideMatch => {
-                    keva_unpack_wide(body.as_ptr(), body.len(), out.as_mut_ptr(), cap, declared, 0)
-                }
+                Split::Even => keva_unpack(
+                    body.as_ptr(),
+                    body.len(),
+                    out.as_mut_ptr(),
+                    cap,
+                    declared,
+                    0,
+                ),
+                Split::WideMatch => keva_unpack_wide(
+                    body.as_ptr(),
+                    body.len(),
+                    out.as_mut_ptr(),
+                    cap,
+                    declared,
+                    0,
+                ),
             }
         } as usize;
 

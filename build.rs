@@ -17,7 +17,11 @@ fn main() {
             "asm/aarch64/unpack.S",
             "asm/aarch64/unpack_wide.S",
         ],
-        "x86_64" => &["asm/x86_64/ctrl_match.S"],
+        "x86_64" => &[
+            "asm/x86_64/ctrl_match.S",
+            "asm/x86_64/unpack.S",
+            "asm/x86_64/unpack_wide.S",
+        ],
         // Every other target runs the scalar reference. That is a supported
         // configuration, not a degraded one -- correctness does not depend on
         // the kernels existing.
@@ -31,7 +35,6 @@ fn main() {
     // which is how the files pick the right symbol decoration for Mach-O
     // versus ELF.
     build.compile("keva_asm_kernels");
-
 
     println!("cargo:rustc-cfg=keva_asm");
 }
