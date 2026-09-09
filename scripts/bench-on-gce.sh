@@ -160,7 +160,9 @@ echo
 
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -qq
-sudo apt-get install -y -qq build-essential liblz4-dev pkg-config python3 >/dev/null
+sudo apt-get install -y -qq build-essential liblz4-dev pkg-config python3 \
+    "linux-perf-$(uname -r | cut -d- -f1-2)" linux-perf >/dev/null 2>&1 || \
+    sudo apt-get install -y -qq build-essential liblz4-dev pkg-config python3 >/dev/null
 
 if ! command -v cargo >/dev/null; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y -q
@@ -196,6 +198,30 @@ if [ "$fail" -ne 0 ]; then
     echo "!! a test failed on this machine -- the numbers below describe code"
     echo "!! that does not pass its own suite here. That is the finding."
     echo
+fi
+
+# What the machine says, rather than what the code looks like.
+#
+# Every micro-optimisation this evening was reasoned from a model of the part
+# and measured afterwards, and the model was wrong about as often as it was
+# right -- indexed addressing, micro-op width, branch density. Counters are the
+# thing that would have said so in advance. They are informational: a shared
+# runner cannot support a threshold, and the point is the ratios between
+# counters within one run.
+echo
+echo "== counters, decoding records_512 and records_64k"
+if command -v perf >/dev/null && perf stat true >/dev/null 2>&1; then
+    for shape in records_512 records_64k; do
+        echo "-- $shape"
+        perf stat -e cycles,instructions,branches,branch-misses,\
+cache-references,cache-misses,ld_blocks.store_forward,stalled-cycles-frontend \
+            -x, --no-big-num \
+            cargo run -q --release -p keva-core --features liblz4 \
+                --example counters -- "$shape" own 2>&1 |
+            grep -E '^[0-9]' | awk -F, '{printf "   %-28s %s\n", $3, $1}'
+    done
+else
+    echo "   perf is not available on this instance"
 fi
 
 echo
