@@ -52,6 +52,29 @@ extern "C" {
     ) -> u32;
 }
 
+// The same two kernels with the pattern shuffle, picked at run time. Declared
+// only where they exist: nothing outside x86-64 links them.
+#[cfg(all(keva_asm, target_arch = "x86_64"))]
+extern "C" {
+    fn keva_unpack_ssse3(
+        src: *const u8,
+        src_len: usize,
+        dst: *mut u8,
+        dst_cap: usize,
+        declared: usize,
+        start: usize,
+    ) -> u32;
+
+    fn keva_unpack_wide_ssse3(
+        src: *const u8,
+        src_len: usize,
+        dst: *mut u8,
+        dst_cap: usize,
+        declared: usize,
+        start: usize,
+    ) -> u32;
+}
+
 /// Run the kernel for `split`.
 ///
 /// # Safety
@@ -69,6 +92,20 @@ unsafe fn run(
     declared: usize,
     start: usize,
 ) -> u32 {
+    // A near match -- offset below sixteen -- is grown a byte at a time without
+    // this, and short offsets are what data that only partly repeats is made
+    // of. SSSE3 is universal on anything a server has shipped with since 2007,
+    // but it is not the x86-64 baseline, so it is asked for rather than assumed.
+    #[cfg(target_arch = "x86_64")]
+    if crate::cpu::features().ssse3 {
+        return match split {
+            Split::Even => keva_unpack_ssse3(src, src_len, dst, dst_cap, declared, start),
+            Split::WideMatch => {
+                keva_unpack_wide_ssse3(src, src_len, dst, dst_cap, declared, start)
+            }
+        };
+    }
+
     match split {
         Split::Even => keva_unpack(src, src_len, dst, dst_cap, declared, start),
         Split::WideMatch => keva_unpack_wide(src, src_len, dst, dst_cap, declared, start),

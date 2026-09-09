@@ -56,6 +56,10 @@ impl Isa {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Features {
     pub sse2: bool,
+    /// Byte shuffles. The decoder builds a near match's whole pattern with one
+    /// `pshufb` instead of growing it a byte at a time, so this is worth
+    /// dispatching on even though every server part since 2007 has it.
+    pub ssse3: bool,
     pub avx2: bool,
     pub avx512f: bool,
     pub neon: bool,
@@ -103,6 +107,7 @@ fn detect() -> Features {
         // SSE2 is part of the x86-64 baseline, so this is unconditionally true;
         // it is recorded explicitly so `INFO` output stays self-describing.
         f.sse2 = true;
+        f.ssse3 = std::arch::is_x86_feature_detected!("ssse3");
         f.avx2 = std::arch::is_x86_feature_detected!("avx2");
         f.avx512f = std::arch::is_x86_feature_detected!("avx512f");
     }
@@ -146,6 +151,7 @@ mod tests {
     fn avx512_is_never_selected_implicitly() {
         let f = Features {
             sse2: true,
+            ssse3: true,
             avx2: true,
             avx512f: true,
             ..Features::default()

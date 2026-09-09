@@ -16,8 +16,10 @@
  * needs the portable decoder" -- for a malformed stream, or a buffer too small
  * for the checks below to be sufficient.
  *
- * SSE2 only, no runtime dispatch: 16-byte moves are all this needs and SSE2 is
- * the x86-64 baseline.
+ * SSE2 is the baseline and 16-byte moves are all the copying needs. One thing
+ * beyond it is asked for at run time: `pshufb`, which builds a near match's
+ * repeating pattern in a single shuffle. Everything else is identical between
+ * the two builds, and the SSE2 one is what a machine without SSSE3 gets.
  *
  * # Everything is a pointer, and that is the point
  *
@@ -60,14 +62,24 @@
 #include "../common.h"
 
 #ifdef KEVA_WIDE
-#  define KEVA_PFX   w
-#  define KEVA_ENTRY keva_unpack_wide
+#  ifdef KEVA_SSSE3
+#    define KEVA_PFX   ws
+#    define KEVA_ENTRY keva_unpack_wide_ssse3
+#  else
+#    define KEVA_PFX   w
+#    define KEVA_ENTRY keva_unpack_wide
+#  endif
 #  define LIT_SHIFT  6
 #  define LIT_MAX    3
 #  define MAT_MAX    63
 #else
-#  define KEVA_PFX   e
-#  define KEVA_ENTRY keva_unpack
+#  ifdef KEVA_SSSE3
+#    define KEVA_PFX   es
+#    define KEVA_ENTRY keva_unpack_ssse3
+#  else
+#    define KEVA_PFX   e
+#    define KEVA_ENTRY keva_unpack
+#  endif
 #  define LIT_SHIFT  4
 #  define LIT_MAX    15
 #  define MAT_MAX    15
@@ -437,6 +449,45 @@ L(splat):
 L(splat_grow):
     cmp     $16, %rdx
     jae     L(splat_wide)
+
+#ifdef KEVA_SSSE3
+    /*
+     * The whole pattern in one shuffle, and then one shuffle per store.
+     *
+     * The output of a repeat is periodic: out[i] = S[i mod d], for the d bytes
+     * S that sit behind the cursor. A 16-byte window of that is a shuffle of
+     * those d bytes, so the first window is `pshufb` with the mask j -> j mod d.
+     *
+     * The window after it is a shuffle of the window before it, and by the same
+     * mask every time: window k holds S[(16k + j) mod d], so window k+1 wants
+     * S[(16k + 16 + j) mod d], which is element (j + 16) mod d of window k.
+     * That index is below d and therefore below sixteen, so it is a legal
+     * shuffle index and the mask does not depend on k.
+     *
+     * Two tables of sixteen masks, and the loop becomes store, shuffle, count.
+     * What it replaces is a byte at a time until the gap reaches sixteen: from
+     * an offset of one that was fifteen single-byte moves before any vector
+     * work, and offsets that small are what `varied` data is full of.
+     *
+     * The load reads sixteen bytes where only d are meant. The rest is whatever
+     * the destination holds and the shuffle discards it; the read cannot leave
+     * the caller's buffer, which is `declared + 64` and holds this cursor.
+     */
+    movdqu  (%rsi), %xmm0                   /* d live bytes at the front */
+    shl     $4, %edx                        /* mask index: d * 16 */
+    lea     L(splat_first)(%rip), %rax
+    pshufb  (%rax,%rdx,1), %xmm0
+    lea     L(splat_next)(%rip), %rax
+    movdqa  (%rax,%rdx,1), %xmm1
+L(splat_pattern):
+    movdqu  %xmm0, (%rdi)
+    add     $16, %rdi
+    pshufb  %xmm1, %xmm0                    /* advance the window by sixteen */
+    sub     $16, %rcx
+    jg      L(splat_pattern)
+    ret
+#endif
+
     mov     %rdx, %r11                      /* append `gap` bytes */
     mov     %rdi, %rsi
     sub     %rdx, %rsi
@@ -465,6 +516,61 @@ L(splat_loop):
 
 L(splat_ret):
     ret
+
+#ifdef KEVA_SSSE3
+/*
+ * The shuffle masks, indexed by the offset in bytes.
+ *
+ * `splat_first` turns d live bytes into a full sixteen-byte window: j -> j mod
+ * d. `splat_next` advances a window by sixteen: j -> (j + 16) mod d, which is
+ * the same mask for every window and is why the loop above carries no state
+ * beyond the vector itself.
+ *
+ * Sixteen-byte aligned because a legacy SSE memory operand must be, and the
+ * index is d * 16 so every entry lands on a boundary. Row zero is never read;
+ * an offset of zero is rejected long before this.
+ *
+ * They sit in .text rather than a read-only section so that one directive does
+ * not have to be spelled two ways for ELF and Mach-O. Five hundred and twelve
+ * bytes, touched only by a near match.
+ */
+    .p2align 4
+L(splat_first):
+    .byte    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0    /* d =  0 */
+    .byte    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0    /* d =  1 */
+    .byte    0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1    /* d =  2 */
+    .byte    0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0    /* d =  3 */
+    .byte    0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3    /* d =  4 */
+    .byte    0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0    /* d =  5 */
+    .byte    0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 0, 1, 2, 3    /* d =  6 */
+    .byte    0, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 5, 6, 0, 1    /* d =  7 */
+    .byte    0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7    /* d =  8 */
+    .byte    0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 1, 2, 3, 4, 5, 6    /* d =  9 */
+    .byte    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5    /* d = 10 */
+    .byte    0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10, 0, 1, 2, 3, 4    /* d = 11 */
+    .byte    0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11, 0, 1, 2, 3    /* d = 12 */
+    .byte    0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12, 0, 1, 2    /* d = 13 */
+    .byte    0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13, 0, 1    /* d = 14 */
+    .byte    0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14, 0    /* d = 15 */
+
+L(splat_next):
+    .byte    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0    /* d =  0 */
+    .byte    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0    /* d =  1 */
+    .byte    0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1    /* d =  2 */
+    .byte    1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1    /* d =  3 */
+    .byte    0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3    /* d =  4 */
+    .byte    1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1    /* d =  5 */
+    .byte    4, 5, 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 0, 1    /* d =  6 */
+    .byte    2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3    /* d =  7 */
+    .byte    0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7    /* d =  8 */
+    .byte    7, 8, 0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 1, 2, 3, 4    /* d =  9 */
+    .byte    6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1    /* d = 10 */
+    .byte    5, 6, 7, 8, 9,10, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9    /* d = 11 */
+    .byte    4, 5, 6, 7, 8, 9,10,11, 0, 1, 2, 3, 4, 5, 6, 7    /* d = 12 */
+    .byte    3, 4, 5, 6, 7, 8, 9,10,11,12, 0, 1, 2, 3, 4, 5    /* d = 13 */
+    .byte    2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13, 0, 1, 2, 3    /* d = 14 */
+    .byte    1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14, 0, 1    /* d = 15 */
+#endif
 
 /*
  * Why the loop stopped, worked out where it is cold.
