@@ -39,6 +39,7 @@
  *
  *   HASH_BITS 12 -> shift 20, or 11 -> 21 above 8192 bytes; see .Lshift_ready
  *   MAX_OFFSET 65535   MIN_MATCH 4   SKIP_TRIGGER 5   EMPTY 0x80000000
+ *   The hash reads eight bytes and uses the low five, as the Rust packer does.
  */
 
 #include "../common.h"
@@ -69,7 +70,7 @@ KEVA_SYM(keva_pack):
     cmp     x3, x9
     b.lo    .Lgiveup
 
-    cmp     x20, #4                     // shorter than MIN_MATCH cannot pack
+    cmp     x20, #8                     // shorter than the hash word cannot pack
     b.lo    .Lgiveup
 
     mov     x23, #0                     // out cursor
@@ -96,9 +97,10 @@ KEVA_SYM(keva_pack):
     strb    w10, [x21, x23]
     add     x23, x23, #1
 
-    sub     x8, x20, #4                 // scan limit
-    mov     w7, #0x79B1                 // 0x9E3779B1
-    movk    w7, #0x9E37, lsl #16
+    sub     x8, x20, #8                 // scan limit: the hash reads eight
+    mov     x7, #0xDCBB                 // 889523592379: the five-byte multiplier
+    movk    x7, #0x1BBC, lsl #16
+    movk    x7, #0xCF, lsl #32
     mov     w13, #65534                 // MAX_OFFSET - 1; see the window check
 
     /*
@@ -115,11 +117,11 @@ KEVA_SYM(keva_pack):
      *
      * A register shift costs the same as an immediate one, so this is free.
      */
-    mov     w27, #20                    // 32 - HASH_BITS
+    mov     w27, #52                    // 64 - HASH_BITS
     mov     x9, #8192                   // NARROW_TABLE_ABOVE
     cmp     x20, x9
     b.ls    .Lshift_ready
-    mov     w27, #21                    // 32 - HASH_BITS_LARGE
+    mov     w27, #53                    // 64 - HASH_BITS_LARGE
 .Lshift_ready:
 
     /* ---- search ------------------------------------------------------ */
@@ -128,9 +130,10 @@ KEVA_SYM(keva_pack):
     cmp     x25, x8
     b.hi    .Ltail
 
-    ldr     w9, [x19, x25]              // four bytes at `at`
-    mul     w10, w9, w7
-    lsr     w10, w10, w27               // slot
+    ldr     x9, [x19, x25]              // eight bytes at `at`; w9 is the low four
+    lsl     x10, x9, #24                // only the low five are hashed
+    mul     x10, x10, x7
+    lsr     x10, x10, x27               // slot
 
     ldr     w11, [x22, x10, lsl #2]     // stored
     add     w12, w25, #1

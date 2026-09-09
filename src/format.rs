@@ -128,6 +128,17 @@ const HASH_BITS: usize = 12;
 ///
 /// This is the same trade liblz4 makes and loses: 2.00x at 4872 blocks and 5.06
 /// GiB/s decoding, against our 1.98x at 3618 and 7.27.
+///
+/// Re-measured again once the hash grew to five bytes, since a hash that stops
+/// proposing four-byte matches might have made a wider table affordable. It
+/// does not. On 64 KiB of `varied`, cycles per byte and packed bytes:
+///
+/// ```text
+///   bits    11             12             13
+///          3.459  33180   3.900  32490   5.018  31968
+/// ```
+///
+/// Eleven still wins by more than a wider table can return in ratio.
 const HASH_BITS_LARGE: usize = 11;
 
 /// Where the table stops being free and starts being a rival for cache.
@@ -248,10 +259,63 @@ fn hash4(word: u32, shift: u32) -> usize {
 #[inline]
 fn hash_shift(len: usize) -> u32 {
     if len > NARROW_TABLE_ABOVE {
-        (32 - HASH_BITS_LARGE) as u32
+        (64 - HASH_BITS_LARGE) as u32
     } else {
-        (32 - HASH_BITS) as u32
+        (64 - HASH_BITS) as u32
     }
+}
+
+/// How many bytes the hash reads, which is more than it uses: five bytes are
+/// hashed and eight are loaded, because one unaligned 64-bit read is cheaper
+/// than assembling five bytes.
+const HASH_WORD: usize = 8;
+
+/// The low five bytes at `at`, hashed.
+///
+/// Both references hash five bytes on a 64-bit target and we hashed four, which
+/// was the last thing separating us on data that only partly repeats.
+///
+/// A four-byte hash proposes every position that shares four bytes, and a
+/// four-byte match is a whole block -- a token, an offset, and a literal run cut
+/// in two -- bought for nothing. Those are the matches a wider table finds more
+/// of, which is why widening ours always made it slower: twelve bits on a 64 KiB
+/// value cost 50% and bought 2.6% of ratio. Hashing five bytes does the
+/// opposite. It does not propose them at all, so the same table finds fewer and
+/// longer matches:
+///
+/// ```text
+///                      four bytes        five bytes
+///     varied_64k    3.719   33237 B   3.459   33180 B
+///     varied_4k     2.916    2249     2.711    2229
+///     records_64k   0.996    6827     0.910    6509
+///     records_2k    1.095     392     1.038     394
+///     records_512   1.592     192     1.351     195
+/// ```
+///
+/// Faster and denser at once nearly everywhere, and 4.7% denser on 64 KiB of
+/// records. The exception is a 512-byte value, where three bytes go the other
+/// way: short values have proportionally more four-byte matches worth taking,
+/// and there is no room to lose them. Switching the hash on size the way the
+/// references switch their table was measured and is worse than either -- the
+/// test lands in the inner loop and costs more than it saves, because we cannot
+/// compile the loop twice the way a C macro does.
+///
+/// Wider tables remain wrong even with this: at twelve bits a 64 KiB `varied`
+/// value costs 3.900 against 3.459 for 690 bytes of ratio, and at thirteen it
+/// is 5.018.
+#[inline]
+fn hash5(seq: u64, shift: u32) -> usize {
+    ((seq << 24).wrapping_mul(889_523_592_379u64) >> shift) as usize
+}
+
+/// The eight bytes at `at`, as one word.
+///
+/// # Safety
+///
+/// `at + 8 <= input.len()`, which the search bound guarantees.
+#[inline]
+unsafe fn word8(input: &[u8], at: usize) -> u64 {
+    u64::from_le(input.as_ptr().add(at).cast::<u64>().read_unaligned())
 }
 
 /// The four bytes at `at`, as one word.
@@ -493,7 +557,10 @@ fn worth_packing(input: &[u8]) -> bool {
 /// The body, with the match table supplied so it can outlive one call.
 fn pack_with(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> bool {
     out.clear();
-    if input.len() < MIN_MATCH {
+    // Eight, not four: the hash reads eight bytes at every position it visits,
+    // so a shorter value has nothing that can be searched. Nothing is lost --
+    // a header, a token and an offset already outweigh a seven-byte value.
+    if input.len() < HASH_WORD {
         return false;
     }
     if !worth_packing(input) {
@@ -567,7 +634,10 @@ const EAGER: bool = false;
 #[cfg(test)]
 fn pack_with_eager(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> bool {
     out.clear();
-    if input.len() < MIN_MATCH {
+    // Eight, not four: the hash reads eight bytes at every position it visits,
+    // so a shorter value has nothing that can be searched. Nothing is lost --
+    // a header, a token and an offset already outweigh a seven-byte value.
+    if input.len() < HASH_WORD {
         return false;
     }
     pack_pass(input, out, table, EVEN, EAGER, FIXED);
@@ -629,11 +699,15 @@ fn pack_pass(
 
     // Hoisted: the loop asked `at + MIN_MATCH <= input.len()` and paid an `add`
     // for it on every position visited.
-    let last = input.len() - MIN_MATCH;
+    // SAFETY of every `word8` below: the callers refuse a value shorter than
+    // `HASH_WORD`, so this does not wrap and the last position visited has a
+    // full hash word above it.
+    let last = input.len() - HASH_WORD;
     while at <= last {
         // SAFETY: the loop condition is `at + MIN_MATCH <= input.len()`.
         let here = unsafe { word4(input, at) };
-        let slot = hash4(here, shift);
+        // SAFETY: `at <= last` is `at + 8 <= input.len()`.
+        let slot = hash5(unsafe { word8(input, at) }, shift);
         let stored = table[slot];
         table[slot] = at as u32;
 
@@ -752,7 +826,8 @@ fn pack_pass(
                     }
                     // SAFETY: `next + MIN_MATCH <= input.len()` was tested above.
                     let ahead = unsafe { word4(input, next) };
-                    let slot = hash4(ahead, shift);
+                    // SAFETY: `next <= last` is `next + 8 <= input.len()`.
+                    let slot = hash5(unsafe { word8(input, next) }, shift);
                     let stored = table[slot];
                     // Inserted whether or not it wins: the position is real and a
                     // later search may want it, and the search itself would never
