@@ -194,36 +194,11 @@ L(block):
 
     mov     %eax, %r10d
     shr     $LIT_SHIFT, %r10d               /* short literal */
+    cmp     $LIT_MAX, %r10d
+    je      L(slow)                         /* the literal length escaped */
+
     mov     %eax, %r11d
     and     $MAT_MAX, %r11d                 /* short match */
-
-    /*
-     * One branch for both fields rather than two.
-     *
-     * Either field being all ones means its length escaped the token and this
-     * block belongs on the checked path. Testing that separately costs two
-     * branches, and the objection to merging them was that a not-taken branch
-     * is nearly free to execute -- which is true, and beside the point. The
-     * micro-op cache ends a line at every branch, so a fast path this dense in
-     * them is delivered from the legacy decoders at fewer micro-ops per cycle
-     * than the cache would give. Branches are cheap to run and expensive to
-     * hold.
-     *
-     * `xor` leaves zero exactly where a field escaped, and multiplying is zero
-     * if either is -- four more micro-ops on the arithmetic ports, which are
-     * not what this loop is short of, to take one branch out of the window.
-     *
-     * The `test` is not redundant: `imul` sets carry and overflow and leaves
-     * the zero flag undefined, so branching straight off it is a bug the
-     * differential suite catches immediately.
-     */
-    mov     %r10d, %ecx
-    xor     $LIT_MAX, %ecx
-    mov     %r11d, %edx
-    xor     $MAT_MAX, %edx
-    imul    %edx, %ecx
-    test    %ecx, %ecx
-    je      L(slow)
 
     movzwl  1(%r14,%r10,1), %ecx            /* offset */
     lea     (%rdi,%r10,1), %r8              /* dst after the literals */
@@ -239,11 +214,18 @@ L(block):
     cmp     %rax, %rdx
     jae     L(fail)
 
-    lea     MIN_MATCH(%r11), %r9            /* match length */
-    lea     (%r8,%r9,1), %rax               /* dst after the match */
-    cmp     %r12, %rax
-    ja      L(fail)
-
+    /*
+     * A match whose length escaped the token used to leave for the checked
+     * path, and counting says that is most of them: at 512 bytes of records
+     * only a third of blocks reached the fast path at all, and six of the eight
+     * that did not were here. Matches in a store's values are long -- that is
+     * what the wide split exists for -- so "long match" is the common case and
+     * sending it away was sending away the work.
+     *
+     * It is read here instead. The chain is bounded against the end of the
+     * stream and against what is left to produce, exactly as the checked path
+     * bounds it, because those bytes are as attacker-controlled as any other.
+     */
     /* Fixed width on purpose -- the guards above paid for not asking again.
      * Sixteen literal bytes are stored whether or not that many were meant;
      * the surplus is overwritten by the next block or falls in the slack the
@@ -258,10 +240,33 @@ L(block):
 
     lea     3(%r14,%r10,1), %r14            /* token + literals + offset */
 
+    /*
+     * A match whose length escaped the token used to leave for the checked
+     * path, and counting says that is most of them: at 512 bytes of records
+     * only a third of blocks reached the fast path, and six of the eight that
+     * did not were here. Matches in a store's values are long -- that is what
+     * the wide split exists for -- so sending "long match" away was sending
+     * away the work.
+     *
+     * It is read here instead, after the cursor has passed the offset, which
+     * is where the chain begins. Bounded against the end of the stream and
+     * against what is left to produce, exactly as the checked path bounds it.
+     */
+    lea     MIN_MATCH(%r11), %r9            /* match length, so far */
+    cmp     $MAT_MAX, %r11d
+    je      L(fast_matext)
+
+L(fast_matgo):
+    lea     (%r8,%r9,1), %rax               /* dst after the match */
+    cmp     %r12, %rax
+    ja      L(fail)
+
     mov     %r8, %rsi
     sub     %rcx, %rsi                      /* the match source */
     cmp     $OVERRUN, %rcx
     jb      L(near)
+    cmp     $COPY_MAX, %r9
+    ja      L(fast_long)
 
 #ifdef KEVA_AVX2
     vmovdqu (%rsi), %ymm0
@@ -293,6 +298,50 @@ L(block):
 #  endif
 #endif
     mov     %rax, %rdi
+    jmp     L(block)
+
+L(fast_matext):
+    cmp     %r13, %r14
+    jae     L(fail)
+    movzbl  (%r14), %edx
+    inc     %r14
+    add     %rdx, %r9
+    /* Bounded against what is left to produce: nothing beyond it can be
+     * written, so a chain that reaches it has already failed.
+     *
+     * Through `rax`, not `rcx`: `rcx` is holding the offset, which was read
+     * before the chain and is wanted after it. Clobbering it here is what the
+     * first version of this did, and the differential suite said so. */
+    mov     %r12, %rax
+    sub     %rbx, %rax
+    cmp     %rax, %r9
+    ja      L(fail)
+    cmp     $255, %edx
+    je      L(fast_matext)
+    jmp     L(fast_matgo)
+
+L(fast_long):
+    /* Longer than the fixed move: the same block loop the checked path uses,
+     * and the same argument for overrunning -- `dst_cap` is `declared + 64`
+     * and this ends by `declared + 31`. */
+    mov     %rax, %r10                      /* keep the new cursor */
+    mov     %r8, %rdi
+    mov     %r9, %rcx
+L(fast_longloop):
+#ifdef KEVA_AVX2
+    vmovdqu (%rsi), %ymm0
+    vmovdqu %ymm0, (%rdi)
+#else
+    movdqu  (%rsi), %xmm0
+    movdqu  16(%rsi), %xmm1
+    movdqu  %xmm0, (%rdi)
+    movdqu  %xmm1, 16(%rdi)
+#endif
+    add     $OVERRUN, %rsi
+    add     $OVERRUN, %rdi
+    sub     $OVERRUN, %rcx
+    jg      L(fast_longloop)
+    mov     %r10, %rdi
     jmp     L(block)
 
 L(near):
