@@ -167,19 +167,34 @@ KEVA_NAME(KEVA_ENTRY):
  */
     .p2align 5
 L(block):
-    cmp     %r12, %rdi
-    jae     L(done)
-
-    cmp     %r13, %r14
-    jae     L(fail)
+    /*
+     * Two branches, not four, and the reason is an ordering rather than a
+     * guess.
+     *
+     * The head used to ask four questions per block: is the output finished, is
+     * the input exhausted, is the output too near its end to read ahead, is the
+     * input. But `rbp` is `r12 - OUT_MARGIN` and `r15` is `r13 - FAST_IN`, so
+     * each pair is a wide limit and a narrow one on the same cursor, and the
+     * narrow one implies the wide. A cursor inside the zone cannot be past the
+     * end. The two wide tests were unreachable while the loop was running and
+     * only decided which way to leave once it stopped.
+     *
+     * So the zone is tested here and the reason is worked out on the cold side,
+     * where it costs nothing. Leaving is once per value; staying is every block.
+     *
+     * The input test goes first so the token load has one branch in front of it
+     * instead of two. That load starts the block's dependency chain -- token,
+     * literal count, offset address, offset -- and every cycle it waits is a
+     * cycle the whole block waits.
+     */
+    cmp     %r15, %r14
+    ja      L(src_edge)                     /* too near the end of the stream */
     movzbl  (%r14), %eax                    /* token */
 
     /* ---- fast path -------------------------------------------------- */
 
     cmp     %rbp, %rdi
-    ja      L(slow)                         /* too near the end to read ahead */
-    cmp     %r15, %r14
-    ja      L(slow)                         /* too near the end of the stream */
+    ja      L(dst_edge)                     /* too near the end to read ahead */
 
     mov     %eax, %r10d
     shr     $LIT_SHIFT, %r10d               /* short literal */
@@ -450,6 +465,32 @@ L(splat_loop):
 
 L(splat_ret):
     ret
+
+/*
+ * Why the loop stopped, worked out where it is cold.
+ *
+ * Both arrive knowing one cursor left the zone. Neither knows why, and the
+ * order they ask in is the order the old head asked in, so the answers are the
+ * same ones: a finished output outranks an exhausted input, because a value
+ * whose last block runs to the final byte leaves the source cursor at the end
+ * and that is success, not truncation.
+ */
+L(src_edge):
+    cmp     %r12, %rdi
+    jae     L(done)
+    cmp     %r13, %r14
+    jae     L(fail)
+    /* The checked path is entered with the token already in `eax`, which the
+     * loop head used to load for everyone. It cannot load it any more -- that
+     * is the branch this removed -- so the one entry that skipped the load does
+     * it here, where the compare above has just made it safe. */
+    movzbl  (%r14), %eax
+    jmp     L(slow)
+
+L(dst_edge):
+    cmp     %r12, %rdi
+    jae     L(done)
+    jmp     L(slow)
 
     /* ---- exact path ------------------------------------------------- */
 
