@@ -194,12 +194,35 @@ L(block):
 
     mov     %eax, %r10d
     shr     $LIT_SHIFT, %r10d               /* short literal */
-    cmp     $LIT_MAX, %r10d
-    je      L(slow)
-
     mov     %eax, %r11d
     and     $MAT_MAX, %r11d                 /* short match */
-    cmp     $MAT_MAX, %r11d
+
+    /*
+     * One branch for both fields rather than two.
+     *
+     * Either field being all ones means its length escaped the token and this
+     * block belongs on the checked path. Testing that separately costs two
+     * branches, and the objection to merging them was that a not-taken branch
+     * is nearly free to execute -- which is true, and beside the point. The
+     * micro-op cache ends a line at every branch, so a fast path this dense in
+     * them is delivered from the legacy decoders at fewer micro-ops per cycle
+     * than the cache would give. Branches are cheap to run and expensive to
+     * hold.
+     *
+     * `xor` leaves zero exactly where a field escaped, and multiplying is zero
+     * if either is -- four more micro-ops on the arithmetic ports, which are
+     * not what this loop is short of, to take one branch out of the window.
+     *
+     * The `test` is not redundant: `imul` sets carry and overflow and leaves
+     * the zero flag undefined, so branching straight off it is a bug the
+     * differential suite catches immediately.
+     */
+    mov     %r10d, %ecx
+    xor     $LIT_MAX, %ecx
+    mov     %r11d, %edx
+    xor     $MAT_MAX, %edx
+    imul    %edx, %ecx
+    test    %ecx, %ecx
     je      L(slow)
 
     movzwl  1(%r14,%r10,1), %ecx            /* offset */
