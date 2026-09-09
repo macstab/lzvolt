@@ -8,6 +8,13 @@
 #   scripts/bench-on-gce.sh arm
 #   KEEP=1 scripts/bench-on-gce.sh     # leave the machines running
 #   PROJECT=my-project scripts/bench-on-gce.sh
+#   REVS="a1b2c3 d4e5f6" scripts/bench-on-gce.sh intel
+#
+# REVS measures several revisions on the *same* machine in one visit. Renting a
+# machine takes twenty minutes of installing before it measures anything, so
+# paying that once for four variants rather than four times is most of what
+# makes an optimisation loop bearable -- and it removes the machine as a
+# variable between them, which matters more.
 #
 # The project is named on every call rather than taken from whatever gcloud
 # happens to have configured. A script that creates instances in an unstated
@@ -33,6 +40,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 BRANCH="${BRANCH:-packer}"
+REVS="${REVS:-}"
 KEEP="${KEEP:-0}"
 RUNS="${RUNS:-3}"
 PREFIX="${PREFIX:-keva-bench}"
@@ -114,18 +122,28 @@ mkdir -p "$OUTDIR"
 ARCHIVE="$(mktemp -t keva-packer-XXXXXX).tar.gz"
 RUNNER="$(mktemp -t keva-runner-XXXXXX).sh"
 TMPERR="$(mktemp -t keva-err-XXXXXX)"
-trap 'rm -f "$ARCHIVE" "$RUNNER" "$TMPERR"' EXIT
+trap 'rm -f "$ARCHIVE"* "$RUNNER" "$TMPERR"' EXIT
 
-git archive --format=tar.gz --prefix=keva/ -o "$ARCHIVE" "$BRANCH"
-COMMIT="$(git rev-parse --short "$BRANCH")"
-echo "== packing $BRANCH at $COMMIT, $(du -h "$ARCHIVE" | cut -f1)"
+if [ -z "$REVS" ]; then
+    REVS="$BRANCH"
+fi
+SHORT=""
+for rev in $REVS; do
+    git rev-parse --verify "$rev" >/dev/null 2>&1 || {
+        echo "no such revision: $rev" >&2; exit 1; }
+    sha="$(git rev-parse --short "$rev")"
+    git archive --format=tar.gz --prefix=keva/ -o "$ARCHIVE.$sha" "$rev"
+    SHORT="$SHORT $sha"
+    echo "== packing $rev at $sha, $(du -h "$ARCHIVE.$sha" | cut -f1)"
+done
+SHORT="${SHORT# }"
 
 # What runs on the far side. Quoted heredoc: nothing here is expanded locally.
 cat > "$RUNNER" <<'REMOTE'
 set -uo pipefail
 runs="${1:-3}"
 export KEVA_COMMIT="${2:-unknown}"
-report="$HOME/report.txt"
+report="$HOME/report-$KEVA_COMMIT.txt"
 
 exec > >(tee "$report") 2>&1
 
@@ -148,7 +166,8 @@ fi
 echo "rustc     $(rustc --version)"
 echo
 
-tar xzf "$HOME/keva-packer.tar.gz" -C "$HOME"
+rm -rf "$HOME/keva"
+tar xzf "$HOME/keva-$KEVA_COMMIT.tar.gz" -C "$HOME"
 cd "$HOME/keva"
 
 # Correctness first, and its result is part of the report. The kernels are
@@ -181,7 +200,7 @@ echo "== throughput, $runs runs"
 for i in $(seq 1 "$runs"); do
     echo
     echo "---------- run $i ----------"
-    scripts/packer-report.sh "$HOME/run-$i.txt" || echo "   report failed"
+    scripts/packer-report.sh "$HOME/run-$KEVA_COMMIT-$i.txt" || echo "   report failed"
 done
 REMOTE
 
@@ -243,20 +262,27 @@ one () {
     done
 
     echo "== uploading"
-    "${GC[@]}" compute scp "$ARCHIVE" "$vm:~/keva-packer.tar.gz" --zone="$zone" --quiet >/dev/null
+    for sha in $SHORT; do
+        "${GC[@]}" compute scp "$ARCHIVE.$sha" "$vm:~/keva-$sha.tar.gz" \
+            --zone="$zone" --quiet >/dev/null
+    done
     "${GC[@]}" compute scp "$RUNNER" "$vm:~/run.sh" --zone="$zone" --quiet >/dev/null
 
-    echo "== running (this takes a while: apt, rustc, then the benchmarks)"
-    "${GC[@]}" compute ssh "$vm" --zone="$zone" --quiet \
-        --command="bash ~/run.sh $RUNS $COMMIT" || echo "== the remote run reported a failure"
+    for sha in $SHORT; do
+        echo "== running $sha (apt and rustc are paid once, on the first)"
+        "${GC[@]}" compute ssh "$vm" --zone="$zone" --quiet \
+            --command="bash ~/run.sh $RUNS $sha" || echo "== $sha reported a failure"
+    done
 
     echo "== downloading"
-    "${GC[@]}" compute scp "$vm:~/report.txt" "$OUTDIR/report-$label-$COMMIT.txt" \
-        --zone="$zone" --quiet >/dev/null || echo "== no report came back"
+    "${GC[@]}" compute scp "$vm:~/report-*.txt" "$OUTDIR/" --zone="$zone" --quiet >/dev/null 2>&1 || true
     "${GC[@]}" compute scp "$vm:~/run-*.txt" "$OUTDIR/" --zone="$zone" --quiet >/dev/null 2>&1 || true
-    for f in "$OUTDIR"/run-*.txt; do
+    for f in "$OUTDIR"/report-*.txt "$OUTDIR"/run-*.txt; do
         [ -e "$f" ] || continue
-        mv "$f" "$OUTDIR/$label-$COMMIT-$(basename "$f")"
+        case "$(basename "$f")" in
+            "$label"-*) continue ;;
+        esac
+        mv "$f" "$OUTDIR/$label-$(basename "$f")"
     done
 
     cleanup
