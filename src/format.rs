@@ -2166,6 +2166,31 @@ mod tests {
         cases.push(b"abcdefg".repeat(900));
         cases.push([b"xy".repeat(500), vec![0u8; 4000], b"xy".repeat(500)].concat());
 
+        // A *short* match at a short distance, which the cases above never
+        // produce: `"ab".repeat(3000)` is one enormous match and takes the
+        // extended path. This is the fast path's overlapping copy, where the
+        // source is closer than one copy block and the bytes have to be laid
+        // down offset by offset. It was unreachable from this corpus, which was
+        // found by splicing a jump into that branch and watching every test
+        // still pass.
+        for period in [4usize, 5, 7, 8, 11, 12, 14, 16, 24, 31] {
+            let mut v = Vec::new();
+            let mut n = 0u8;
+            while v.len() < 4096 {
+                let chunk: Vec<u8> = (0..period)
+                    .map(|_| {
+                        n = n.wrapping_add(37);
+                        n
+                    })
+                    .collect();
+                // Twice, so the second copy is a match of exactly `period`
+                // bytes at a distance of exactly `period`.
+                v.extend_from_slice(&chunk);
+                v.extend_from_slice(&chunk);
+            }
+            cases.push(v);
+        }
+
         let mut packed = Vec::new();
         let mut asm_out = Vec::new();
         let mut ref_out = Vec::new();
