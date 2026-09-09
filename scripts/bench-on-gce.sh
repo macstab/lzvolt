@@ -39,13 +39,29 @@ OUTDIR="${OUTDIR:-bench-results}"
 
 # Compute-optimised on purpose: a shared core gives a number that says more
 # about the neighbours than about the code.
-INTEL_ZONE="${INTEL_ZONE:-europe-west4-a}"
+#
+# Several zones each, because a zone runs out. Compute-optimised machines are
+# exactly the ones that do, being the scarce kind, and "try again later" is not
+# a plan -- the list is walked until one takes the request. Both types were
+# checked to exist in every zone named here, so a failure down the list is a
+# stockout and not a typo:
+#
+#   gcloud compute machine-types list --filter="name=c3-standard-4"
+#
+# Both start in the same region, which keeps the two machines closer to
+# comparable than picking whatever was free on separate continents.
+INTEL_ZONES="${INTEL_ZONES:-europe-west4-c europe-west4-b europe-west4-a europe-west1-b europe-west3-a us-central1-a}"
 INTEL_TYPE="${INTEL_TYPE:-c3-standard-4}"
 INTEL_IMAGE="${INTEL_IMAGE:-debian-12}"
+# c3 takes the ordinary balanced disk.
+INTEL_DISK="${INTEL_DISK:-pd-balanced}"
 
-ARM_ZONE="${ARM_ZONE:-us-central1-a}"
+ARM_ZONES="${ARM_ZONES:-europe-west4-c europe-west4-b europe-west4-a europe-west1-b europe-west3-a us-central1-a}"
 ARM_TYPE="${ARM_TYPE:-c4a-standard-4}"
 ARM_IMAGE="${ARM_IMAGE:-debian-12-arm64}"
+# Axion refuses pd-balanced outright; hyperdisk is the only balanced type it
+# takes, and the refusal arrives from the create call rather than from a check.
+ARM_DISK="${ARM_DISK:-hyperdisk-balanced}"
 
 case "${1:-both}" in
     intel|arm|both) ;;
@@ -91,7 +107,8 @@ mkdir -p "$OUTDIR"
 
 ARCHIVE="$(mktemp -t keva-packer-XXXXXX).tar.gz"
 RUNNER="$(mktemp -t keva-runner-XXXXXX).sh"
-trap 'rm -f "$ARCHIVE" "$RUNNER"' EXIT
+TMPERR="$(mktemp -t keva-err-XXXXXX)"
+trap 'rm -f "$ARCHIVE" "$RUNNER" "$TMPERR"' EXIT
 
 git archive --format=tar.gz --prefix=keva/ -o "$ARCHIVE" "$BRANCH"
 COMMIT="$(git rev-parse --short "$BRANCH")"
@@ -162,16 +179,18 @@ done
 REMOTE
 
 one () {
-    local label="$1" zone="$2" mtype="$3" image="$4"
+    local label="$1" zones="$2" mtype="$3" image="$4" disk="$5"
     local vm="$PREFIX-$label"
+    local zone=""
 
     echo
     echo "=============================================================="
-    echo "== $label: $mtype in $zone"
+    echo "== $label: $mtype, $disk"
     echo "=============================================================="
 
     local keep="$KEEP"
     cleanup () {
+        [ -n "$zone" ] || return 0
         if [ "$keep" = "1" ]; then
             echo "== keeping $vm (KEEP=1)"
         else
@@ -179,13 +198,34 @@ one () {
             "${GC[@]}" compute instances delete "$vm" --zone="$zone" --quiet >/dev/null 2>&1 || true
         fi
     }
-    trap 'cleanup; rm -f "$ARCHIVE" "$RUNNER"' EXIT
+    trap 'cleanup; rm -f "$ARCHIVE" "$RUNNER" "$TMPERR"' EXIT
 
-    "${GC[@]}" compute instances create "$vm" \
-        --zone="$zone" --machine-type="$mtype" \
-        --image-family="$image" --image-project=debian-cloud \
-        --boot-disk-size=50GB --boot-disk-type=pd-balanced \
-        --quiet >/dev/null
+    # A zone that is out of this machine type says so and names the ones that
+    # are not. Walking the list is simpler than parsing that, and it also covers
+    # a zone that does not offer the type at all.
+    local z created=0
+    for z in $zones; do
+        echo "== creating in $z"
+        if "${GC[@]}" compute instances create "$vm" \
+            --zone="$z" --machine-type="$mtype" \
+            --image-family="$image" --image-project=debian-cloud \
+            --boot-disk-size=50GB --boot-disk-type="$disk" \
+            --quiet >/dev/null 2>"$TMPERR"; then
+            zone="$z"
+            created=1
+            break
+        fi
+        if grep -q 'ZONE_RESOURCE_POOL_EXHAUSTED\|does not have enough resources\|not available in zone' "$TMPERR"; then
+            echo "   out of capacity, next zone"
+        else
+            sed 's/^/   /' "$TMPERR" >&2
+            break
+        fi
+    done
+    if [ "$created" -ne 1 ]; then
+        echo "== could not create $vm in any of: $zones" >&2
+        return 1
+    fi
 
     echo "== waiting for ssh"
     local tries=0
@@ -213,17 +253,18 @@ one () {
     done
 
     cleanup
-    trap 'rm -f "$ARCHIVE" "$RUNNER"' EXIT
+    trap 'rm -f "$ARCHIVE" "$RUNNER" "$TMPERR"' EXIT
 }
 
 case "${1:-both}" in
-    intel) one intel "$INTEL_ZONE" "$INTEL_TYPE" "$INTEL_IMAGE" ;;
-    arm)   one arm   "$ARM_ZONE"   "$ARM_TYPE"   "$ARM_IMAGE" ;;
+    intel) one intel "$INTEL_ZONES" "$INTEL_TYPE" "$INTEL_IMAGE" "$INTEL_DISK" ;;
+    arm)   one arm   "$ARM_ZONES"   "$ARM_TYPE"   "$ARM_IMAGE"   "$ARM_DISK" ;;
     both)
-        one intel "$INTEL_ZONE" "$INTEL_TYPE" "$INTEL_IMAGE"
-        one arm   "$ARM_ZONE"   "$ARM_TYPE"   "$ARM_IMAGE"
+        # One failing must not take the other with it: the point of two
+        # machines is two independent data points.
+        one intel "$INTEL_ZONES" "$INTEL_TYPE" "$INTEL_IMAGE" "$INTEL_DISK" || true
+        one arm   "$ARM_ZONES"   "$ARM_TYPE"   "$ARM_IMAGE"   "$ARM_DISK" || true
         ;;
-    *) echo "usage: $0 [intel|arm|both]" >&2; exit 1 ;;
 esac
 
 echo
