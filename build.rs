@@ -21,8 +21,6 @@ fn main() {
             "asm/x86_64/ctrl_match.S",
             "asm/x86_64/unpack.S",
             "asm/x86_64/unpack_wide.S",
-            "asm/x86_64/unpack_avx2.S",
-            "asm/x86_64/unpack_wide_avx2.S",
         ],
         // Every other target runs the scalar reference. That is a supported
         // configuration, not a degraded one -- correctness does not depend on

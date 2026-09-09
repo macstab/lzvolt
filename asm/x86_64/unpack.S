@@ -60,27 +60,17 @@
 #include "../common.h"
 
 #ifdef KEVA_WIDE
+#  define KEVA_PFX   w
+#  define KEVA_ENTRY keva_unpack_wide
 #  define LIT_SHIFT  6
 #  define LIT_MAX    3
 #  define MAT_MAX    63
-#  ifdef KEVA_AVX2
-#    define KEVA_PFX   wa
-#    define KEVA_ENTRY keva_unpack_wide_avx2
-#  else
-#    define KEVA_PFX   w
-#    define KEVA_ENTRY keva_unpack_wide
-#  endif
 #else
+#  define KEVA_PFX   e
+#  define KEVA_ENTRY keva_unpack
 #  define LIT_SHIFT  4
 #  define LIT_MAX    15
 #  define MAT_MAX    15
-#  ifdef KEVA_AVX2
-#    define KEVA_PFX   ea
-#    define KEVA_ENTRY keva_unpack_avx2
-#  else
-#    define KEVA_PFX   e
-#    define KEVA_ENTRY keva_unpack
-#  endif
 #endif
 
 #define MIN_MATCH         4
@@ -230,13 +220,8 @@ L(block):
      * Sixteen literal bytes are stored whether or not that many were meant;
      * the surplus is overwritten by the next block or falls in the slack the
      * caller trims. */
-#ifdef KEVA_AVX2
-    vmovdqu 1(%r14), %xmm0
-    vmovdqu %xmm0, (%rdi)
-#else
     movdqu  1(%r14), %xmm0
     movdqu  %xmm0, (%rdi)
-#endif
 
     lea     3(%r14,%r10,1), %r14            /* token + literals + offset */
 
@@ -268,34 +253,21 @@ L(fast_matgo):
     cmp     $COPY_MAX, %r9
     ja      L(fast_long)
 
-#ifdef KEVA_AVX2
-    vmovdqu (%rsi), %ymm0
-    vmovdqu %ymm0, (%r8)
-#  if COPY_MAX > 32
-    vmovdqu 32(%rsi), %ymm1
-    vmovdqu %ymm1, 32(%r8)
-#  endif
-#  if COPY_MAX > 64
-    vmovdqu 64(%rsi), %ymm2
-    vmovdqu %ymm2, 64(%r8)
-#  endif
-#else
     movdqu  (%rsi), %xmm0
     movdqu  16(%rsi), %xmm1
     movdqu  %xmm0, (%r8)
     movdqu  %xmm1, 16(%r8)
-#  if COPY_MAX > 32
+#if COPY_MAX > 32
     movdqu  32(%rsi), %xmm2
     movdqu  48(%rsi), %xmm3
     movdqu  %xmm2, 32(%r8)
     movdqu  %xmm3, 48(%r8)
-#  endif
-#  if COPY_MAX > 64
+#endif
+#if COPY_MAX > 64
     movdqu  64(%rsi), %xmm4
     movdqu  80(%rsi), %xmm5
     movdqu  %xmm4, 64(%r8)
     movdqu  %xmm5, 80(%r8)
-#  endif
 #endif
     mov     %rax, %rdi
     jmp     L(block)
@@ -328,15 +300,10 @@ L(fast_long):
     mov     %r8, %rdi
     mov     %r9, %rcx
 L(fast_longloop):
-#ifdef KEVA_AVX2
-    vmovdqu (%rsi), %ymm0
-    vmovdqu %ymm0, (%rdi)
-#else
     movdqu  (%rsi), %xmm0
     movdqu  16(%rsi), %xmm1
     movdqu  %xmm0, (%rdi)
     movdqu  %xmm1, 16(%rdi)
-#endif
     add     $OVERRUN, %rsi
     add     $OVERRUN, %rdi
     sub     $OVERRUN, %rcx
@@ -392,13 +359,8 @@ L(splat_wide):
     mov     %rdi, %rsi
     sub     %rdx, %rsi
 L(splat_loop):
-#ifdef KEVA_AVX2
-    vmovdqu (%rsi), %xmm0
-    vmovdqu %xmm0, (%rdi)
-#else
     movdqu  (%rsi), %xmm0
     movdqu  %xmm0, (%rdi)
-#endif
     add     $16, %rsi
     add     $16, %rdi
     sub     $16, %rcx
@@ -457,15 +419,10 @@ L(lit_len):
 
     mov     %r10, %rcx
 L(lit_wide):
-#ifdef KEVA_AVX2
-    vmovdqu (%rsi), %ymm0
-    vmovdqu %ymm0, (%rdi)
-#else
     movdqu  (%rsi), %xmm0
     movdqu  16(%rsi), %xmm1
     movdqu  %xmm0, (%rdi)
     movdqu  %xmm1, 16(%rdi)
-#endif
     add     $OVERRUN, %rsi
     add     $OVERRUN, %rdi
     sub     $OVERRUN, %rcx
@@ -533,15 +490,10 @@ L(mat_len):
 
     mov     %r10, %rcx
 L(mat_wide):
-#ifdef KEVA_AVX2
-    vmovdqu (%rsi), %ymm0
-    vmovdqu %ymm0, (%rdi)
-#else
     movdqu  (%rsi), %xmm0
     movdqu  16(%rsi), %xmm1
     movdqu  %xmm0, (%rdi)
     movdqu  %xmm1, 16(%rdi)
-#endif
     add     $OVERRUN, %rsi
     add     $OVERRUN, %rdi
     sub     $OVERRUN, %rcx
@@ -567,9 +519,6 @@ L(fail):
     xor     %eax, %eax
 
 L(ret):
-#ifdef KEVA_AVX2
-    vzeroupper
-#endif
     pop     %r15
     pop     %r14
     pop     %r13

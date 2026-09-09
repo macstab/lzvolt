@@ -52,37 +52,7 @@ extern "C" {
     ) -> u32;
 }
 
-// The same two kernels with 256-bit moves. Same format, same bounds, same
-// branches -- only the fixed match move and the block copies are wider. AVX2 is
-// not part of the x86-64 baseline, so which pair runs is decided on the first
-// call. Rustdoc does not document extern blocks, so this is a plain comment.
-#[cfg(all(keva_asm, target_arch = "x86_64"))]
-extern "C" {
-    fn keva_unpack_avx2(
-        src: *const u8,
-        src_len: usize,
-        dst: *mut u8,
-        dst_cap: usize,
-        declared: usize,
-        start: usize,
-    ) -> u32;
-
-    fn keva_unpack_wide_avx2(
-        src: *const u8,
-        src_len: usize,
-        dst: *mut u8,
-        dst_cap: usize,
-        declared: usize,
-        start: usize,
-    ) -> u32;
-}
-
-/// Run the kernel for `split`, widest first.
-///
-/// A branch rather than a function pointer: at 512 bytes the fixed cost of a
-/// call is a large share of the work, and an indirect one through a table would
-/// add to exactly the case that can least afford it. The condition is a cached
-/// bool and predicts perfectly after the first call.
+/// Run the kernel for `split`.
 ///
 /// # Safety
 ///
@@ -99,13 +69,6 @@ unsafe fn run(
     declared: usize,
     start: usize,
 ) -> u32 {
-    #[cfg(target_arch = "x86_64")]
-    if crate::cpu::features().avx2 {
-        return match split {
-            Split::Even => keva_unpack_avx2(src, src_len, dst, dst_cap, declared, start),
-            Split::WideMatch => keva_unpack_wide_avx2(src, src_len, dst, dst_cap, declared, start),
-        };
-    }
     match split {
         Split::Even => keva_unpack(src, src_len, dst, dst_cap, declared, start),
         Split::WideMatch => keva_unpack_wide(src, src_len, dst, dst_cap, declared, start),
@@ -320,149 +283,5 @@ pub fn unpack_asm(body: &[u8], out: &mut Vec<u8>, declared: usize, split: Split)
         // pointer, and `declared + 64 <= cap` was checked before it started.
         unsafe { out.set_len(declared) };
         true
-    }
-}
-
-#[cfg(all(test, keva_asm, target_arch = "x86_64"))]
-mod avx2 {
-    use super::*;
-
-    /// The 256-bit kernels must agree with the 128-bit ones, byte for byte.
-    ///
-    /// They are the same algorithm with wider moves, so anything else is a bug
-    /// in the widening. This is the only test that reaches them: which pair
-    /// runs is a run-time choice, and a machine without AVX2 -- a translator,
-    /// for one -- takes the narrow pair for everything and would report green
-    /// having never executed a line of the wide one.
-    ///
-    /// So it skips loudly rather than quietly, and calls both pairs directly
-    /// rather than going through the dispatch that would hide the difference.
-    #[test]
-    fn the_wide_kernels_agree_with_the_narrow_ones() {
-        if !crate::cpu::features().avx2 {
-            eprintln!("  no AVX2 here: the 256-bit kernels were NOT exercised");
-            return;
-        }
-
-        // Streams the packer would produce, built here so this crate needs no
-        // dependency on the one that writes them: a token, a literal run, an
-        // offset, and lengths that reach past a nibble in both fields.
-        let mut cases: Vec<(Vec<u8>, usize, Split)> = Vec::new();
-        for &(lit, mat, off) in &[
-            (0usize, 4usize, 1usize),
-            (1, 4, 1),
-            (3, 8, 3),
-            (14, 18, 16),
-            (14, 18, 40),
-            (5, 60, 7),
-            (5, 200, 100),
-            (300, 4, 250),
-        ] {
-            for split in [Split::Even, Split::WideMatch] {
-                let (lit_bits, lit_max, mat_max) = match split {
-                    Split::Even => (4u32, 15usize, 15usize),
-                    Split::WideMatch => (6, 3, 63),
-                };
-                // The match must reach no further back than what precedes it.
-                if off > lit || off == 0 {
-                    continue;
-                }
-                let mut body = Vec::new();
-                let short_lit = lit.min(lit_max);
-                let short_mat = (mat - 4).min(mat_max);
-                body.push(((short_lit << (8 - lit_bits)) | short_mat) as u8);
-                if short_lit == lit_max {
-                    let mut rest = lit - lit_max;
-                    while rest >= 255 {
-                        body.push(255);
-                        rest -= 255;
-                    }
-                    body.push(rest as u8);
-                }
-                body.extend((0..lit).map(|i| (i % 251) as u8 + 1));
-                body.extend_from_slice(&(off as u16).to_le_bytes());
-                if short_mat == mat_max {
-                    let mut rest = (mat - 4) - mat_max;
-                    while rest >= 255 {
-                        body.push(255);
-                        rest -= 255;
-                    }
-                    body.push(rest as u8);
-                }
-                // A closing literal run, which is what ends a stream.
-                let tail = 20usize;
-                body.push((tail.min(lit_max) << (8 - lit_bits)) as u8);
-                if tail >= lit_max {
-                    let mut rest = tail - lit_max;
-                    while rest >= 255 {
-                        body.push(255);
-                        rest -= 255;
-                    }
-                    body.push(rest as u8);
-                }
-                body.extend((0..tail).map(|i| (i % 253) as u8 + 1));
-                cases.push((body, lit + mat + tail, split));
-            }
-        }
-
-        let mut checked = 0usize;
-        for (body, declared, split) in &cases {
-            let cap = declared + UNPACK_SLACK;
-            let mut narrow = vec![0u8; cap];
-            let mut wide = vec![0u8; cap];
-
-            // SAFETY: both buffers are `cap` long and the kernels are told so.
-            let (a, b) = unsafe {
-                let n = match split {
-                    Split::Even => keva_unpack(
-                        body.as_ptr(),
-                        body.len(),
-                        narrow.as_mut_ptr(),
-                        cap,
-                        *declared,
-                        0,
-                    ),
-                    Split::WideMatch => keva_unpack_wide(
-                        body.as_ptr(),
-                        body.len(),
-                        narrow.as_mut_ptr(),
-                        cap,
-                        *declared,
-                        0,
-                    ),
-                };
-                let w = match split {
-                    Split::Even => keva_unpack_avx2(
-                        body.as_ptr(),
-                        body.len(),
-                        wide.as_mut_ptr(),
-                        cap,
-                        *declared,
-                        0,
-                    ),
-                    Split::WideMatch => keva_unpack_wide_avx2(
-                        body.as_ptr(),
-                        body.len(),
-                        wide.as_mut_ptr(),
-                        cap,
-                        *declared,
-                        0,
-                    ),
-                };
-                (n, w)
-            };
-
-            assert_eq!(a, b, "the two widths disagree on whether a stream decodes");
-            if a as usize == *declared {
-                assert_eq!(
-                    narrow[..*declared],
-                    wide[..*declared],
-                    "{declared} bytes, {split:?}: the 256-bit kernel produced different bytes"
-                );
-                checked += 1;
-            }
-        }
-        assert!(checked > 0, "no case decoded, so nothing was compared");
-        eprintln!("  {checked} streams agreed between the 128- and 256-bit kernels");
     }
 }
