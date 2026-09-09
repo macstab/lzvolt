@@ -264,14 +264,19 @@ one () {
     # A zone that is out of this machine type says so and names the ones that
     # are not. Walking the list is simpler than parsing that, and it also covers
     # a zone that does not offer the type at all.
+    # The performance counters are off unless the instance is created asking for
+    # them: a stock GCE guest sees no `cpu` under /sys/bus/event_source/devices,
+    # so perf can report software events and nothing else. Found by installing
+    # perf and getting counters anyway -- the machine had never been asked.
+    #
+    # Not every machine type accepts the request. c3d refuses it outright on API
+    # v1, and a run that cannot have counters is still worth far more than no run
+    # at all, so the flag is dropped and the attempt repeated rather than treated
+    # as a failure. The report says which of the two happened, because a table
+    # without counters should not look like one that had them and found nothing.
     local z created=0
     for z in $zones; do
         echo "== creating in $z"
-        # The performance counters are off unless the instance is created
-        # asking for them: a stock GCE guest sees no `cpu` under
-        # /sys/bus/event_source/devices, so perf can report software events and
-        # nothing else. Found by installing perf and getting counters anyway --
-        # the machine had never been asked.
         if "${GC[@]}" compute instances create "$vm" \
             --zone="$z" --machine-type="$mtype" \
             --image-family="$image" --image-project=debian-cloud \
@@ -281,6 +286,18 @@ one () {
             zone="$z"
             created=1
             break
+        fi
+        if grep -q 'performanceMonitoringUnit\|PerformanceMonitoringUnit' "$TMPERR"; then
+            echo "   $mtype will not take a PMU here, retrying without counters"
+            if "${GC[@]}" compute instances create "$vm" \
+                --zone="$z" --machine-type="$mtype" \
+                --image-family="$image" --image-project=debian-cloud \
+                --boot-disk-size=50GB --boot-disk-type="$disk" \
+                --quiet >/dev/null 2>"$TMPERR"; then
+                zone="$z"
+                created=1
+                break
+            fi
         fi
         if grep -q 'ZONE_RESOURCE_POOL_EXHAUSTED\|does not have enough resources\|not available in zone' "$TMPERR"; then
             echo "   out of capacity, next zone"
