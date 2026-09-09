@@ -184,13 +184,13 @@ L(block):
 
     mov     %eax, %r10d
     shr     $LIT_SHIFT, %r10d               /* short literal */
-    cmp     $LIT_MAX, %r10d
-    je      L(slow)                         /* the literal length escaped */
-
     mov     %eax, %r11d
     and     $MAT_MAX, %r11d                 /* short match */
+    lea     1(%r14), %rsi                   /* where the literals begin */
+    cmp     $LIT_MAX, %r10d
+    je      L(fast_litext)
 
-    movzwl  1(%r14,%r10,1), %ecx            /* offset */
+    movzwl  (%rsi,%r10,1), %ecx             /* offset */
     lea     (%rdi,%r10,1), %r8              /* dst after the literals */
 
     /*
@@ -220,10 +220,11 @@ L(block):
      * Sixteen literal bytes are stored whether or not that many were meant;
      * the surplus is overwritten by the next block or falls in the slack the
      * caller trims. */
-    movdqu  1(%r14), %xmm0
+    movdqu  (%rsi), %xmm0
     movdqu  %xmm0, (%rdi)
 
-    lea     3(%r14,%r10,1), %r14            /* token + literals + offset */
+L(fast_litdone):
+    lea     2(%rsi,%r10,1), %r14            /* past the literals and the offset */
 
     /*
      * A match whose length escaped the token used to leave for the checked
@@ -271,6 +272,88 @@ L(fast_matgo):
 #endif
     mov     %rax, %rdi
     jmp     L(block)
+
+L(fast_litext):
+    /*
+     * A literal run whose length escaped the token.
+     *
+     * With long matches handled above, this is the only thing still sending
+     * blocks to the checked path: 738 of the 1340 misses on 64 KiB of varied,
+     * and the last quarter of blocks everywhere else. Counting the share
+     * before and after the match change -- 17% to 42% at 512 bytes of records,
+     * 56% to 76% on varied -- is what says this is the remaining one.
+     *
+     * It rejoins at `L(fast_litdone)` with `rsi` and `r10` describing the run
+     * it has already copied, which is exactly what the short case leaves
+     * behind, so everything from the match onward is shared.
+     */
+    xor     %r10, %r10
+L(fast_litchain):
+    cmp     %r13, %rsi
+    jae     L(fail)
+    movzbl  (%rsi), %edx
+    inc     %rsi
+    add     %rdx, %r10
+    /* Against what is left to produce; nothing beyond it can be written. */
+    mov     %r12, %rax
+    sub     %rbx, %rax
+    cmp     %rax, %r10
+    ja      L(fail)
+    cmp     $255, %edx
+    je      L(fast_litchain)
+    add     $LIT_MAX, %r10
+
+    /* Past the token's own width the entry guard covers nothing, so the run
+     * and the offset behind it are bounded here, as the checked path does. */
+    lea     2(%rsi,%r10,1), %rax
+    cmp     %r13, %rax
+    ja      L(fail)
+    lea     (%rdi,%r10,1), %r8              /* dst after the literals */
+    cmp     %r12, %r8
+    ja      L(fail)
+
+    movzwl  (%rsi,%r10,1), %ecx             /* offset */
+    test    %ecx, %ecx
+    je      L(fail)
+    mov     %r8, %rax
+    sub     %rbx, %rax
+    cmp     %rax, %rcx
+    ja      L(fail)
+
+    /* Copied through scratch, because `rsi` and `rcx` are wanted after it. */
+    mov     %rsi, %r9                       /* source walker */
+    mov     %rdi, %rdx                      /* destination walker */
+    lea     OVERRUN(%rsi,%r10,1), %rax
+    cmp     %r13, %rax
+    ja      L(fast_litslow)
+    mov     %r10, %rax
+L(fast_litblock):
+    movdqu  (%r9), %xmm0
+    movdqu  16(%r9), %xmm1
+    movdqu  %xmm0, (%rdx)
+    movdqu  %xmm1, 16(%rdx)
+    add     $OVERRUN, %r9
+    add     $OVERRUN, %rdx
+    sub     $OVERRUN, %rax
+    jg      L(fast_litblock)
+    jmp     L(fast_litdone)
+
+L(fast_litslow):
+    /* The tail of a stream: one byte at a time, because a block would read
+     * past what is ours. */
+    mov     %r10, %rax
+L(fast_litbyte):
+    /* Through r14, which is the only scratch left here and is recomputed at
+     * the rejoin anyway. Not r11: that is holding the token's match field, and
+     * the token is long behind us -- the first version of this tried to read
+     * it back from the last chain byte. */
+    movzbl  (%r9), %r14d
+    mov     %r14b, (%rdx)
+    inc     %r9
+    inc     %rdx
+    dec     %rax
+    jnz     L(fast_litbyte)
+    jmp     L(fast_litdone)
 
 L(fast_matext):
     cmp     %r13, %r14
