@@ -160,9 +160,10 @@ echo
 
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -qq
-sudo apt-get install -y -qq build-essential liblz4-dev pkg-config python3 \
-    "linux-perf-$(uname -r | cut -d- -f1-2)" linux-perf >/dev/null 2>&1 || \
-    sudo apt-get install -y -qq build-essential liblz4-dev pkg-config python3 >/dev/null
+sudo apt-get install -y -qq build-essential liblz4-dev pkg-config python3 >/dev/null
+sudo apt-get install -y -qq linux-perf >/dev/null 2>&1 || true
+# Counters are readable by an unprivileged process only below 2.
+sudo sysctl -q -w kernel.perf_event_paranoid=1 >/dev/null 2>&1 || true
 
 if ! command -v cargo >/dev/null; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y -q
@@ -221,7 +222,11 @@ cache-references,cache-misses,ld_blocks.store_forward,stalled-cycles-frontend \
             grep -E '^[0-9]' | awk -F, '{printf "   %-28s %s\n", $3, $1}'
     done
 else
-    echo "   perf is not available on this instance"
+    echo "   no counters here:"
+    echo "     perf binary: $(command -v perf || echo absent)"
+    echo "     PMUs: $(ls /sys/bus/event_source/devices/ 2>/dev/null | tr '\n' ' ')"
+    echo "   a 'cpu' PMU appears only when the instance was created with"
+    echo "   --performance-monitoring-unit, which this script now asks for."
 fi
 
 echo
@@ -262,10 +267,16 @@ one () {
     local z created=0
     for z in $zones; do
         echo "== creating in $z"
+        # The performance counters are off unless the instance is created
+        # asking for them: a stock GCE guest sees no `cpu` under
+        # /sys/bus/event_source/devices, so perf can report software events and
+        # nothing else. Found by installing perf and getting counters anyway --
+        # the machine had never been asked.
         if "${GC[@]}" compute instances create "$vm" \
             --zone="$z" --machine-type="$mtype" \
             --image-family="$image" --image-project=debian-cloud \
             --boot-disk-size=50GB --boot-disk-type="$disk" \
+            --performance-monitoring-unit=standard \
             --quiet >/dev/null 2>"$TMPERR"; then
             zone="$z"
             created=1
