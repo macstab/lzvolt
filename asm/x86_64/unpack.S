@@ -171,6 +171,12 @@ KEVA_NAME(KEVA_ENTRY):
     lea     -OUT_MARGIN(%r12), %rbp
     lea     -FAST_IN(%r13), %r15
 
+/*
+ * The loop head is aligned because the micro-op cache is fed in 32-byte
+ * windows and a hot loop that straddles one is delivered from the slower
+ * decoders instead. It costs a few bytes of padding once.
+ */
+    .p2align 5
 L(block):
     cmp     %r12, %rdi
     jae     L(done)
