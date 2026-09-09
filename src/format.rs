@@ -8,15 +8,37 @@
 //! # Format
 //!
 //! ```text
-//! [original length: varint][block][block]...
+//! [header: varint][block][block]...[switch: 2x2 or 2x4 bytes, if hybrid]
 //!
-//! block := [token: u8][extended literal length][literals][offset: u16][extended match length]
-//!          token high nibble = literal count, 15 means "read more"
-//!          token low nibble  = match length - 4, 15 means "read more"
+//! header := varint(declared << 2 | hybrid << 1 | split)
+//!           split  = 0 -> 4/4 token, 1 -> 2/6 token
+//!           hybrid = 1 -> the stream changes split once, see the trailer
+//!
+//! block  := [token: u8][extended literal length][literals]
+//!           [offset: u16][extended match length]
+//!           token literal field: 15 (or 3) means "read more"
+//!           token match field:   the same, and holds length - 4
 //! ```
 //!
 //! The final block carries literals and no match, which is what terminates the
 //! stream — decoding stops when the declared length has been produced.
+//!
+//! The token's two fields are not fixed at four bits each. `split` chooses
+//! between 4/4 and 2/6, and `hybrid` says the stream changes from one to the
+//! other partway; the trailer then gives the two positions where that happens,
+//! as an offset into the body and the count of bytes produced so far. Both are
+//! two bytes for a value up to 64 KiB and four above it, a width that follows
+//! from `declared` alone so the decoder knows it before it needs it. See
+//! [`Split`] and [`switch_width`].
+//!
+//! Compatibility with LZ4 runs one way, and both directions are tested.
+//! [`our_decoder_reads_what_liblz4_wrote`] passes: an LZ4 block decodes here
+//! correctly. [`liblz4_refuses_what_we_wrote`] also passes, and that is the
+//! interesting one — the even split *is* the LZ4 token layout, so the body of
+//! such a value looks like an LZ4 block. It is not one. LZ4 also constrains
+//! where a block may end, and this packer enforces none of that: it runs
+//! matches to the final byte and then writes a zero token, which LZ4 has no
+//! concept of.
 //!
 //! # What it is tuned for
 //!
