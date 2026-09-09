@@ -368,8 +368,8 @@ pub fn pack(input: &[u8], out: &mut Vec<u8>) -> bool {
 /// How far the probe reads before writing a value off, and how many slots it
 /// reads it into.
 ///
-/// A kilobyte, split across two windows, because the question is only whether
-/// the value repeats itself at all.
+/// A kilobyte, split across [`PROBE_WINDOWS`] windows, because the question is
+/// only whether the value repeats itself at all.
 ///
 /// Eight bits, not more, because the table is zeroed on every call and that is
 /// the probe's whole fixed cost -- it returns on one of the first few positions
@@ -383,6 +383,38 @@ pub fn pack(input: &[u8], out: &mut Vec<u8>) -> bool {
 /// enough that one pair survives a quarter of the slots.
 const PROBE: usize = 1024;
 const PROBE_BITS: u32 = 8;
+
+/// How many places in the value the probe looks.
+///
+/// Refusing wrongly costs the whole ratio, not a few percent of throughput, so
+/// where the probe reads matters more than how much. Two windows -- head and
+/// middle -- judge a value on a tenth of it and miss anything compressible that
+/// happens to sit elsewhere, which is not a contrived shape: a buffer written
+/// at a high offset, a fixed-size record partly filled, a ciphertext followed
+/// by plaintext. Measured on 64 KiB values, packed bytes:
+///
+/// ```text
+///                                    2 windows   4   8   16   unprobed
+///   40 KiB of noise then zeros          65536     41276 all the same
+///   noise with 30 KiB of zeros mid      65536     35833 all the same
+/// ```
+///
+/// Two windows store both whole. Four recover them completely.
+///
+/// More than four costs more than it buys, because each window restarts the
+/// miss counter and pays its own run-up before the cursor starts skipping.
+/// That is charged against incompressible data, which is the case the probe
+/// exists for:
+///
+/// ```text
+///   cycles per byte      2       4       8      16   unprobed
+///     noise_4k       0.274   0.362   0.471   0.594      0.498
+///     noise_64k      0.017   0.022   0.030   0.037      0.156
+/// ```
+///
+/// At eight the probe has nearly stopped paying for itself at 4 KiB, and at
+/// sixteen it is worse than not probing at all.
+const PROBE_WINDOWS: usize = 4;
 
 /// Only values above this are probed. Below it a full search is a couple of
 /// thousand cycles and there is nothing worth saving.
@@ -427,14 +459,16 @@ fn worth_packing(input: &[u8]) -> bool {
         return true;
     }
     let mut seen = [0u32; 1 << PROBE_BITS];
-    // Two windows rather than one long one, so a value is not written off on
-    // the strength of its head: a random header in front of a compressible body
-    // is a real shape, and half a kilobyte of it would otherwise decide the
-    // whole value. Positions are absolute, so a word in the second window still
-    // matches one recorded in the first.
-    let half = PROBE / 2;
-    for start in [0, input.len() / 2] {
-        let last = (start + half).min(input.len() - MIN_MATCH);
+    // Windows spread across the value rather than one long one at the front, so
+    // it is judged on more than its head. Positions are absolute and the table
+    // is shared between windows, so a word in the last window still matches one
+    // recorded in the first -- which is what finds a value built from two
+    // identical halves.
+    let wide = PROBE / PROBE_WINDOWS;
+    let step = input.len() / PROBE_WINDOWS;
+    for i in 0..PROBE_WINDOWS {
+        let start = i * step;
+        let last = (start + wide).min(input.len() - MIN_MATCH);
         let mut at = start;
         let mut misses = 1usize << SKIP_TRIGGER;
         while at <= last {
@@ -1880,6 +1914,50 @@ mod tests {
         eprintln!("  even {even}, wide {wide}, refused by liblz4 {refused}");
         assert!(even > 0, "no case chose the even split, so nothing was tested");
         assert_eq!(refused, even, "liblz4 accepted one of our blocks -- see the note above");
+    }
+
+    /// The probe judges the whole value, not the part of it it happens to read.
+    ///
+    /// Both of these are values a store really sees -- a buffer written at a
+    /// high offset, a record of fixed size only partly filled, a ciphertext
+    /// followed by plaintext -- and both were stored whole when the probe read
+    /// only the head and the middle. The cost of that is not a few percent, it
+    /// is the entire ratio: `mix_tail` packs to 41276 bytes of 65536 and was
+    /// being kept at 65536.
+    #[test]
+    fn a_value_that_compresses_anywhere_is_not_written_off() {
+        let noise = |n: usize| {
+            let mut st = 0x2545_F491_4F6C_DD1Du64;
+            (0..n)
+                .map(|_| {
+                    st ^= st << 13;
+                    st ^= st >> 7;
+                    st ^= st << 17;
+                    st as u8
+                })
+                .collect::<Vec<u8>>()
+        };
+
+        // Compressible only in the last third, past the midpoint the probe
+        // used to stop at.
+        let mut tail = noise(40 * 1024);
+        tail.resize(64 * 1024, 0);
+
+        // Compressible only in the middle, missing both a head window and a
+        // window at the halfway mark.
+        let mut middle = noise(64 * 1024);
+        middle[1024..31_000].fill(0);
+
+        for (what, data) in [("tail", tail), ("middle", middle)] {
+            let mut out = Vec::new();
+            assert!(pack(&data, &mut out), "{what}: refused outright");
+            assert!(
+                out.len() * 3 < data.len() * 2,
+                "{what}: {} of {} bytes, so the compressible part was never searched",
+                out.len(),
+                data.len()
+            );
+        }
     }
 
     /// What the probe is allowed to get wrong, and what it is not.
