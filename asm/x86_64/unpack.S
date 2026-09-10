@@ -62,7 +62,7 @@
 #include "../common.h"
 
 /*
- * One kernel per house.
+ * One kernel per part line.
  *
  * The same source builds three pairs: a Xeon pair, an EPYC pair, and an SSE2
  * pair for anything else. They started identical and are expected not to stay
@@ -74,17 +74,20 @@
  * Both vendor builds may assume SSSE3: every part either house has shipped
  * since 2007 has it, and the SSE2 pair is what a machine without it gets.
  */
-#if defined(KEVA_INTEL) || defined(KEVA_AMD)
+#if defined(KEVA_XEON) || defined(KEVA_EPYC)
 #  define KEVA_SSSE3 1
 #endif
 
 #ifdef KEVA_WIDE
-#  if defined(KEVA_INTEL)
-#    define KEVA_PFX   wi
-#    define KEVA_ENTRY keva_unpack_wide_intel
-#  elif defined(KEVA_AMD)
-#    define KEVA_PFX   wa
-#    define KEVA_ENTRY keva_unpack_wide_amd
+#  if defined(KEVA_XEON)
+#    define KEVA_PFX   wx
+#    define KEVA_ENTRY keva_unpack_wide_xeon
+#  elif defined(KEVA_EPYC)
+#    define KEVA_PFX   wp
+#    define KEVA_ENTRY keva_unpack_wide_epyc
+#  elif defined(KEVA_SSSE3)
+#    define KEVA_PFX   ws
+#    define KEVA_ENTRY keva_unpack_wide_ssse3
 #  else
 #    define KEVA_PFX   w
 #    define KEVA_ENTRY keva_unpack_wide
@@ -93,12 +96,15 @@
 #  define LIT_MAX    3
 #  define MAT_MAX    63
 #else
-#  if defined(KEVA_INTEL)
-#    define KEVA_PFX   ei
-#    define KEVA_ENTRY keva_unpack_intel
-#  elif defined(KEVA_AMD)
-#    define KEVA_PFX   ea
-#    define KEVA_ENTRY keva_unpack_amd
+#  if defined(KEVA_XEON)
+#    define KEVA_PFX   ex
+#    define KEVA_ENTRY keva_unpack_xeon
+#  elif defined(KEVA_EPYC)
+#    define KEVA_PFX   ep
+#    define KEVA_ENTRY keva_unpack_epyc
+#  elif defined(KEVA_SSSE3)
+#    define KEVA_PFX   es
+#    define KEVA_ENTRY keva_unpack_ssse3
 #  else
 #    define KEVA_PFX   e
 #    define KEVA_ENTRY keva_unpack
@@ -786,7 +792,7 @@ L(lit_wide):
  */
 L(lit_bytes):
     mov     %r10, %rcx
-#ifdef KEVA_INTEL
+#ifdef KEVA_XEON
     /*
      * Ice Lake and later have Fast Short REP MOV, and there the string
      * instruction is the right answer for a run of a dozen bytes: +8.9% on a

@@ -52,11 +52,11 @@ extern "C" {
     ) -> u32;
 }
 
-// One pair per vendor, picked at run time. Declared only where they exist:
+// One pair per part line, picked at run time. Declared only where they exist:
 // nothing outside x86-64 links them.
 #[cfg(all(keva_asm, target_arch = "x86_64"))]
 extern "C" {
-    fn keva_unpack_intel(
+    fn keva_unpack_ssse3(
         src: *const u8,
         src_len: usize,
         dst: *mut u8,
@@ -65,7 +65,7 @@ extern "C" {
         start: usize,
     ) -> u32;
 
-    fn keva_unpack_wide_intel(
+    fn keva_unpack_wide_ssse3(
         src: *const u8,
         src_len: usize,
         dst: *mut u8,
@@ -74,7 +74,7 @@ extern "C" {
         start: usize,
     ) -> u32;
 
-    fn keva_unpack_amd(
+    fn keva_unpack_xeon(
         src: *const u8,
         src_len: usize,
         dst: *mut u8,
@@ -83,7 +83,25 @@ extern "C" {
         start: usize,
     ) -> u32;
 
-    fn keva_unpack_wide_amd(
+    fn keva_unpack_wide_xeon(
+        src: *const u8,
+        src_len: usize,
+        dst: *mut u8,
+        dst_cap: usize,
+        declared: usize,
+        start: usize,
+    ) -> u32;
+
+    fn keva_unpack_epyc(
+        src: *const u8,
+        src_len: usize,
+        dst: *mut u8,
+        dst_cap: usize,
+        declared: usize,
+        start: usize,
+    ) -> u32;
+
+    fn keva_unpack_wide_epyc(
         src: *const u8,
         src_len: usize,
         dst: *mut u8,
@@ -114,26 +132,27 @@ unsafe fn run(
     // this, and short offsets are what data that only partly repeats is made
     // of. SSSE3 is universal on anything a server has shipped with since 2007,
     // but it is not the x86-64 baseline, so it is asked for rather than assumed.
-    // One kernel per house. They diverge where the same change has measured
-    // opposite signs on the two -- so far the last literal run, and there is no
-    // reason to expect it to be the last such place. Anything that is neither
-    // Intel nor AMD, or has no SSSE3, falls through to the baseline pair.
+    // One kernel per part line, and the line is not the vendor: a Core laptop
+    // and a Sapphire Rapids Xeon share a house and little else. A part that
+    // names neither line gets the plain SSSE3 kernel, which assumes nothing
+    // about either -- that is a client Intel part, a hypervisor that rewrites
+    // the brand string, or a vendor nobody has measured.
     #[cfg(target_arch = "x86_64")]
     {
         let f = crate::cpu::features();
-        if f.ssse3 && f.intel {
-            return match split {
-                Split::Even => keva_unpack_intel(src, src_len, dst, dst_cap, declared, start),
-                Split::WideMatch => {
-                    keva_unpack_wide_intel(src, src_len, dst, dst_cap, declared, start)
+        if f.ssse3 {
+            return match (f.xeon, f.epyc, split) {
+                (true, _, Split::Even) => keva_unpack_xeon(src, src_len, dst, dst_cap, declared, start),
+                (true, _, Split::WideMatch) => {
+                    keva_unpack_wide_xeon(src, src_len, dst, dst_cap, declared, start)
                 }
-            };
-        }
-        if f.ssse3 && f.amd {
-            return match split {
-                Split::Even => keva_unpack_amd(src, src_len, dst, dst_cap, declared, start),
-                Split::WideMatch => {
-                    keva_unpack_wide_amd(src, src_len, dst, dst_cap, declared, start)
+                (_, true, Split::Even) => keva_unpack_epyc(src, src_len, dst, dst_cap, declared, start),
+                (_, true, Split::WideMatch) => {
+                    keva_unpack_wide_epyc(src, src_len, dst, dst_cap, declared, start)
+                }
+                (_, _, Split::Even) => keva_unpack_ssse3(src, src_len, dst, dst_cap, declared, start),
+                (_, _, Split::WideMatch) => {
+                    keva_unpack_wide_ssse3(src, src_len, dst, dst_cap, declared, start)
                 }
             };
         }

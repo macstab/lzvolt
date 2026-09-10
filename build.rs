@@ -21,10 +21,12 @@ fn main() {
             "asm/x86_64/ctrl_match.S",
             "asm/x86_64/unpack.S",
             "asm/x86_64/unpack_wide.S",
-            "asm/x86_64/unpack_intel.S",
-            "asm/x86_64/unpack_wide_intel.S",
-            "asm/x86_64/unpack_amd.S",
-            "asm/x86_64/unpack_wide_amd.S",
+            "asm/x86_64/unpack_ssse3.S",
+            "asm/x86_64/unpack_wide_ssse3.S",
+            "asm/x86_64/unpack_xeon.S",
+            "asm/x86_64/unpack_wide_xeon.S",
+            "asm/x86_64/unpack_epyc.S",
+            "asm/x86_64/unpack_wide_epyc.S",
         ],
         // Every other target runs the scalar reference. That is a supported
         // configuration, not a degraded one -- correctness does not depend on

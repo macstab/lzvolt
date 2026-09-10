@@ -74,6 +74,14 @@ pub struct Features {
     /// SSE2 kernel.
     pub intel: bool,
     pub amd: bool,
+    /// The server line, which is not the same question as the vendor. A Core
+    /// laptop part and a Sapphire Rapids Xeon share a house and little else --
+    /// different cache sizes, different core mixes, and the string-copy answer
+    /// that a Xeon wants is not one a client part has been measured on. Tuning
+    /// is per line; anything unrecognised gets the plain SSSE3 kernel, which
+    /// assumes nothing about either.
+    pub xeon: bool,
+    pub epyc: bool,
     pub avx2: bool,
     pub avx512f: bool,
     pub neon: bool,
@@ -135,6 +143,27 @@ fn detect() -> Features {
         let vendor = [v.ebx, v.edx, v.ecx];
         f.intel = vendor == [0x756e_6547, 0x4965_6e69, 0x6c65_746e];
         f.amd = vendor == [0x6874_7541, 0x6974_6e65, 0x444d_4163];
+
+        // The line name comes from the brand string, leaves 0x80000002..4,
+        // because that is where the vendor writes what it calls the part. A
+        // translator or a hypervisor may write something else entirely --
+        // Rosetta says "VirtualApple" -- and then neither line matches and the
+        // generic kernel runs, which is the right answer for an unknown part.
+        let mut brand = [0u8; 48];
+        // SAFETY: extended leaves; the maximum is checked first.
+        let max_ext = unsafe { std::arch::x86_64::__cpuid(0x8000_0000).eax };
+        if max_ext >= 0x8000_0004 {
+            for (i, leaf) in [0x8000_0002u32, 0x8000_0003, 0x8000_0004].iter().enumerate() {
+                // SAFETY: leaf is at or below the maximum reported above.
+                let c = unsafe { std::arch::x86_64::__cpuid(*leaf) };
+                for (j, r) in [c.eax, c.ebx, c.ecx, c.edx].iter().enumerate() {
+                    brand[i * 16 + j * 4..i * 16 + j * 4 + 4].copy_from_slice(&r.to_le_bytes());
+                }
+            }
+        }
+        let brand = String::from_utf8_lossy(&brand).to_string();
+        f.xeon = f.intel && brand.contains("Xeon");
+        f.epyc = f.amd && brand.contains("EPYC");
         f.avx2 = std::arch::is_x86_feature_detected!("avx2");
         f.avx512f = std::arch::is_x86_feature_detected!("avx512f");
     }
@@ -182,6 +211,8 @@ mod tests {
             fsrm: false,
             intel: false,
             amd: false,
+            xeon: false,
+            epyc: false,
             avx2: true,
             avx512f: true,
             ..Features::default()
