@@ -255,13 +255,18 @@ if [ "${KEVA_QUICK:-0}" = 1 ]; then
     # get worse while it happens.
     echo "== quick: varied_64k and records_64k packing; records_512,"
     echo "   records_64k and varied_64k decoding identical blocks"
+    # lz4_flex is in it because it is the one actually ahead: on varied_64k it
+    # packs at 1.11 GiB/s where liblz4 manages 0.65, both in Rust, so that is
+    # the number to chase and liblz4 is only the control. Leaving it out meant
+    # four rounds of measuring against the wrong opponent.
+    #
     # varied is in the decoding set because that is where near matches live --
     # offsets below thirty-two -- and the shuffle and the inlined near path are
     # aimed at exactly those. The first quick run measured both against records
     # shapes only and reported them flat, which said nothing about either.
     cargo bench -q -p keva-core --features liblz4 --bench pack -- \
         --measurement-time 2 --warm-up-time 1 --noplot \
-        'compress3/(keva|liblz4)/(varied_64k|records_64k)|same_bytes/(keva|liblz4)/(records_512|records_64k|varied_64k)' \
+        'compress3/(keva|liblz4|lz4_flex)/(varied_64k|records_64k)|same_bytes/(keva|liblz4|lz4_flex)/(records_512|records_64k|varied_64k)' \
         2>&1 | tee "$HOME/run-$KEVA_COMMIT-1.txt" |
         grep -E 'compress3|same_bytes|thrpt' || echo "   quick bench failed"
 else
