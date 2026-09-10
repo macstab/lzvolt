@@ -61,10 +61,30 @@
 
 #include "../common.h"
 
+/*
+ * One kernel per house.
+ *
+ * The same source builds three pairs: a Xeon pair, an EPYC pair, and an SSE2
+ * pair for anything else. They started identical and are expected not to stay
+ * that way -- the last literal run already wants `rep movsb` on one and a copy
+ * ladder on the other, measured at +17% and -9% for the same change, and a
+ * compromise between those is worse than either. The vendor is asked once, at
+ * the first call.
+ *
+ * Both vendor builds may assume SSSE3: every part either house has shipped
+ * since 2007 has it, and the SSE2 pair is what a machine without it gets.
+ */
+#if defined(KEVA_INTEL) || defined(KEVA_AMD)
+#  define KEVA_SSSE3 1
+#endif
+
 #ifdef KEVA_WIDE
-#  ifdef KEVA_SSSE3
-#    define KEVA_PFX   ws
-#    define KEVA_ENTRY keva_unpack_wide_ssse3
+#  if defined(KEVA_INTEL)
+#    define KEVA_PFX   wi
+#    define KEVA_ENTRY keva_unpack_wide_intel
+#  elif defined(KEVA_AMD)
+#    define KEVA_PFX   wa
+#    define KEVA_ENTRY keva_unpack_wide_amd
 #  else
 #    define KEVA_PFX   w
 #    define KEVA_ENTRY keva_unpack_wide
@@ -73,9 +93,12 @@
 #  define LIT_MAX    3
 #  define MAT_MAX    63
 #else
-#  ifdef KEVA_SSSE3
-#    define KEVA_PFX   es
-#    define KEVA_ENTRY keva_unpack_ssse3
+#  if defined(KEVA_INTEL)
+#    define KEVA_PFX   ei
+#    define KEVA_ENTRY keva_unpack_intel
+#  elif defined(KEVA_AMD)
+#    define KEVA_PFX   ea
+#    define KEVA_ENTRY keva_unpack_amd
 #  else
 #    define KEVA_PFX   e
 #    define KEVA_ENTRY keva_unpack
@@ -763,21 +786,15 @@ L(lit_wide):
  */
 L(lit_bytes):
     mov     %r10, %rcx
+#ifdef KEVA_INTEL
     /*
-     * Which of the two, decided by the part rather than by preference.
-     *
      * Ice Lake and later have Fast Short REP MOV, and there the string
-     * instruction is the right answer for a run of a dozen bytes. Zen has
-     * ERMSB without it and pays the full start-up. The same change measured
-     * +17.1% on an EPYC 9B14 and -8.9% on a Xeon 8481C, twice each, which is
-     * not a tie to be broken by argument.
-     *
-     * The test costs one predictable branch on a path that runs once per value.
+     * instruction is the right answer for a run of a dozen bytes: +8.9% on a
+     * Xeon 8481C against the ladder below.
      */
-    cmpb    $0, KEVA_NAME(keva_fsrm)(%rip)
-    je      L(lit_b16)
     rep movsb
     jmp     L(lit_done)
+#endif
 
 L(lit_b16):
     cmp     $16, %rcx

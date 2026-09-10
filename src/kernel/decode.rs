@@ -52,11 +52,11 @@ extern "C" {
     ) -> u32;
 }
 
-// The same two kernels with the pattern shuffle, picked at run time. Declared
-// only where they exist: nothing outside x86-64 links them.
+// One pair per vendor, picked at run time. Declared only where they exist:
+// nothing outside x86-64 links them.
 #[cfg(all(keva_asm, target_arch = "x86_64"))]
 extern "C" {
-    fn keva_unpack_ssse3(
+    fn keva_unpack_intel(
         src: *const u8,
         src_len: usize,
         dst: *mut u8,
@@ -65,7 +65,25 @@ extern "C" {
         start: usize,
     ) -> u32;
 
-    fn keva_unpack_wide_ssse3(
+    fn keva_unpack_wide_intel(
+        src: *const u8,
+        src_len: usize,
+        dst: *mut u8,
+        dst_cap: usize,
+        declared: usize,
+        start: usize,
+    ) -> u32;
+
+    fn keva_unpack_amd(
+        src: *const u8,
+        src_len: usize,
+        dst: *mut u8,
+        dst_cap: usize,
+        declared: usize,
+        start: usize,
+    ) -> u32;
+
+    fn keva_unpack_wide_amd(
         src: *const u8,
         src_len: usize,
         dst: *mut u8,
@@ -96,14 +114,29 @@ unsafe fn run(
     // this, and short offsets are what data that only partly repeats is made
     // of. SSSE3 is universal on anything a server has shipped with since 2007,
     // but it is not the x86-64 baseline, so it is asked for rather than assumed.
+    // One kernel per house. They diverge where the same change has measured
+    // opposite signs on the two -- so far the last literal run, and there is no
+    // reason to expect it to be the last such place. Anything that is neither
+    // Intel nor AMD, or has no SSSE3, falls through to the baseline pair.
     #[cfg(target_arch = "x86_64")]
-    if crate::cpu::features().ssse3 {
-        return match split {
-            Split::Even => keva_unpack_ssse3(src, src_len, dst, dst_cap, declared, start),
-            Split::WideMatch => {
-                keva_unpack_wide_ssse3(src, src_len, dst, dst_cap, declared, start)
-            }
-        };
+    {
+        let f = crate::cpu::features();
+        if f.ssse3 && f.intel {
+            return match split {
+                Split::Even => keva_unpack_intel(src, src_len, dst, dst_cap, declared, start),
+                Split::WideMatch => {
+                    keva_unpack_wide_intel(src, src_len, dst, dst_cap, declared, start)
+                }
+            };
+        }
+        if f.ssse3 && f.amd {
+            return match split {
+                Split::Even => keva_unpack_amd(src, src_len, dst, dst_cap, declared, start),
+                Split::WideMatch => {
+                    keva_unpack_wide_amd(src, src_len, dst, dst_cap, declared, start)
+                }
+            };
+        }
     }
 
     match split {

@@ -67,6 +67,13 @@ pub struct Features {
     /// Xeon -- the same change, opposite signs, which is why it is asked rather
     /// than chosen.
     pub fsrm: bool,
+    /// Which house built the part. The decoder is compiled once per vendor now,
+    /// because the same code has measured opposite signs on the two -- the last
+    /// literal run wants `rep movsb` on a Xeon and a copy ladder on an EPYC, and
+    /// that is unlikely to be the only place. Anything that is neither gets the
+    /// SSE2 kernel.
+    pub intel: bool,
+    pub amd: bool,
     pub avx2: bool,
     pub avx512f: bool,
     pub neon: bool,
@@ -106,11 +113,6 @@ pub fn best_isa() -> Isa {
     features().best()
 }
 
-/// Read by the x86 decoder, which cannot ask Rust.
-#[cfg(target_arch = "x86_64")]
-#[no_mangle]
-pub static mut keva_fsrm: u8 = 0;
-
 fn detect() -> Features {
     let mut f = Features::default();
 
@@ -125,11 +127,14 @@ fn detect() -> Features {
         // SSSE3, so no maximum-leaf check is needed here.
         // SAFETY: CPUID with a leaf every x86-64 part supports.
         f.fsrm = unsafe { std::arch::x86_64::__cpuid_count(7, 0).edx & (1 << 4) != 0 };
-        // The kernels cannot call back into Rust, so the answer is left where
-        // they can read it. Written once, from the same lazy initialisation
-        // that fills this struct.
-        // SAFETY: single write of a byte during the one-time init below.
-        unsafe { keva_fsrm = f.fsrm as u8 };
+        // Leaf 0 returns the vendor string in EBX, EDX, ECX -- in that order,
+        // which is why it reads as "Genu" "ineI" "ntel" rather than in register
+        // order.
+        // SAFETY: leaf 0 exists on every x86 part that has CPUID at all.
+        let v = unsafe { std::arch::x86_64::__cpuid(0) };
+        let vendor = [v.ebx, v.edx, v.ecx];
+        f.intel = vendor == [0x756e_6547, 0x4965_6e69, 0x6c65_746e];
+        f.amd = vendor == [0x6874_7541, 0x6974_6e65, 0x444d_4163];
         f.avx2 = std::arch::is_x86_feature_detected!("avx2");
         f.avx512f = std::arch::is_x86_feature_detected!("avx512f");
     }
@@ -175,6 +180,8 @@ mod tests {
             sse2: true,
             ssse3: true,
             fsrm: false,
+            intel: false,
+            amd: false,
             avx2: true,
             avx512f: true,
             ..Features::default()
