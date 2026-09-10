@@ -9,6 +9,7 @@
 #   KEEP=1 scripts/bench-on-gce.sh     # leave the machines running
 #   PROJECT=my-project scripts/bench-on-gce.sh
 #   REVS="a1b2c3 d4e5f6" scripts/bench-on-gce.sh intel
+#   QUICK=1 REVS="..." scripts/bench-on-gce.sh intel   # direction only, ~2 min/rev
 #
 # REVS measures several revisions on the *same* machine in one visit. Renting a
 # machine takes twenty minutes of installing before it measures anything, so
@@ -43,6 +44,11 @@ BRANCH="${BRANCH:-packer}"
 REVS="${REVS:-}"
 KEEP="${KEEP:-0}"
 RUNS="${RUNS:-3}"
+# Direction-finding rather than publication. QUICK=1 runs one check instead of
+# four and four benchmark cells instead of eighteen, which turns twelve minutes
+# a revision into about two. The long form is for the numbers that get quoted;
+# using it to decide whether a change helps is most of an evening.
+QUICK="${QUICK:-0}"
 # Unique per invocation, so two runs at once do not fight over one name --
 # which they did, and the loser reported "already exists" from inside the
 # zone loop as though the zone were full.
@@ -146,6 +152,7 @@ cat > "$RUNNER" <<'REMOTE'
 set -uo pipefail
 runs="${1:-3}"
 export KEVA_COMMIT="${2:-unknown}"
+export KEVA_QUICK="${3:-0}"
 report="$HOME/report-$KEVA_COMMIT.txt"
 
 exec > >(tee "$report") 2>&1
@@ -189,10 +196,19 @@ check () {
     echo "   [$*] -> exit $status"
     [ "$status" -eq 0 ] || fail=1
 }
-check --workspace
-check --workspace --release
-check --workspace --no-default-features
-check -p keva-core --features liblz4
+# In quick mode only the check that can catch a broken kernel runs: the
+# differential and interop tests, with the reference library linked. The other
+# three are full rebuilds in other configurations and they cost more than the
+# measurement does. They belong to the run that produces a published number,
+# not to the run that answers "which direction".
+if [ "${KEVA_QUICK:-0}" = 1 ]; then
+    check -p keva-core --features liblz4
+else
+    check --workspace
+    check --workspace --release
+    check --workspace --no-default-features
+    check -p keva-core --features liblz4
+fi
 
 if [ "$fail" -ne 0 ]; then
     echo
@@ -230,12 +246,28 @@ else
 fi
 
 echo
-echo "== throughput, $runs runs"
-for i in $(seq 1 "$runs"); do
-    echo
-    echo "---------- run $i ----------"
-    scripts/packer-report.sh "$HOME/run-$KEVA_COMMIT-$i.txt" || echo "   report failed"
-done
+if [ "${KEVA_QUICK:-0}" = 1 ]; then
+    # Direction, not publication. Four shapes rather than nine, one run rather
+    # than three, and two seconds of measurement rather than the default five --
+    # enough to see a five-percent move, which is the size worth acting on.
+    #
+    # The shapes are the two the work is aimed at and the two that have to not
+    # get worse while it happens.
+    echo "== quick: varied_64k and records_64k packing, records_512 and"
+    echo "   records_64k decoding identical blocks"
+    cargo bench -q -p keva-core --features liblz4 --bench pack -- \
+        --measurement-time 2 --warm-up-time 1 --noplot \
+        'compress3/(keva|liblz4)/(varied_64k|records_64k)|same_bytes/(keva|liblz4)/(records_512|records_64k)' \
+        2>&1 | tee "$HOME/run-$KEVA_COMMIT-1.txt" |
+        grep -E 'compress3|same_bytes|thrpt' || echo "   quick bench failed"
+else
+    echo "== throughput, $runs runs"
+    for i in $(seq 1 "$runs"); do
+        echo
+        echo "---------- run $i ----------"
+        scripts/packer-report.sh "$HOME/run-$KEVA_COMMIT-$i.txt" || echo "   report failed"
+    done
+fi
 REMOTE
 
 one () {
@@ -329,7 +361,7 @@ one () {
     for sha in $SHORT; do
         echo "== running $sha (apt and rustc are paid once, on the first)"
         "${GC[@]}" compute ssh "$vm" --zone="$zone" --quiet \
-            --command="bash ~/run.sh $RUNS $sha" || echo "== $sha reported a failure"
+            --command="bash ~/run.sh $RUNS $sha $QUICK" || echo "== $sha reported a failure"
     done
 
     echo "== downloading"
