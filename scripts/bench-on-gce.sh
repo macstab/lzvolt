@@ -43,6 +43,19 @@ cd "$(dirname "$0")/.."
 BRANCH="${BRANCH:-packer}"
 REVS="${REVS:-}"
 KEEP="${KEEP:-0}"
+# A machine costs twenty minutes before it measures anything: apt, rustup, the
+# first build. That is the whole of the wait in a development loop, and it
+# should be paid once rather than per question.
+#
+#   KEEP=1  leaves the machine running when the run ends
+#   REUSE=1 attaches to a machine that is already running instead of creating
+#           one, and leaves it running afterwards
+#
+# Together they turn "does this change help" from half an hour into two
+# minutes. Remember to run without them, or `scripts/bench-on-gce.sh --drop`,
+# when the loop is over: a kept machine is a bill.
+REUSE="${REUSE:-0}"
+[ "$REUSE" = 1 ] && KEEP=1
 RUNS="${RUNS:-3}"
 # Direction-finding rather than publication. QUICK=1 runs one check instead of
 # four and four benchmark cells instead of eighteen, which turns twelve minutes
@@ -58,7 +71,15 @@ WARM="${WARM:-1}"
 # Unique per invocation, so two runs at once do not fight over one name --
 # which they did, and the loser reported "already exists" from inside the
 # zone loop as though the zone were full.
-PREFIX="${PREFIX:-keva-bench-$$}"
+# Unique per invocation by default, so two runs at once do not fight over one
+# name. REUSE needs a name that survives the shell, so it gets a fixed one.
+PREFIX_BASE="${PREFIX_BASE:-keva-bench}"
+if [ "${REUSE:-0}" = 1 ]; then
+    PREFIX="${PREFIX:-$PREFIX_BASE}"
+else
+    PREFIX="${PREFIX:-$PREFIX_BASE-$$}"
+    PREFIX_BASE="$PREFIX"
+fi
 OUTDIR="${OUTDIR:-bench-results}"
 
 # Compute-optimised on purpose: a shared core gives a number that says more
@@ -327,7 +348,23 @@ one () {
     # as a failure. The report says which of the two happened, because a table
     # without counters should not look like one that had them and found nothing.
     local z created=0
-    for z in $zones; do
+
+    if [ "$REUSE" = 1 ]; then
+        local found
+        found="$("${GC[@]}" compute instances list \
+            --filter="name~'^$PREFIX_BASE-$label$' AND status=RUNNING" \
+            --format='value(name,zone)' 2>/dev/null | head -1)"
+        if [ -n "$found" ]; then
+            vm="${found%%[[:space:]]*}"
+            zone="${found##*[[:space:]]}"
+            created=1
+            echo "== reusing $vm in $zone"
+        else
+            echo "== REUSE=1 but no $PREFIX_BASE-$label is running; creating one"
+        fi
+    fi
+
+    [ "$created" = 1 ] || for z in $zones; do
         echo "== creating in $z"
         if "${GC[@]}" compute instances create "$vm" \
             --zone="$z" --machine-type="$mtype" \
