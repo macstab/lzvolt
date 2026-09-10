@@ -768,9 +768,67 @@ L(lit_wide):
     jg      L(lit_wide)
     jmp     L(lit_done)
 
+/*
+ * The last literal run of a value, in blocks and then two overlapping moves.
+ *
+ * This was `rep movsb`. On x86 that is a string instruction with a start-up
+ * cost measured in tens of cycles before it moves a byte -- fast once it is
+ * running, and this is never running long. It is reached when the run ends
+ * within one block of the end of the input, which is to say once per value,
+ * and the run is usually a handful of bytes. liblz4 does not use it anywhere;
+ * it copies in eight-byte blocks and finishes with overlapping moves, and the
+ * AArch64 kernel here has had the same ladder from the start.
+ *
+ * Sixteen at a time while sixteen remain, because a run of `rcx` bytes ends at
+ * or before the end of the input, so reading sixteen while `rcx >= 16` cannot
+ * leave it. Then one pair of overlapping moves for the rest: a run of six is
+ * four bytes from the front and four from the back, the middle two written
+ * twice, exact and branch-free below the width test.
+ */
 L(lit_bytes):
     mov     %r10, %rcx
-    rep movsb
+L(lit_b16):
+    cmp     $16, %rcx
+    jb      L(lit_tail)
+    movdqu  (%rsi), %xmm0
+    movdqu  %xmm0, (%rdi)
+    add     $16, %rsi
+    add     $16, %rdi
+    sub     $16, %rcx
+    jmp     L(lit_b16)
+
+L(lit_tail):
+    test    %rcx, %rcx
+    je      L(lit_done)
+    cmp     $8, %rcx
+    jb      L(lit_t4)
+    lea     -8(%rcx), %rdx
+    mov     (%rsi), %rax
+    mov     %rax, (%rdi)
+    mov     (%rsi,%rdx,1), %rax
+    mov     %rax, (%rdi,%rdx,1)
+    jmp     L(lit_done)
+L(lit_t4):
+    cmp     $4, %rcx
+    jb      L(lit_t2)
+    lea     -4(%rcx), %rdx
+    mov     (%rsi), %eax
+    mov     %eax, (%rdi)
+    mov     (%rsi,%rdx,1), %eax
+    mov     %eax, (%rdi,%rdx,1)
+    jmp     L(lit_done)
+L(lit_t2):
+    cmp     $2, %rcx
+    jb      L(lit_t1)
+    lea     -2(%rcx), %rdx
+    movzwl  (%rsi), %eax
+    mov     %ax, (%rdi)
+    movzwl  (%rsi,%rdx,1), %eax
+    mov     %ax, (%rdi,%rdx,1)
+    jmp     L(lit_done)
+L(lit_t1):
+    movzbl  (%rsi), %eax
+    mov     %al, (%rdi)
 
 L(lit_done):
     lea     (%r14,%r10,1), %r14             /* at = end */
