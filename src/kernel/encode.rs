@@ -128,7 +128,13 @@ extern "C" {
 pub fn pack_asm(input: &[u8], out: &mut Vec<u8>, table: &mut [u32]) -> Option<usize> {
     debug_assert!(table.len() >= TABLE_SIZE);
 
+    // The `return` is not needless, whatever clippy sees: this is a statement
+    // block, not the function's tail, and the tail belongs to the other `cfg`.
+    // Dropping it would evaluate `None` and discard it. Only builds that are
+    // not aarch64 compile this arm, so only they see the lint -- which is the
+    // x86-64 CI job, with `-D warnings`.
     #[cfg(not(all(keva_asm, target_arch = "aarch64")))]
+    #[allow(clippy::needless_return)]
     {
         let _ = (input, out, table);
         return None;
