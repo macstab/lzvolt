@@ -55,7 +55,28 @@
  * The search. One position per iteration, and almost every one is rejected, so
  * what matters here is the order the questions are asked in.
  */
-    .p2align 4
+    /*
+     * The loop's exits, placed above it so the branches that take them fit in
+     * one byte of displacement.
+     *
+     * Every exit targets code that sits past the block writer, several hundred
+     * bytes away, and a conditional branch that far is `rel32` -- six bytes
+     * against two. Four of them are in the loop. Routing each through a relay
+     * that is a backward jump of under a hundred bytes makes all four `rel8`
+     * and takes sixteen bytes out of the body, which is sixteen bytes of
+     * instruction fetch on every position visited.
+     *
+     * Above the loop rather than below it, so the fall-through into the match
+     * path stays a fall-through: relays after the body would need a jump over
+     * them, and that jump would be taken on every match.
+     */
+L_(miss):
+    inc     %rbx
+    jmp     L_(scan)
+L_(to_tail):
+    jmp     L_(tail)
+
+    .p2align 5
 L_(scan):
     /* at = next_at; next_at = at + (misses >> SKIP_TRIGGER)
      *
@@ -63,11 +84,16 @@ L_(scan):
      * this iteration loads from was formed during the last one and does not
      * wait on the branch that closed it. */
     mov     %r12, %r13
-    mov     %rbx, %rax
-    shr     $5, %rax                        /* SKIP_TRIGGER */
+    /* The stride in 32 bits, which is two bytes shorter than the 64-bit form.
+     * `misses` counts positions visited and a value cannot reach two gigabytes,
+     * so it fits -- and the shift zero-extends, so the lea still sees the whole
+     * register. Those two bytes are what keeps the window test below out of a
+     * 32-byte boundary; see the note there. */
+    mov     %ebx, %eax
+    shr     $5, %eax                        /* SKIP_TRIGGER */
     lea     (%r13,%rax), %r12
     cmp     %r11, %r13
-    ja      L_(tail)
+    ja      L_(to_tail)
 
     /* One load, not two. The four bytes a candidate is rejected on are the low
      * half of the eight the hash reads, at the same address, so taking them
@@ -87,9 +113,29 @@ L_(scan):
      * behind the cursor". There is no empty test in this loop. */
     cmp     %r13, %rcx
     jae     L_(miss)
-    mov     %r13, %rdx
+    /*
+     * MAX_OFFSET, computed and compared in 32 bits. The candidate is already
+     * known to be behind the cursor and a position cannot reach two gigabytes,
+     * so the distance fits, and rdx is overwritten with the candidate a few
+     * instructions later so its upper half is not wanted.
+     *
+     * The mixed widths here are chosen for encoded length, and the length is
+     * load-bearing rather than tidy. Both this `cmp`+`ja` and the `cmp`+`jne`
+     * below it are macro-fused pairs, and a fused pair that crosses a 32-byte
+     * boundary is not held in the uop cache on the Skylake family -- which is
+     * every Xeon up to Ice Lake. With `sub` in 32 bits this pair ended one byte
+     * clear of a boundary and pushed the next pair across it instead; in 64
+     * bits the pair ends exactly on the boundary and the next one starts on it,
+     * and all four of the loop's pairs are clean.
+     *
+     * The loop head is `.p2align 5` so this is a property of the code rather
+     * than of where the linker happened to put the function. It is still
+     * fragile: anything added to the loop above shifts it. The disassembly is
+     * the only thing that says whether it still holds.
+     */
+    mov     %r13d, %edx
     sub     %rcx, %rdx
-    cmp     $65535, %rdx                    /* MAX_OFFSET */
+    cmp     $65535, %edx
     ja      L_(miss)
     cmp     (%r15,%rcx), %eax               /* word4(candidate) == here */
     jne     L_(miss)
@@ -435,10 +481,6 @@ L_(emit):
      * caller sizes the output for the worst case instead, exactly as
      * `Cursor::room` does on the Rust side.
      */
-    jmp     L_(scan)
-
-L_(miss):
-    inc     %rbx
     jmp     L_(scan)
 
     /*
