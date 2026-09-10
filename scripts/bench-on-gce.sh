@@ -49,6 +49,12 @@ RUNS="${RUNS:-3}"
 # a revision into about two. The long form is for the numbers that get quoted;
 # using it to decide whether a change helps is most of an evening.
 QUICK="${QUICK:-0}"
+# Two seconds is enough to see a five-percent move on most cells. records_512 is
+# not most cells: it has returned 6.02 and 7.53 for the same code in one
+# evening, so a verdict there needs TIME=5 and a revision in front of it to
+# absorb the cold start a fresh machine gives whatever is measured first.
+TIME="${TIME:-2}"
+WARM="${WARM:-1}"
 # Unique per invocation, so two runs at once do not fight over one name --
 # which they did, and the loser reported "already exists" from inside the
 # zone loop as though the zone were full.
@@ -153,6 +159,8 @@ set -uo pipefail
 runs="${1:-3}"
 export KEVA_COMMIT="${2:-unknown}"
 export KEVA_QUICK="${3:-0}"
+export KEVA_TIME="${4:-2}"
+export KEVA_WARM="${5:-1}"
 report="$HOME/report-$KEVA_COMMIT.txt"
 
 exec > >(tee "$report") 2>&1
@@ -265,7 +273,7 @@ if [ "${KEVA_QUICK:-0}" = 1 ]; then
     # aimed at exactly those. The first quick run measured both against records
     # shapes only and reported them flat, which said nothing about either.
     cargo bench -q -p keva-core --features liblz4 --bench pack -- \
-        --measurement-time 2 --warm-up-time 1 --noplot \
+        --measurement-time ${KEVA_TIME:-2} --warm-up-time ${KEVA_WARM:-1} --noplot \
         'compress3/(keva|liblz4|lz4_flex)/(varied_64k|records_64k)|same_bytes/(keva|liblz4|lz4_flex)/(records_512|records_64k|varied_64k)' \
         2>&1 | tee "$HOME/run-$KEVA_COMMIT-1.txt" |
         grep -E 'compress3|same_bytes|thrpt' || echo "   quick bench failed"
@@ -370,7 +378,7 @@ one () {
     for sha in $SHORT; do
         echo "== running $sha (apt and rustc are paid once, on the first)"
         "${GC[@]}" compute ssh "$vm" --zone="$zone" --quiet \
-            --command="bash ~/run.sh $RUNS $sha $QUICK" || echo "== $sha reported a failure"
+            --command="bash ~/run.sh $RUNS $sha $QUICK $TIME $WARM" || echo "== $sha reported a failure"
     done
 
     echo "== downloading"
