@@ -100,26 +100,8 @@
 #  define COPY_MAX   96
 #elif MAT_CAP > 32
 #  define COPY_MAX   64
-#elif MAT_CAP > 24
-#  define COPY_MAX   32
 #else
-/*
- * Twenty-four, not thirty-two.
- *
- * The longest match the even token carries without escaping is eighteen bytes,
- * and this move wrote thirty-two of them -- two vector pairs, sixteen bytes of
- * which were never part of any match the token could name. lz4_flex copies
- * eighteen here for the same reason and is the one ahead on short values.
- *
- * A vector and a word covers it. The instruction count is the same four; what
- * changes is a quarter of the store traffic on every block, and short values
- * are where a block is a larger share of the work.
- *
- * Matches between twenty-five and thirty-two bytes -- escaped ones, since the
- * token cannot name them -- now take the counted loop instead. That is the
- * trade this measures.
- */
-#  define COPY_MAX   24
+#  define COPY_MAX   32
 #endif
 
 /*
@@ -299,15 +281,9 @@ L(fast_matgo):
     ja      L(fast_long)
 
     movdqu  (%rsi), %xmm0
-#if COPY_MAX == 24
-    mov     16(%rsi), %rdx
-    movdqu  %xmm0, (%r8)
-    mov     %rdx, 16(%r8)
-#else
     movdqu  16(%rsi), %xmm1
     movdqu  %xmm0, (%r8)
     movdqu  %xmm1, 16(%r8)
-#endif
 #if COPY_MAX > 32
     movdqu  32(%rsi), %xmm2
     movdqu  48(%rsi), %xmm3
