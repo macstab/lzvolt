@@ -450,13 +450,67 @@ L(fast_longloop):
     mov     %r10, %rdi
     jmp     L(block)
 
+/*
+ * A near match, written where it is found.
+ *
+ * This used to be a `call`, which made sense while the routine behind it was a
+ * byte-at-a-time doubling loop. With the shuffle it is eight instructions, and
+ * a call frame for eight instructions is the wrong way round: the `call` and
+ * the `ret` are two micro-ops, the return-address predictor takes a slot, and
+ * four `mov` exist for no reason but to name arguments.
+ *
+ * Inlined it needs none of them, and it gets something the routine could not
+ * have: the gap is already in `rcx` as the offset, so the subtraction that
+ * derived it disappears too.
+ *
+ * Live here: rsi the match source, r8 where it is written, r9 its length, rcx
+ * the offset -- which is below OVERRUN, or this label was not reached -- and
+ * rax the cursor the loop resumes with. rdx is dead since the offset check.
+ *
+ * The cold call site keeps the routine. It runs once per value at most.
+ */
 L(near):
+#ifdef KEVA_SSSE3
+    cmp     $16, %rcx
+    jae     L(near_wide)
+
+    movdqu  (%rsi), %xmm0                   /* the live bytes, and some noise */
+    shl     $4, %ecx                        /* offset -> mask index */
+    lea     L(splat_first)(%rip), %rdx
+    pshufb  (%rdx,%rcx,1), %xmm0
+    lea     L(splat_next)(%rip), %rdx
+    movdqa  (%rdx,%rcx,1), %xmm1
+    mov     %r8, %rdx
+L(near_pattern):
+    movdqu  %xmm0, (%rdx)
+    add     $16, %rdx
+    pshufb  %xmm1, %xmm0
+    sub     $16, %r9
+    jg      L(near_pattern)
+    mov     %rax, %rdi
+    jmp     L(block)
+
+/* Sixteen to thirty-one apart: far enough for whole vectors, near enough that
+ * the fixed move above would have read what it had not written. */
+L(near_wide):
+    mov     %r8, %rdx
+L(near_wideloop):
+    movdqu  (%rsi), %xmm0
+    movdqu  %xmm0, (%rdx)
+    add     $16, %rsi
+    add     $16, %rdx
+    sub     $16, %r9
+    jg      L(near_wideloop)
+    mov     %rax, %rdi
+    jmp     L(block)
+#else
     mov     %rax, %r10                      /* keep the new cursor */
     mov     %r8, %rdi
     mov     %r9, %rcx
     call    L(splat)
     mov     %r10, %rdi
     jmp     L(block)
+#endif
 
     /* ---- the pattern splat ------------------------------------------ */
 
