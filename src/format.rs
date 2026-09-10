@@ -590,7 +590,12 @@ fn pack_with(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> b
     }
 
     // One pass. The split is decided while packing, not by packing twice.
-    pack_pass(input, out, table, EVEN, LAZY, ADAPTIVE);
+    // Which of the two instantiations, decided once for the whole value.
+    if input.len() > NARROW_TABLE_ABOVE {
+        pack_pass::<{ (64 - HASH_BITS_LARGE) as u32 }>(input, out, table, EVEN, LAZY, ADAPTIVE);
+    } else {
+        pack_pass::<{ (64 - HASH_BITS) as u32 }>(input, out, table, EVEN, LAZY, ADAPTIVE);
+    }
     out.len() < input.len()
 }
 
@@ -662,7 +667,11 @@ fn pack_with_eager(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]
     if input.len() < HASH_WORD {
         return false;
     }
-    pack_pass(input, out, table, EVEN, EAGER, FIXED);
+    if input.len() > NARROW_TABLE_ABOVE {
+        pack_pass::<{ (64 - HASH_BITS_LARGE) as u32 }>(input, out, table, EVEN, EAGER, FIXED);
+    } else {
+        pack_pass::<{ (64 - HASH_BITS) as u32 }>(input, out, table, EVEN, EAGER, FIXED);
+    }
     out.len() < input.len()
 }
 
@@ -679,7 +688,7 @@ fn pack_with_eager(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]
 /// answers a question two passes could not: which split fits *this part* of the
 /// value. A sample can be unrepresentative and a total cannot see a change of
 /// character; a window sees both.
-fn pack_pass(
+fn pack_pass<const SHIFT: u32>(
     input: &[u8],
     out: &mut Vec<u8>,
     table: &mut [u32; HASH_SIZE],
@@ -717,7 +726,20 @@ fn pack_pass(
     // would make the shift zero and the cursor would sit on the same position
     // for the first sixty-four attempts.
     let mut misses = 1usize << SKIP_TRIGGER;
-    let shift = hash_shift(input.len());
+    // The shift is a constant here, not a value, and that is worth a whole
+    // instruction per position. It takes exactly two values -- 64 - HASH_BITS
+    // or 64 - HASH_BITS_LARGE -- chosen once from the length, but x86 has no
+    // register-to-register variable shift outside BMI2: the count has to be in
+    // CL, and CL is wanted two instructions later, so the generated code
+    // reloaded it every single iteration:
+    //
+    //     imulq %r11, %rsi
+    //     movl  %r13d, %ecx      <- every position, for a loop invariant
+    //     shrq  %cl, %rsi
+    //
+    // As a constant it is `shrq $52` and CL stays free. AArch64 shifts by a
+    // register in one instruction and neither gains nor loses.
+    debug_assert_eq!(SHIFT, hash_shift(input.len()));
 
     // Hoisted: the loop asked `at + MIN_MATCH <= input.len()` and paid an `add`
     // for it on every position visited.
@@ -726,10 +748,21 @@ fn pack_pass(
     // full hash word above it.
     let last = input.len() - HASH_WORD;
     while at <= last {
-        // SAFETY: the loop condition is `at + MIN_MATCH <= input.len()`.
-        let here = unsafe { word4(input, at) };
-        // SAFETY: `at <= last` is `at + 8 <= input.len()`.
-        let slot = hash5(unsafe { word8(input, at) }, shift);
+        // One load, not two. These were written as `word4(at)` and `word8(at)`
+        // and the generated x86 kept them apart:
+        //
+        //     movl  (%r15,%r14), %esi        ; word4
+        //     movq  (%r15,%r14), %rax        ; word8, same address
+        //
+        // Both are little-endian reads at the same address, so the four bytes
+        // are the low half of the eight and taking them from the register is
+        // exact. That is a load and an address-generation slot per position, on
+        // the path data that does not repeat spends nearly all of its time in.
+        //
+        // SAFETY: `at <= last` is `at + 8 <= input.len()`, which covers both.
+        let word = unsafe { word8(input, at) };
+        let here = word as u32;
+        let slot = hash5(word, SHIFT);
         let stored = table[slot];
         table[slot] = at as u32;
 
@@ -849,7 +882,7 @@ fn pack_pass(
                     // SAFETY: `next + MIN_MATCH <= input.len()` was tested above.
                     let ahead = unsafe { word4(input, next) };
                     // SAFETY: `next <= last` is `next + 8 <= input.len()`.
-                    let slot = hash5(unsafe { word8(input, next) }, shift);
+                    let slot = hash5(unsafe { word8(input, next) }, SHIFT);
                     let stored = table[slot];
                     // Inserted whether or not it wins: the position is real and a
                     // later search may want it, and the search itself would never
