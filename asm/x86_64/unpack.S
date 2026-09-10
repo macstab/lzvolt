@@ -787,6 +787,22 @@ L(lit_wide):
  */
 L(lit_bytes):
     mov     %r10, %rcx
+    /*
+     * Which of the two, decided by the part rather than by preference.
+     *
+     * Ice Lake and later have Fast Short REP MOV, and there the string
+     * instruction is the right answer for a run of a dozen bytes. Zen has
+     * ERMSB without it and pays the full start-up. The same change measured
+     * +17.1% on an EPYC 9B14 and -8.9% on a Xeon 8481C, twice each, which is
+     * not a tie to be broken by argument.
+     *
+     * The test costs one predictable branch on a path that runs once per value.
+     */
+    cmpb    $0, KEVA_NAME(keva_fsrm)(%rip)
+    je      L(lit_b16)
+    rep movsb
+    jmp     L(lit_done)
+
 L(lit_b16):
     cmp     $16, %rcx
     jb      L(lit_tail)

@@ -60,6 +60,13 @@ pub struct Features {
     /// `pshufb` instead of growing it a byte at a time, so this is worth
     /// dispatching on even though every server part since 2007 has it.
     pub ssse3: bool,
+    /// Fast Short REP MOV. Ice Lake and later make a short `rep movsb` genuinely
+    /// short; Zen has ERMSB but not that, and pays tens of cycles of start-up on
+    /// the same copy. The decoder's last literal run is copied one way or the
+    /// other depending on this, and it is worth 17% on an EPYC and -9% on a
+    /// Xeon -- the same change, opposite signs, which is why it is asked rather
+    /// than chosen.
+    pub fsrm: bool,
     pub avx2: bool,
     pub avx512f: bool,
     pub neon: bool,
@@ -99,6 +106,11 @@ pub fn best_isa() -> Isa {
     features().best()
 }
 
+/// Read by the x86 decoder, which cannot ask Rust.
+#[cfg(target_arch = "x86_64")]
+#[no_mangle]
+pub static mut keva_fsrm: u8 = 0;
+
 fn detect() -> Features {
     let mut f = Features::default();
 
@@ -108,6 +120,16 @@ fn detect() -> Features {
         // it is recorded explicitly so `INFO` output stays self-describing.
         f.sse2 = true;
         f.ssse3 = std::arch::is_x86_feature_detected!("ssse3");
+        // No `is_x86_feature_detected!` name for this one; it is CPUID leaf 7,
+        // sub-leaf 0, EDX bit 4. The leaf itself exists on everything that has
+        // SSSE3, so no maximum-leaf check is needed here.
+        // SAFETY: CPUID with a leaf every x86-64 part supports.
+        f.fsrm = unsafe { std::arch::x86_64::__cpuid_count(7, 0).edx & (1 << 4) != 0 };
+        // The kernels cannot call back into Rust, so the answer is left where
+        // they can read it. Written once, from the same lazy initialisation
+        // that fills this struct.
+        // SAFETY: single write of a byte during the one-time init below.
+        unsafe { keva_fsrm = f.fsrm as u8 };
         f.avx2 = std::arch::is_x86_feature_detected!("avx2");
         f.avx512f = std::arch::is_x86_feature_detected!("avx512f");
     }
@@ -152,6 +174,7 @@ mod tests {
         let f = Features {
             sse2: true,
             ssse3: true,
+            fsrm: false,
             avx2: true,
             avx512f: true,
             ..Features::default()
