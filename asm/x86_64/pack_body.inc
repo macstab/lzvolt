@@ -152,31 +152,48 @@ L_(scan):
     /* common_prefix(candidate + 4, at + 4): eight bytes at a time, and the
      * first differing byte is the lowest set bit of the xor because the loads
      * are little-endian. */
+    /*
+     * Shaped after liblz4's, which was read rather than guessed at. The first
+     * form recomputed the bound at the top of every iteration with an lea and
+     * a compare, then closed with an unconditional jmp -- eight instructions,
+     * two of them address arithmetic the loads had to wait behind, and one
+     * doing no work at all.
+     *
+     * Here the bound is a loop-invariant address formed once, the cursors are
+     * pointers rather than an index, and the test sits at the bottom where it
+     * fuses with the branch that closes the loop. Seven instructions, the
+     * loads issue on entry, and nothing is recomputed.
+     */
     lea     4(%r15,%rdx), %rdi              /* a */
     lea     4(%r15,%r13), %r9               /* b */
+    mov     %r9, %rbx                       /* where the run starts */
     mov     PACK_SRC_END(%rsp), %r8
-    xor     %eax, %eax
-1:  lea     8(%r9,%rax), %rcx
-    cmp     %r8, %rcx
+    sub     $8, %r8                         /* last address a whole word starts at */
+    cmp     %r8, %r9
     ja      2f
-    mov     (%rdi,%rax), %rcx
-    xor     (%r9,%rax), %rcx
+1:  mov     (%rdi), %rcx
+    xor     (%r9), %rcx
     jnz     3f
-    add     $8, %rax
-    jmp     1b
-3:  bsf     %rcx, %rcx
+    add     $8, %rdi
+    add     $8, %r9
+    cmp     %r8, %r9
+    jbe     1b
+    jmp     2f
+3:  bsf     %rcx, %rcx                      /* little-endian: the lowest set bit */
     shr     $3, %rcx
-    add     %rcx, %rax
+    add     %rcx, %r9
     jmp     4f
-2:  lea     (%r9,%rax), %rcx
-    cmp     %r8, %rcx
+2:  add     $8, %r8                         /* the end itself, for the tail */
+5:  cmp     %r8, %r9
     jae     4f
-    mov     (%rdi,%rax), %cl
-    cmp     (%r9,%rax), %cl
+    mov     (%rdi), %cl
+    cmp     (%r9), %cl
     jne     4f
-    inc     %rax
-    jmp     2b
-4:  add     $4, %rax                        /* matched = MIN_MATCH + run */
+    inc     %rdi
+    inc     %r9
+    jmp     5b
+4:  sub     %rbx, %r9
+    lea     4(%r9), %rax                    /* matched = MIN_MATCH + run */
 
     /*
      * Lazy. The first match found is not always the one worth taking: a
