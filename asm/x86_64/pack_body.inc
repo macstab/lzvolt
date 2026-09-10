@@ -1,0 +1,509 @@
+/*
+ * One instantiation of the packer's pass. Included four times by pack.S.
+ *
+ * Parameters, every one of them an immediate by the time it reaches an
+ * instruction:
+ *
+ *   PACK_PFX        label prefix, unique per instantiation
+ *   PACK_HSHIFT     52 (twelve table bits) or 53 (eleven, above 8 KiB)
+ *   PACK_LIT_MAX    15 for the even split, 3 for the wide one
+ *   PACK_MAT_MAX    15 or 63
+ *   PACK_TOK_SHIFT  how far up the token the literal field sits: 4 or 6
+ *   PACK_ADAPTIVE   1 in an even body, 0 in a wide one
+ *   PACK_SWITCH_TO  the wide body's emit entry, for when the split changes
+ *
+ * # Why four copies rather than four registers
+ *
+ * The Rust packer makes the same choice for the same reason (pack.rs:734-745):
+ * x86 has no register-to-register variable shift outside BMI2, so a shift held
+ * in a value has to sit in CL -- and CL is wanted two instructions later for
+ * the candidate, so the generated code reloaded it on every position visited.
+ * As an immediate it is `shrq $52` and CL stays free. The split's three fields
+ * go the same way, which is also what the decoder does with its two.
+ *
+ * # The register map, and why it is identical in all four
+ *
+ *   r15 src        r14 table      r13 at         r12 next_at
+ *   rbx misses     rbp out-p      r11 last       r10 literal_start
+ *   rsi hash mult
+ *   rax rcx rdx rdi r9 r8   temps
+ *
+ * Fixed across the four so the even body can jump straight into the wide one
+ * when the split changes: nothing is marshalled at the boundary, the two
+ * bodies simply continue with the same state in the same places.
+ *
+ * # What is on the stack, and why that is not a violation of register-only
+ *
+ * `recent`, `seen`, the switch positions and the header length live in the
+ * frame. Every one of them is touched once per *block* -- on the emit path,
+ * which a value enters once per match -- and never once per position. The
+ * search loop below does not read or write memory except the input and the
+ * table, which are the data. Holding a per-block counter in a register would
+ * cost the match path a temp it needs, and the match path is where the temps
+ * are actually scarce.
+ *
+ * `misses` is reset after the block is written rather than before it, which is
+ * equivalent -- nothing between the two reads it -- and buys the emit path a
+ * fifth temp. `next_at` is dead from the moment a match is confirmed until it
+ * is reassigned, so it is a temp there too.
+ */
+
+#define PLBL(p, n) KEVA_LABEL(p, n)
+#define L_(n) PLBL(PACK_PFX, n)
+
+/*
+ * The search. One position per iteration, and almost every one is rejected, so
+ * what matters here is the order the questions are asked in.
+ */
+    .p2align 4
+L_(scan):
+    /* at = next_at; next_at = at + (misses >> SKIP_TRIGGER)
+     *
+     * The advance sits before the probe rather than after it, so the address
+     * this iteration loads from was formed during the last one and does not
+     * wait on the branch that closed it. */
+    mov     %r12, %r13
+    mov     %rbx, %rax
+    shr     $5, %rax                        /* SKIP_TRIGGER */
+    lea     (%r13,%rax), %r12
+    cmp     %r11, %r13
+    ja      L_(tail)
+
+    /* One load, not two. The four bytes a candidate is rejected on are the low
+     * half of the eight the hash reads, at the same address, so taking them
+     * from the register is exact and saves a load per position. */
+    mov     (%r15,%r13), %rax               /* word8(at) */
+    mov     %rax, %rdx
+    shl     $24, %rdx                       /* hash5 reads five of the eight */
+    imul    %rsi, %rdx
+    shr     $PACK_HSHIFT, %rdx
+
+    mov     (%r14,%rdx,4), %ecx             /* stored */
+    mov     %r13d, (%r14,%rdx,4)            /* table[slot] = at */
+
+    /* Three questions, one of which the sentinel already answered. EMPTY is
+     * 0x80000000, far above any reachable position, so "this slot was never
+     * written" fails the same unsigned compare as "this candidate is not
+     * behind the cursor". There is no empty test in this loop. */
+    cmp     %r13, %rcx
+    jae     L_(miss)
+    mov     %r13, %rdx
+    sub     %rcx, %rdx
+    cmp     $65535, %rdx                    /* MAX_OFFSET */
+    ja      L_(miss)
+    cmp     (%r15,%rcx), %eax               /* word4(candidate) == here */
+    jne     L_(miss)
+
+    /*
+     * A match. From here the position is committed, so next_at (r12) and
+     * misses (rbx) are dead and serve as temps until they are reassigned.
+     *
+     * rdx holds the candidate and rax the match length for the rest of this
+     * block; everything else is scratch.
+     */
+    mov     %rcx, %rdx                      /* candidate */
+
+    /* common_prefix(candidate + 4, at + 4): eight bytes at a time, and the
+     * first differing byte is the lowest set bit of the xor because the loads
+     * are little-endian. */
+    lea     4(%r15,%rdx), %rdi              /* a */
+    lea     4(%r15,%r13), %r9               /* b */
+    mov     PACK_SRC_END(%rsp), %r8
+    xor     %eax, %eax
+1:  lea     8(%r9,%rax), %rcx
+    cmp     %r8, %rcx
+    ja      2f
+    mov     (%rdi,%rax), %rcx
+    xor     (%r9,%rax), %rcx
+    jnz     3f
+    add     $8, %rax
+    jmp     1b
+3:  bsf     %rcx, %rcx
+    shr     $3, %rcx
+    add     %rcx, %rax
+    jmp     4f
+2:  lea     (%r9,%rax), %rcx
+    cmp     %r8, %rcx
+    jae     4f
+    mov     (%rdi,%rax), %cl
+    cmp     (%r9,%rax), %cl
+    jne     4f
+    inc     %rax
+    jmp     2b
+4:  add     $4, %rax                        /* matched = MIN_MATCH + run */
+
+    /*
+     * Lazy. The first match found is not always the one worth taking: a
+     * four-byte match here hides a forty-byte one a byte later, and a longer
+     * match is one block instead of two, which is what the decoder is paid by.
+     *
+     * Gated at LAZY_UNTIL because once the match is long the second search is
+     * nearly always wasted -- on 64 KiB of `varied` it runs 4138 times and
+     * wins 521.
+     */
+    cmp     $16, %rax                       /* LAZY_UNTIL */
+    jae     L_(lazy_done)
+
+L_(lazy):
+    lea     1(%r13), %rcx                   /* next = at + LAZY_REACH */
+    cmp     %r11, %rcx
+    ja      L_(lazy_done)
+
+    mov     (%r15,%rcx), %r12               /* word8(next) */
+    mov     %r12, %rbx
+    shl     $24, %rbx
+    imul    %rsi, %rbx
+    shr     $PACK_HSHIFT, %rbx
+
+    mov     (%r14,%rbx,4), %edi             /* other */
+    mov     %ecx, (%r14,%rbx,4)             /* inserted whether or not it wins */
+
+    cmp     %rcx, %rdi
+    jae     L_(lazy_done)
+    mov     %rcx, %rbx
+    sub     %rdi, %rbx
+    cmp     $65535, %rbx
+    ja      L_(lazy_done)
+    cmp     (%r15,%rdi), %r12d              /* word4(other) == word4(next) */
+    jne     L_(lazy_done)
+
+    /* Its length, measured the same way. rax and rdx must survive, so this
+     * runs on rbx, r8, r9 and r12 with the count in r9. */
+    lea     4(%r15,%rdi), %rbx              /* a */
+    lea     4(%r15,%rcx), %r12              /* b */
+    mov     PACK_SRC_END(%rsp), %r8
+    xor     %r9d, %r9d
+1:  lea     8(%r12,%r9), %rdi
+    cmp     %r8, %rdi
+    ja      2f
+    mov     (%rbx,%r9), %rdi
+    xor     (%r12,%r9), %rdi
+    jnz     3f
+    add     $8, %r9
+    jmp     1b
+3:  bsf     %rdi, %rdi
+    shr     $3, %rdi
+    add     %rdi, %r9
+    jmp     4f
+2:  lea     (%r12,%r9), %rdi
+    cmp     %r8, %rdi
+    jae     4f
+    mov     (%rbx,%r9), %dil
+    cmp     (%r12,%r9), %dil
+    jne     4f
+    inc     %r9
+    jmp     2b
+4:  add     $4, %r9                         /* len */
+
+    /* Strictly longer, and by enough to pay for the literals the step turns
+     * loose. With LAZY_REACH at one, `len > matched + step - 1` is `len >
+     * matched`. */
+    cmp     %rax, %r9
+    jbe     L_(lazy_done)
+    mov     %r9, %rax                       /* matched = len */
+    /* candidate = other. The length loop needed every temp there was and
+     * consumed the register `other` arrived in, so it is recovered from the
+     * pointer that loop was already carrying: rbx is `src + other + 4`. */
+    lea     -4(%rbx), %rdx
+    sub     %r15, %rdx
+    mov     %rcx, %r13                      /* at = next */
+    /* Unconditionally, and that is not an oversight: the LAZY_UNTIL gate is
+     * asked once, before the loop is entered, and `continue 'lazy` in the Rust
+     * jumps past it. A step that wins keeps stepping however long the match has
+     * become, which terminates because every round demands a strictly longer
+     * match than the last. Re-asking the gate here stopped the walk early and
+     * moved offsets by one wherever it did. */
+    jmp     L_(lazy)
+
+L_(lazy_done):
+
+    /*
+     * Walk the match backwards into the literals that were about to be
+     * emitted. Those bytes are already known to be equal -- the search only
+     * ever moves forward, so it never looked at them.
+     *
+     * Worth more than the ratio it adds: a byte moved out of a literal run and
+     * into a match is one the decoder copies in a block rather than one at a
+     * time, and it shortens the run instead of splitting it, so the value ends
+     * up with fewer and longer blocks.
+     */
+    xor     %r12d, %r12d                    /* back = 0 */
+L_(back):
+    cmp     %r12, %rdx                      /* candidate > back */
+    jbe     L_(back_done)
+    mov     %r13, %rcx
+    sub     %r12, %rcx                      /* at - back */
+    cmp     %r10, %rcx                      /* > literal_start */
+    jbe     L_(back_done)
+    mov     %rdx, %rdi
+    sub     %r12, %rdi                      /* candidate - back */
+    mov     -1(%r15,%rdi), %r9b
+    cmp     -1(%r15,%rcx), %r9b
+    jne     L_(back_done)
+    inc     %r12
+    jmp     L_(back)
+L_(back_done):
+
+    /* match_extra = matched + back - MIN_MATCH, which is the field that
+     * overflows and therefore the one the split argues about. */
+    lea     -4(%rax,%r12), %rcx
+
+#if PACK_ADAPTIVE
+    /*
+     * The split decision, taken before this block is written so the block
+     * already uses the split it argued for.
+     *
+     * A running window rather than a total: a value is not required to have
+     * one character throughout, and a decision taken over the whole of it gets
+     * a document with a blob in the middle wrong whichever way it goes.
+     */
+    /*
+     * The window is carried as a count rather than recomputed from the bits.
+     * `popcnt` would say it in one instruction and is not in the x86-64
+     * baseline -- it arrives with SSE4.2 -- and asking for it would put a
+     * feature test in front of a packer that otherwise needs none. Keeping the
+     * count incrementally is cheaper than the instruction anyway: the bit
+     * leaving the window is the one at the top of the mask, and the bit
+     * entering is the block just judged.
+     */
+    mov     PACK_RECENT(%rsp), %rdi
+    mov     %rdi, %r9
+    shr     $15, %r9
+    and     $1, %r9d                        /* the bit leaving the window */
+    add     %rdi, %rdi                      /* recent <<= 1 */
+    cmp     $PACK_MAT_MAX, %rcx
+    jb      5f
+    inc     %rdi                            /* | overflowed */
+    dec     %r9                             /* entering, so net +1 */
+5:  and     $0xFFFF, %edi
+    mov     %rdi, PACK_RECENT(%rsp)
+    mov     PACK_COUNT(%rsp), %rdi
+    sub     %r9, %rdi
+    mov     %rdi, PACK_COUNT(%rsp)
+    mov     PACK_SEEN(%rsp), %r9
+    inc     %r9
+    mov     %r9, PACK_SEEN(%rsp)
+    cmp     $16, %r9                        /* SPLIT_WINDOW */
+    jb      6f
+    cmp     $8, %rdi                        /* count * 2 > SPLIT_WINDOW */
+    jbe     6f
+    /* The trailer's two fields are fixed width, so a switch is only taken
+     * where both positions can be represented. The window sits at the front of
+     * the value, so this holds in practice; it is tested rather than argued
+     * because the width cannot say more. */
+    mov     %rbp, %r9
+    sub     PACK_OUT_BASE(%rsp), %r9
+    sub     PACK_HEADER_LEN(%rsp), %r9      /* cur.len() - header_len */
+    cmp     PACK_SWITCH_CAP(%rsp), %r9
+    jae     6f
+    cmp     PACK_SWITCH_CAP(%rsp), %r10     /* literal_start */
+    jae     6f
+    mov     %r9, PACK_SWITCH_IN(%rsp)
+    mov     %r10, PACK_SWITCH_OUT(%rsp)
+    movq    $1, PACK_HAVE_SWITCH(%rsp)
+    jmp     PACK_SWITCH_TO
+6:
+#endif
+
+L_(emit):
+    /*
+     * The block. rax is the match length, rdx the candidate, r12 the backward
+     * extension and rcx the match extra; everything else here is scratch.
+     */
+    mov     %r13, %rdi
+    sub     %r12, %rdi                      /* lit_end = at - back */
+    mov     %rdi, %r9
+    sub     %r10, %r9                       /* lit_len */
+
+    /* Whether the run can be copied at a fixed width. The run is a slice of
+     * the input, so reading past it has to stay inside the input. */
+    add     $16, %rdi                       /* WIDE_LITERAL */
+    cmp     PACK_SRC_LEN(%rsp), %rdi
+    setbe   %dil
+    movzbl  %dil, %edi
+    cmp     $16, %r9
+    jbe     7f
+    xor     %edi, %edi                      /* too long for the fixed width */
+7:
+
+    /* token = min(lit_len, LIT_MAX) << TOK_SHIFT | min(match_extra, MAT_MAX) */
+    mov     $PACK_LIT_MAX, %r8
+    cmp     %r8, %r9
+    cmovb   %r9, %r8
+    shl     $PACK_TOK_SHIFT, %r8
+    mov     $PACK_MAT_MAX, %rbx
+    cmp     %rbx, %rcx
+    cmovb   %rcx, %rbx
+    or      %rbx, %r8
+    mov     %r8b, (%rbp)
+    inc     %rbp
+
+    /* An extended literal length: 255s until a byte that is not one. */
+    cmp     $PACK_LIT_MAX, %r9
+    jb      9f
+    mov     %r9, %r8
+    sub     $PACK_LIT_MAX, %r8
+8:  cmp     $255, %r8
+    jb      10f
+    movb    $255, (%rbp)
+    inc     %rbp
+    sub     $255, %r8
+    jmp     8b
+10: mov     %r8b, (%rbp)
+    inc     %rbp
+9:
+
+    /* The literals. `extend_from_slice` is a call to memmove with a length the
+     * compiler cannot see, and a run averages six bytes, so the call costs
+     * more than the copy -- profiling put 19.5% of the Rust packer there. */
+    lea     (%r15,%r10), %rbx               /* source */
+    test    %rdi, %rdi
+    jz      11f
+    movdqu  (%rbx), %xmm0
+    movdqu  %xmm0, (%rbp)
+    add     %r9, %rbp
+    jmp     14f
+11: cmp     $16, %r9
+    jb      12f
+    movdqu  (%rbx), %xmm0
+    movdqu  %xmm0, (%rbp)
+    add     $16, %rbx
+    add     $16, %rbp
+    sub     $16, %r9
+    jmp     11b
+12: test    $8, %r9b
+    jz      13f
+    mov     (%rbx), %r8
+    mov     %r8, (%rbp)
+    add     $8, %rbx
+    add     $8, %rbp
+13: test    $4, %r9b
+    jz      15f
+    mov     (%rbx), %r8d
+    mov     %r8d, (%rbp)
+    add     $4, %rbx
+    add     $4, %rbp
+15: test    $2, %r9b
+    jz      16f
+    movzwl  (%rbx), %r8d
+    mov     %r8w, (%rbp)
+    add     $2, %rbx
+    add     $2, %rbp
+16: test    $1, %r9b
+    jz      14f
+    mov     (%rbx), %r8b
+    mov     %r8b, (%rbp)
+    inc     %rbp
+14:
+
+    /* The offset, always two bytes. */
+    mov     %r13, %r8
+    sub     %rdx, %r8
+    mov     %r8w, (%rbp)
+    add     $2, %rbp
+
+    /* An extended match length, the same chain. */
+    cmp     $PACK_MAT_MAX, %rcx
+    jb      18f
+    sub     $PACK_MAT_MAX, %rcx
+17: cmp     $255, %rcx
+    jb      19f
+    movb    $255, (%rbp)
+    inc     %rbp
+    sub     $255, %rcx
+    jmp     17b
+19: mov     %cl, (%rbp)
+    inc     %rbp
+18:
+
+    /* at += matched; next_at = at; literal_start = at */
+    add     %rax, %r13
+    mov     %r13, %r12
+    mov     %r13, %r10
+    mov     $32, %rbx                       /* misses = 1 << SKIP_TRIGGER */
+
+    /*
+     * No early bail-out, deliberately, though one would be sound: once the
+     * output has reached the input length the answer is already 0 whatever
+     * follows, since the output only grows.
+     *
+     * It is left out because it would not be *identical*. Stopping early
+     * leaves the table with fewer insertions than the Rust packer's, and the
+     * table is carried across values -- so the next value would be searched
+     * against a different table and could pack differently. The byte-for-byte
+     * test would then fail on a value that is not the one that diverged. The
+     * caller sizes the output for the worst case instead, exactly as
+     * `Cursor::room` does on the Rust side.
+     */
+    jmp     L_(scan)
+
+L_(miss):
+    inc     %rbx
+    jmp     L_(scan)
+
+    /*
+     * Everything left over is literals with no match to follow. A zero match
+     * field and no offset behind it is what marks the tail; the decoder stops
+     * because the declared length has been produced.
+     */
+L_(tail):
+    mov     PACK_SRC_LEN(%rsp), %r9
+    sub     %r10, %r9                       /* lit_len */
+    mov     $PACK_LIT_MAX, %r8
+    cmp     %r8, %r9
+    cmovb   %r9, %r8
+    shl     $PACK_TOK_SHIFT, %r8
+    mov     %r8b, (%rbp)
+    inc     %rbp
+
+    cmp     $PACK_LIT_MAX, %r9
+    jb      21f
+    mov     %r9, %r8
+    sub     $PACK_LIT_MAX, %r8
+20: cmp     $255, %r8
+    jb      22f
+    movb    $255, (%rbp)
+    inc     %rbp
+    sub     $255, %r8
+    jmp     20b
+22: mov     %r8b, (%rbp)
+    inc     %rbp
+21:
+
+    lea     (%r15,%r10), %rbx
+23: cmp     $16, %r9
+    jb      24f
+    movdqu  (%rbx), %xmm0
+    movdqu  %xmm0, (%rbp)
+    add     $16, %rbx
+    add     $16, %rbp
+    sub     $16, %r9
+    jmp     23b
+24: test    $8, %r9b
+    jz      25f
+    mov     (%rbx), %r8
+    mov     %r8, (%rbp)
+    add     $8, %rbx
+    add     $8, %rbp
+25: test    $4, %r9b
+    jz      26f
+    mov     (%rbx), %r8d
+    mov     %r8d, (%rbp)
+    add     $4, %rbx
+    add     $4, %rbp
+26: test    $2, %r9b
+    jz      27f
+    movzwl  (%rbx), %r8d
+    mov     %r8w, (%rbp)
+    add     $2, %rbx
+    add     $2, %rbp
+27: test    $1, %r9b
+    jz      28f
+    mov     (%rbx), %r8b
+    mov     %r8b, (%rbp)
+    inc     %rbp
+28:
+    jmp     KEVA_LABEL(pack, finish)
+
+#undef L_
+#undef PLBL

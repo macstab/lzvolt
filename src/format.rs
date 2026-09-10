@@ -226,8 +226,29 @@ impl Packer {
 
     /// Pack `input` into `out`. See [`pack`] for the contract.
     pub fn pack(&mut self, input: &[u8], out: &mut Vec<u8>) -> bool {
-        pack_with(input, out, &mut self.table)
+        pack_dispatch(input, out, &mut self.table)
     }
+}
+
+/// The kernel where this target has one that implements the production pass,
+/// and the portable packer otherwise.
+///
+/// There is no fallback behind this. The kernel answers 0 for exactly the cases
+/// [`pack_with`] answers `false` for -- a value shorter than the hash word, one
+/// the probe writes off, and one whose output did not come out smaller -- so a
+/// declined pack is an answer, not a request to try again in another language.
+/// The byte-for-byte test is what makes that safe to rely on.
+///
+/// AArch64 is deliberately not routed here. Its kernel implements the eager,
+/// fixed-split search rather than this one, so it would pack correctly and
+/// differently, and a store whose compressed form depends on which machine
+/// wrote it is a store that cannot be replicated.
+#[inline]
+fn pack_dispatch(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> bool {
+    if keva_asm::pack_find::kernel_is_production_packer() {
+        return keva_asm::pack_find::pack_asm(input, out, table.as_mut_slice()).is_some();
+    }
+    pack_with(input, out, table)
 }
 
 /// Why a packed value could not be read back.
@@ -448,7 +469,7 @@ fn get_extended(input: &[u8], at: &mut usize) -> Result<usize, PackError> {
 /// attempt and nothing else.
 pub fn pack(input: &[u8], out: &mut Vec<u8>) -> bool {
     let mut table = Box::new([EMPTY; HASH_SIZE]);
-    pack_with(input, out, &mut table)
+    pack_dispatch(input, out, &mut table)
 }
 
 /// How far the probe reads before writing a value off, and how many slots it
@@ -2462,18 +2483,31 @@ mod tests {
         let mut asm_table = keva_asm::pack_find::new_table();
         let mut round_trip = Vec::new();
 
+        // Which portable packer this kernel is the counterpart of. The two are
+        // not the same: AArch64 implements the eager, fixed-split search and
+        // must be diffed against the reference that matches it, while the
+        // x86-64 kernel implements the production pass and is diffed against
+        // the packer that actually runs. Diffing either against the other's
+        // reference would compare two different algorithms and could only pass
+        // by accident.
+        let production = keva_asm::pack_find::kernel_is_production_packer();
+
         for input in &cases {
-            // Against the eager reference, because that is the search the kernel
-            // implements. See LAZY.
-            let rust_kept = pack_with_eager(input, &mut rust_out, &mut rust_table);
+            let rust_kept = if production {
+                pack_with(input, &mut rust_out, &mut rust_table)
+            } else {
+                pack_with_eager(input, &mut rust_out, &mut rust_table)
+            };
             let asm_kept =
                 keva_asm::pack_find::pack_asm(input, &mut asm_out, &mut asm_table).is_some();
 
-            // The kernel writes the even split only. Where the portable packer
-            // chose the wide match it also made a second pass over the table,
-            // so the two tables no longer hold the same thing -- both are reset
-            // rather than letting the divergence follow into later cases.
-            if rust_kept {
+            // The eager kernel writes the even split only. Where the portable
+            // packer chose the wide match it also made a second pass over the
+            // table, so the two tables no longer hold the same thing -- both are
+            // reset rather than letting the divergence follow into later cases.
+            // The production kernel writes every split, so it has nothing to
+            // skip.
+            if rust_kept && !production {
                 let (raw, _) = get_varint(&rust_out).expect("a header");
                 if Split::from_header(raw) != EVEN {
                     rust_table.fill(EMPTY);
@@ -2500,6 +2534,119 @@ mod tests {
                 assert_eq!(&round_trip, input, "assembly output lost bytes");
             }
         }
+    }
+
+    /// The kernel is assembled four times -- two splits by two table widths --
+    /// and a diff that only ever reaches one of them is a diff that proves
+    /// nothing about the other three.
+    ///
+    /// So this walks a randomised corpus and *counts* which bodies it entered,
+    /// failing if any stayed cold. Coverage asserted rather than assumed: the
+    /// eager corpus above reached the wide split on none of its cases for a
+    /// while, and the test stayed green through a change that moved 4 KiB of
+    /// output by 94 bytes.
+    #[test]
+    fn every_assembled_body_is_reached_and_agrees() {
+        if !keva_asm::pack_find::asm_available() || !keva_asm::pack_find::kernel_is_production_packer()
+        {
+            return;
+        }
+
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        // Shapes chosen to straddle the two thresholds the kernel branches on:
+        // NARROW_TABLE_ABOVE picks the table width, and how often the match
+        // field overflows decides whether the split changes partway.
+        let mut cases: Vec<Vec<u8>> = Vec::new();
+        for &size in &[512usize, 2049, 4096, 8192, 8193, 20_000, 65_536] {
+            // Long matches, which overflow a four-bit match field and are what
+            // drives the stream into the wide split.
+            let mut runs = Vec::with_capacity(size);
+            while runs.len() < size {
+                let n = 20 + (next() % 200) as usize;
+                let b = (next() % 7) as u8 + b'a';
+                runs.extend(std::iter::repeat(b).take(n));
+            }
+            runs.truncate(size);
+            cases.push(runs);
+
+            // Short matches and long literal runs, which keep the even split.
+            let mut mixed = Vec::with_capacity(size);
+            let mut i = 0u64;
+            while mixed.len() < size {
+                mixed.extend_from_slice(
+                    format!("{{\"id\":{},\"v\":\"{:x}\"}}", i % 32, next() & 0xFFFF).as_bytes(),
+                );
+                i += 1;
+            }
+            mixed.truncate(size);
+            cases.push(mixed);
+
+            // A literal run past 255, which is the chain the extended length
+            // field encodes, followed by something that matches.
+            let mut long_lit: Vec<u8> = (0..size.min(600)).map(|_| next() as u8).collect();
+            long_lit.extend_from_slice(&long_lit.clone());
+            cases.push(long_lit);
+        }
+
+        let mut seen_even = 0usize;
+        let mut seen_hybrid = 0usize;
+        let mut seen_narrow = 0usize;
+        let mut seen_wide_table = 0usize;
+
+        let mut rust_out = Vec::new();
+        let mut asm_out = Vec::new();
+        let mut rust_table = Box::new([EMPTY; HASH_SIZE]);
+        let mut asm_table = keva_asm::pack_find::new_table();
+        let mut round_trip = Vec::new();
+
+        for input in &cases {
+            let rust_kept = pack_with(input, &mut rust_out, &mut rust_table);
+            let asm_kept =
+                keva_asm::pack_find::pack_asm(input, &mut asm_out, &mut asm_table).is_some();
+
+            assert_eq!(
+                rust_kept,
+                asm_kept,
+                "disagreed on whether packing helped for {} bytes",
+                input.len()
+            );
+
+            if !rust_kept {
+                continue;
+            }
+            assert_eq!(
+                rust_out,
+                asm_out,
+                "different encodings for the same {} byte input",
+                input.len()
+            );
+            unpack(&asm_out, &mut round_trip).expect("assembly output must unpack");
+            assert_eq!(&round_trip, input, "assembly output lost bytes");
+
+            let (raw, _) = get_varint(&asm_out).expect("a header");
+            if raw & HYBRID_BIT == HYBRID_BIT {
+                seen_hybrid += 1;
+            } else if Split::from_header(raw) == EVEN {
+                seen_even += 1;
+            }
+            if input.len() > NARROW_TABLE_ABOVE {
+                seen_narrow += 1;
+            } else {
+                seen_wide_table += 1;
+            }
+        }
+
+        assert!(seen_even > 0, "no case stayed in the even split");
+        assert!(seen_hybrid > 0, "no case changed split, so the wide bodies and the trailer went untested");
+        assert!(seen_wide_table > 0, "no case used the twelve-bit table");
+        assert!(seen_narrow > 0, "no case used the eleven-bit table");
     }
 
     #[test]

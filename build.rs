@@ -19,6 +19,7 @@ fn main() {
         ],
         "x86_64" => &[
             "asm/x86_64/ctrl_match.S",
+            "asm/x86_64/pack.S",
             "asm/x86_64/unpack.S",
             "asm/x86_64/unpack_wide.S",
             "asm/x86_64/unpack_ssse3.S",

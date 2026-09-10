@@ -85,7 +85,10 @@ pub fn new_table() -> Vec<u32> {
 #[cfg(all(keva_asm, target_arch = "aarch64"))]
 extern "C" {
     fn keva_pack_find(input: *const u8, len: usize, table: *mut u32, state: *mut PackState);
+}
 
+#[cfg(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+extern "C" {
     fn keva_pack(
         src: *const u8,
         src_len: usize,
@@ -93,6 +96,22 @@ extern "C" {
         dst_cap: usize,
         table: *mut u32,
     ) -> u32;
+}
+
+/// Output capacity the x86-64 kernel is given, and what it checks for.
+///
+/// The Rust packer's own worst case, `Cursor::room`: the whole input as
+/// literals, a token and an offset for every block, the chains of 255s, and the
+/// overshoot the fixed-width literal move makes. Reserving it up front is what
+/// lets the block writer carry no bounds checks -- the same argument that makes
+/// the Rust packer sound, made once here instead of per store.
+///
+/// The AArch64 kernel is not sized this way. It bails out the moment its output
+/// reaches the input length, so `src_len + 16` is sufficient there, and it is
+/// left alone: changing what that kernel is handed is a separate measurement.
+#[cfg(all(keva_asm, target_arch = "x86_64"))]
+fn room(n: usize) -> usize {
+    n + n / MIN_MATCH * 3 + n / 128 + 16 + 64 + 10
 }
 
 /// Pack `input` into `out` in one call.
@@ -130,14 +149,57 @@ pub fn pack_asm(input: &[u8], out: &mut Vec<u8>, table: &mut [u32]) -> Option<us
 
     // The `return` is not needless, whatever clippy sees: this is a statement
     // block, not the function's tail, and the tail belongs to the other `cfg`.
-    // Dropping it would evaluate `None` and discard it. Only builds that are
-    // not aarch64 compile this arm, so only they see the lint -- which is the
-    // x86-64 CI job, with `-D warnings`.
-    #[cfg(not(all(keva_asm, target_arch = "aarch64")))]
+    // Dropping it would evaluate `None` and discard it.
+    #[cfg(not(all(
+        keva_asm,
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )))]
     #[allow(clippy::needless_return)]
     {
         let _ = (input, out, table);
         return None;
+    }
+
+    // x86-64 gets the reserve without the zero-fill, and that is a difference
+    // between the architectures rather than an oversight. The AArch64 memset
+    // pays for itself because `dc zva` takes ownership of a cache line without
+    // reading it, so it removes a read-for-ownership from every first store
+    // into a line -- worth 12% on a 64 KiB value there. x86-64 has no such
+    // instruction, so the argument does not carry over and the fill would be
+    // pure cost. Whether `rep stosb` reaches the same place by another route is
+    // a question for the GCE run, not an assumption to build in.
+    #[cfg(all(keva_asm, target_arch = "x86_64"))]
+    #[allow(clippy::needless_return)]
+    {
+        out.clear();
+        let want = room(input.len());
+        if out.capacity() < want {
+            out.reserve(want);
+        }
+        let cap = out.capacity();
+
+        // SAFETY: `cap` is the real capacity, so the whole range handed to the
+        // kernel is allocated, and the kernel refuses outright unless `cap`
+        // covers its worst case. `table` is at least `TABLE_SIZE`, which covers
+        // every index the hash can produce.
+        let written = unsafe {
+            keva_pack(
+                input.as_ptr(),
+                input.len(),
+                out.as_mut_ptr(),
+                cap,
+                table.as_mut_ptr(),
+            )
+        } as usize;
+
+        if written == 0 {
+            return None;
+        }
+        assert!(written <= cap, "the kernel reported writing past the buffer");
+        // SAFETY: the kernel wrote `written` bytes from the pointer, and
+        // `written <= cap` was just checked.
+        unsafe { out.set_len(written) };
+        return Some(written);
     }
 
     #[cfg(all(keva_asm, target_arch = "aarch64"))]
@@ -177,9 +239,24 @@ pub fn pack_asm(input: &[u8], out: &mut Vec<u8>, table: &mut [u32]) -> Option<us
     }
 }
 
-/// Whether this build has an assembly kernel for the search.
+/// Whether this build has an assembly kernel for packing.
 pub const fn asm_available() -> bool {
-    cfg!(all(keva_asm, target_arch = "aarch64"))
+    cfg!(all(
+        keva_asm,
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))
+}
+
+/// Which portable packer this target's kernel is the counterpart of.
+///
+/// The two kernels do not implement the same packer, and pretending otherwise
+/// would make the differential test pass by comparing the wrong things. AArch64
+/// implements the eager, fixed-split search and is diffed against the reference
+/// that matches it. x86-64 implements the production pass -- lazy matching, the
+/// backward extension and the adaptive split -- so it is diffed against the
+/// packer that actually runs.
+pub const fn kernel_is_production_packer() -> bool {
+    cfg!(all(keva_asm, target_arch = "x86_64"))
 }
 
 /// Advance the search until it finds a match or runs out of input.
