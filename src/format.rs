@@ -2019,6 +2019,155 @@ mod tests {
         }
     }
 
+    /// A block that is one literal run and nothing else, asked of the kernel
+    /// directly.
+    ///
+    /// This is the shape liblz4 writes for data that does not compress, and it
+    /// needs no liblz4 to construct: a token carrying the literal count, the
+    /// chain of 255s when it does not fit, and then the bytes. It is the same
+    /// encoding [`emit_literals_only`] produces, which is why it can be built
+    /// here.
+    ///
+    /// Worth its own test because it is the one block shape our own packer
+    /// never stores -- a value that does not compress is kept raw, so the only
+    /// way this reaches the decoder is a store migrating from LZ4. Everything
+    /// covering that path goes through `unpack_into`, which falls back to the
+    /// portable decoder without saying so.
+    #[test]
+    fn the_kernel_reads_a_block_that_is_all_literals() {
+        if !keva_asm::unpack::asm_available() {
+            return;
+        }
+
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut noise_byte = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        };
+
+        let mut refused = Vec::new();
+        for n in [
+            1usize, 4, 14, 15, 16, 17, 24, 30, 31, 32, 33, 40, 47, 48, 49, 56, 63, 64, 65, 96, 127,
+            128, 129, 269, 270, 512, 1000, 4096, 65_536,
+        ] {
+            let data: Vec<u8> = (0..n).map(|_| noise_byte()).collect();
+
+            let mut block = Vec::new();
+            block.push((n.min(15) as u8) << 4);
+            if n >= 15 {
+                let mut rest = n - 15;
+                while rest >= 255 {
+                    block.push(255);
+                    rest -= 255;
+                }
+                block.push(rest as u8);
+            }
+            block.extend_from_slice(&data);
+
+            let mut out = vec![0u8; n + keva_asm::unpack::UNPACK_SLACK];
+            if !keva_asm::unpack::unpack_into_slice(
+                &block,
+                &mut out,
+                n,
+                keva_asm::unpack::Split::Even,
+            ) {
+                refused.push(n);
+                continue;
+            }
+            assert_eq!(&out[..n], &data[..], "wrong bytes for a {n}-byte run");
+        }
+
+        assert!(
+            refused.is_empty(),
+            "the kernel refused an all-literal block at these lengths: {refused:?}"
+        );
+    }
+
+    /// The *kernel* must read what liblz4 wrote, not merely the store.
+    ///
+    /// [`our_decoder_reads_what_liblz4_wrote`] goes through `unpack_into`,
+    /// which falls back to the portable decoder the moment the kernel declines.
+    /// So it passes whether the kernel reads an LZ4 block or refuses every one
+    /// of them, and it has been passing while the kernel refused.
+    ///
+    /// That is the failure mode this crate has already paid for once: a kernel
+    /// that merely declines leaves every output-comparing test green, and the
+    /// only thing that noticed was a benchmark assertion on rented hardware.
+    /// This asks the kernel directly, one shape at a time, and says which ones
+    /// it refused.
+    #[cfg(feature = "liblz4")]
+    #[test]
+    fn the_kernel_itself_reads_what_liblz4_wrote() {
+        if !keva_asm::unpack::asm_available() {
+            return;
+        }
+
+        #[link(name = "lz4")]
+        extern "C" {
+            fn LZ4_compress_default(src: *const u8, dst: *mut u8, n: i32, cap: i32) -> i32;
+        }
+
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut noise_byte = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        };
+
+        let mut cases: Vec<(String, Vec<u8>)> = Vec::new();
+        for size in [16usize, 64, 512, 1000, 4096, 65_536] {
+            cases.push((format!("records_{size}"), records(size)));
+            cases.push((format!("runs_{size}"), vec![b'a'; size]));
+            cases.push((
+                format!("noise_{size}"),
+                (0..size).map(|_| noise_byte()).collect(),
+            ));
+        }
+
+        let mut refused = Vec::new();
+        for (label, data) in &cases {
+            let mut block = vec![0u8; data.len() + 1024];
+            let n = unsafe {
+                LZ4_compress_default(
+                    data.as_ptr(),
+                    block.as_mut_ptr(),
+                    data.len() as i32,
+                    block.len() as i32,
+                )
+            };
+            assert!(n > 0, "liblz4 refused {label}");
+            block.truncate(n as usize);
+
+            let mut out = vec![0u8; data.len() + keva_asm::unpack::UNPACK_SLACK];
+            let ok = keva_asm::unpack::unpack_into_slice(
+                &block,
+                &mut out,
+                data.len(),
+                keva_asm::unpack::Split::Even,
+            );
+            if !ok {
+                refused.push(format!("{label} ({} block bytes)", block.len()));
+                continue;
+            }
+            assert_eq!(
+                &out[..data.len()],
+                &data[..],
+                "the kernel decoded {label} to the wrong bytes"
+            );
+        }
+
+        assert!(
+            refused.is_empty(),
+            "the assembly decoder refused {} of {} liblz4 blocks: {}",
+            refused.len(),
+            cases.len(),
+            refused.join(", ")
+        );
+    }
+
     /// Adopting this format needs no flag day, and that is the point of
     /// reading LZ4 at all.
     ///

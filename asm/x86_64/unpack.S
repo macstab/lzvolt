@@ -358,11 +358,31 @@ L(fast_litchain):
     je      L(fast_litchain)
     add     $LIT_MAX, %r10
 
-    /* Past the token's own width the entry guard covers nothing, so the run
-     * and the offset behind it are bounded here, as the checked path does. */
+    /*
+     * Past the token's own width the entry guard covers nothing, so the run
+     * and the offset behind it are bounded here.
+     *
+     * Not reaching means one of two things, and only one of them is an error.
+     * The run may be the last one in the value, which has no offset behind it
+     * at all -- that is how a stream ends. Or the stream is truncated. This
+     * cannot tell them apart cheaply and used to call both a failure, which
+     * refused every block liblz4 writes for data that does not compress: those
+     * are a single literal run covering the whole value, and it ends exactly
+     * where the offset would have been read.
+     *
+     * The entry guard covers the short form of this -- a final run of under
+     * LIT_MAX bytes cannot reach the fast path, because FAST_IN demands more
+     * bytes than such a block contains. It cannot cover this one, since a run
+     * behind an extension chain has no bounded length.
+     *
+     * So hand the block to the checked path, which decodes a final run
+     * correctly and reports a truncated one as the error it is. `r14` still
+     * points at the token -- only `rsi` moved -- and the token itself is
+     * reloaded because the chain above needed `rax`.
+     */
     lea     2(%rsi,%r10,1), %rax
     cmp     %r13, %rax
-    ja      L(fail)
+    ja      L(fast_litend)
     lea     (%rdi,%r10,1), %r8              /* dst after the literals */
     cmp     %r12, %r8
     ja      L(fail)
@@ -709,6 +729,15 @@ L(src_edge):
 L(dst_edge):
     cmp     %r12, %rdi
     jae     L(done)
+    jmp     L(slow)
+
+/*
+ * A literal run in the fast path with no room for an offset behind it. Either
+ * the value's last run or a truncated stream; the checked path knows which.
+ * See the note at the test that sends blocks here.
+ */
+L(fast_litend):
+    movzbl  (%r14), %eax
     jmp     L(slow)
 
     /* ---- exact path ------------------------------------------------- */
