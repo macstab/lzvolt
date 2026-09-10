@@ -53,7 +53,7 @@ QUICK="${QUICK:-0}"
 # not most cells: it has returned 6.02 and 7.53 for the same code in one
 # evening, so a verdict there needs TIME=5 and a revision in front of it to
 # absorb the cold start a fresh machine gives whatever is measured first.
-TIME="${TIME:-2}"
+TIME="${TIME:-1}"
 WARM="${WARM:-1}"
 # Unique per invocation, so two runs at once do not fight over one name --
 # which they did, and the loser reported "already exists" from inside the
@@ -159,7 +159,7 @@ set -uo pipefail
 runs="${1:-3}"
 export KEVA_COMMIT="${2:-unknown}"
 export KEVA_QUICK="${3:-0}"
-export KEVA_TIME="${4:-2}"
+export KEVA_TIME="${4:-1}"
 export KEVA_WARM="${5:-1}"
 report="$HOME/report-$KEVA_COMMIT.txt"
 
@@ -261,20 +261,23 @@ if [ "${KEVA_QUICK:-0}" = 1 ]; then
     #
     # The shapes are the two the work is aimed at and the two that have to not
     # get worse while it happens.
-    echo "== quick: varied_64k and records_64k packing; records_512,"
-    echo "   records_64k and varied_64k decoding identical blocks"
-    # lz4_flex is in it because it is the one actually ahead: on varied_64k it
-    # packs at 1.11 GiB/s where liblz4 manages 0.65, both in Rust, so that is
-    # the number to chase and liblz4 is only the control. Leaving it out meant
-    # four rounds of measuring against the wrong opponent.
+    echo "== quick: every shape, one second a cell"
+    # All sixty cells -- nine shapes packing, six and five decoding, three
+    # implementations each -- at one second of measurement instead of five.
     #
-    # varied is in the decoding set because that is where near matches live --
-    # offsets below thirty-two -- and the shuffle and the inlined near path are
-    # aimed at exactly those. The first quick run measured both against records
-    # shapes only and reported them flat, which said nothing about either.
+    # The time was never in the shapes, it was in Criterion's default: three
+    # seconds of warm-up and five of measurement per cell, about nine seconds
+    # sixty times over. At one second it is two minutes for the whole table.
+    # Cutting shapes therefore saved nothing and only created blind spots --
+    # two changes were called flat this evening against cells they could not
+    # touch.
+    #
+    # This answers "did it move", not "by exactly how much". A cell that swings
+    # five percent between revisions is worth another look at five seconds; one
+    # that does not is decided.
     cargo bench -q -p keva-core --features liblz4 --bench pack -- \
         --measurement-time ${KEVA_TIME:-2} --warm-up-time ${KEVA_WARM:-1} --noplot \
-        'compress3/(keva|liblz4|lz4_flex)/(varied_64k|records_64k)|same_bytes/(keva|liblz4|lz4_flex)/(records_512|records_64k|varied_64k)' \
+        'compress3|own_format|same_bytes' \
         2>&1 | tee "$HOME/run-$KEVA_COMMIT-1.txt" |
         grep -E 'compress3|same_bytes|thrpt' || echo "   quick bench failed"
 else
