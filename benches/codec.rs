@@ -326,14 +326,21 @@ fn same_bytes(c: &mut Criterion) {
     // bytes the fixed cost of a call is 41% of the work, so that difference is
     // most of what such a comparison measures. liblz4 is the like-for-like
     // opponent: also a C call, also a real ABI prologue.
+    // The nine the packing benchmark uses, so the three tables line up shape for
+    // shape and nothing goes unwatched. Noise belongs here even though our
+    // packer declines to pack it: liblz4 writes a literal block for it, and
+    // decoding a literal block is a real measurement of the literal path --
+    // which is the one every incompressible value takes.
     for (label, data) in [
-        ("records_256", records(256)),
         ("records_512", records(512)),
-        ("records_1k", records(1024)),
-        ("varied_4k", varied(4096)),
-        ("varied_64k", varied(65_536)),
+        ("varied_512", varied(512)),
+        ("noise_512", noise(512)),
         ("records_4k", records(4096)),
+        ("varied_4k", varied(4096)),
+        ("noise_4k", noise(4096)),
         ("records_64k", records(65_536)),
+        ("varied_64k", varied(65_536)),
+        ("noise_64k", noise(65_536)),
     ] {
         let mut block = vec![0u8; data.len() + 1024];
         let n = unsafe {
@@ -392,12 +399,16 @@ fn own_format(c: &mut Criterion) {
     }
 
     let mut group = c.benchmark_group("own_format");
+    // Six, not nine, and the missing three are not an oversight: the packer
+    // refuses noise, so there is no body of ours to decode and the cell does
+    // not exist. `same_bytes` covers the literal path for those shapes instead,
+    // on liblz4's block.
     for (label, data) in [
         ("records_512", records(512)),
         ("varied_512", varied(512)),
         ("records_4k", records(4096)),
-        ("records_64k", records(65_536)),
         ("varied_4k", varied(4096)),
+        ("records_64k", records(65_536)),
         ("varied_64k", varied(65_536)),
     ] {
         // Ours: the packed body with the header stripped, so the kernel is
