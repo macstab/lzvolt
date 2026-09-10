@@ -726,6 +726,10 @@ fn pack_pass<const SHIFT: u32>(
     // would make the shift zero and the cursor would sit on the same position
     // for the first sixty-four attempts.
     let mut misses = 1usize << SKIP_TRIGGER;
+    // One probe ahead of `at`, so a miss hands over an address that was formed
+    // a loop earlier. Re-seeded from `at` wherever the cursor jumps for another
+    // reason.
+    let mut next_at = at;
     // The shift is a constant here, not a value, and that is worth a whole
     // instruction per position. It takes exactly two values -- 64 - HASH_BITS
     // or 64 - HASH_BITS_LARGE -- chosen once from the length, but x86 has no
@@ -747,7 +751,17 @@ fn pack_pass<const SHIFT: u32>(
     // `HASH_WORD`, so this does not wrap and the last position visited has a
     // full hash word above it.
     let last = input.len() - HASH_WORD;
-    while at <= last {
+    loop {
+        // The advance sits before the probe, not after it, which is what makes
+        // it a lookahead rather than a rename: the address this iteration loads
+        // from was formed last iteration, so it does not wait on the branch
+        // that closed the last one. lz4_flex writes the same two lines at the
+        // same place.
+        at = next_at;
+        next_at = at + (misses >> SKIP_TRIGGER);
+        if at > last {
+            break;
+        }
         // One load, not two. These were written as `word4(at)` and `word8(at)`
         // and the generated x86 kept them apart:
         //
@@ -838,7 +852,16 @@ fn pack_pass<const SHIFT: u32>(
         };
 
         if matched < MIN_MATCH {
-            at += misses >> SKIP_TRIGGER;
+            // The cursor for the next probe is formed here rather than being
+            // derived from this one at the top, which is what lz4_flex does:
+            //
+            //     cur = next_cur;
+            //     next_cur += step_size;
+            //
+            // Same arithmetic, one iteration earlier. The address the next
+            // probe loads from stops depending on this iteration reaching its
+            // end, so the load can issue while the rest of this block is still
+            // in flight instead of after the branch that closes it.
             misses += 1;
             continue;
         }
@@ -974,6 +997,7 @@ fn pack_pass<const SHIFT: u32>(
         emit_block(literals, at - candidate, matched + back, &mut cur, split, wide);
 
         at += matched;
+        next_at = at;
         literal_start = at;
     }
 
