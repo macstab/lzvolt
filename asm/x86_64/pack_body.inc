@@ -187,13 +187,26 @@ L_(scan):
      * nearly always wasted -- on 64 KiB of `varied` it runs 4138 times and
      * wins 521.
      */
+    /*
+     * The gate, and the lazy block's exits relayed for the same reason the
+     * search loop's are: `lazy_done` sits past the inlined length comparison,
+     * 184 bytes away, so three of the branches leaving here assembled as
+     * six-byte rel32. From a relay directly above the block each of them is a
+     * two-byte backward jump.
+     *
+     * The gate is written as a jump *into* the block rather than out of it, so
+     * the relay is stepped over instead of fallen into.
+     */
     cmp     $16, %rax                       /* LAZY_UNTIL */
-    jae     L_(lazy_done)
+    jb      L_(lazy)
+    jmp     L_(lazy_done)
+L_(to_lazydone):
+    jmp     L_(lazy_done)
 
 L_(lazy):
     lea     1(%r13), %rcx                   /* next = at + LAZY_REACH */
     cmp     %r11, %rcx
-    ja      L_(lazy_done)
+    ja      L_(to_lazydone)
 
     mov     (%r15,%rcx), %r12               /* word8(next) */
     mov     %r12, %rbx
@@ -205,13 +218,13 @@ L_(lazy):
     mov     %ecx, (%r14,%rbx,4)             /* inserted whether or not it wins */
 
     cmp     %rcx, %rdi
-    jae     L_(lazy_done)
+    jae     L_(to_lazydone)
     mov     %rcx, %rbx
     sub     %rdi, %rbx
     cmp     $65535, %rbx
-    ja      L_(lazy_done)
+    ja      L_(to_lazydone)
     cmp     (%r15,%rdi), %r12d              /* word4(other) == word4(next) */
-    jne     L_(lazy_done)
+    jne     L_(to_lazydone)
 
     /* Its length, measured the same way. rax and rdx must survive, so this
      * runs on rbx, r8, r9 and r12 with the count in r9. */
@@ -244,6 +257,10 @@ L_(lazy):
     /* Strictly longer, and by enough to pay for the literals the step turns
      * loose. With LAZY_REACH at one, `len > matched + step - 1` is `len >
      * matched`. */
+    /* Straight to the target, not through the relay above it. This exit sits
+     * past the inlined length comparison and the relay is 155 bytes behind it,
+     * which is outside rel8; `lazy_done` is a few bytes ahead and inside it.
+     * Relays are for the exits at the top of the block, not this one. */
     cmp     %rax, %r9
     jbe     L_(lazy_done)
     mov     %r9, %rax                       /* matched = len */
@@ -367,10 +384,6 @@ L_(emit):
     cmp     PACK_SRC_LEN(%rsp), %rdi
     setbe   %dil
     movzbl  %dil, %edi
-    cmp     $16, %r9
-    jbe     7f
-    xor     %edi, %edi                      /* too long for the fixed width */
-7:
 
     /* token = min(lit_len, LIT_MAX) << TOK_SHIFT | min(match_extra, MAT_MAX) */
     mov     $PACK_LIT_MAX, %r8
@@ -399,25 +412,49 @@ L_(emit):
     inc     %rbp
 9:
 
-    /* The literals. `extend_from_slice` is a call to memmove with a length the
-     * compiler cannot see, and a run averages six bytes, so the call costs
-     * more than the copy -- profiling put 19.5% of the Rust packer there. */
+    /*
+     * The literals, copied a block at a time and never a byte at a time.
+     *
+     * This is what liblz4 does with LZ4_wildCopy: write whole registers past
+     * the end of the run and let the next block overwrite the surplus, rather
+     * than walking a tail down 8, 4, 2, 1. The output can always take it --
+     * `Cursor::room` reserves sixteen bytes and another sixty-four past the
+     * worst case -- so the only thing that has to be bounded is the *source*,
+     * which is the input and ends where it ends.
+     *
+     * `rdi` says a full block past the run is still inside the input. That
+     * covers rounding the run up to whole blocks, since the rounding adds less
+     * than a block. Only a run within sixteen bytes of the input's end fails
+     * it, which is at most the last block of a value, and that one takes the
+     * exact path below.
+     *
+     * The advance is the run's true length, so what the surplus wrote is not
+     * part of the output.
+     */
     lea     (%r15,%r10), %rbx               /* source */
     test    %rdi, %rdi
-    jz      11f
-    movdqu  (%rbx), %xmm0
+    jz      30f
+    lea     (%rbp,%r9), %r8                 /* where the run ends */
+11: movdqu  (%rbx), %xmm0
     movdqu  %xmm0, (%rbp)
-    add     %r9, %rbp
+    add     $16, %rbx
+    add     $16, %rbp
+    cmp     %r8, %rbp
+    jb      11b
+    mov     %r8, %rbp                       /* exact, whatever the surplus wrote */
     jmp     14f
-11: cmp     $16, %r9
-    jb      12f
+
+    /* Within a block of the input's end: bounded on both sides, so this one
+     * does walk a tail. Once per value at most. */
+30: cmp     $16, %r9
+    jb      31f
     movdqu  (%rbx), %xmm0
     movdqu  %xmm0, (%rbp)
     add     $16, %rbx
     add     $16, %rbp
     sub     $16, %r9
-    jmp     11b
-12: test    $8, %r9b
+    jmp     30b
+31: test    $8, %r9b
     jz      13f
     mov     (%rbx), %r8
     mov     %r8, (%rbp)
