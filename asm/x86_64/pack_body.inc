@@ -117,12 +117,23 @@ L_(fast):
     shr     $PACK_HSHIFT, %rdx
     mov     (%r14,%rdx,4), %ecx             /* stored */
     mov     %r13d, (%r14,%rdx,4)            /* table[slot] = at */
-    cmp     %r13, %rcx
+
+    /*
+     * Two questions, one subtraction. Read out of what LLVM generates for the
+     * portable packer, which writes this better than the first version here
+     * did: "is the candidate behind the cursor" and "how far behind" are the
+     * same operation, because `sub` sets the flags itself. So the distance is
+     * formed once and `jbe` on that subtraction rejects a candidate that is
+     * not behind -- the separate compare in front of it was asking something
+     * the subtraction had already answered.
+     *
+     * Five micro-ops become four, in the loop that runs once per byte.
+     */
+    mov     %r13, %rdx
+    sub     %rcx, %rdx                      /* at - candidate, and the flags */
+    jbe     L_(fast_miss)                   /* not behind the cursor */
+    cmp     $0x10000, %rdx                  /* MAX_OFFSET, as a bound */
     jae     L_(fast_miss)
-    mov     %r13d, %edx
-    sub     %rcx, %rdx
-    cmp     $65535, %edx                    /* MAX_OFFSET */
-    ja      L_(fast_miss)
     cmp     (%r15,%rcx), %eax               /* word4(candidate) == here */
     je      L_(to_match)
 
