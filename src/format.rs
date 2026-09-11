@@ -501,7 +501,69 @@ const HASH_WORD: usize = 8;
 /// is 5.018.
 #[inline]
 fn hash5(seq: u64, shift: u32) -> usize {
-    ((seq << 24).wrapping_mul(889_523_592_379u64) >> shift) as usize
+    // The `<< 24` that selects the low five bytes is folded into the constant.
+    // `(x << 24) * M` and `x * (M << 24)` are the same product modulo 2^64, and
+    // the shifted multiplier still fits sixty-four bits, so the shift simply
+    // stops existing -- one operation out of every position the search visits.
+    // Found while writing the assembly kernel; it is not a machine trick and
+    // belongs here just as much.
+    const MULT: u64 = 889_523_592_379u64 << 24;
+    (seq.wrapping_mul(MULT) >> shift) as usize
+}
+
+/// Positions the cursor visits at stride one before it may start skipping.
+///
+/// The same number the miss counter encodes: it starts at its trigger and the
+/// stride is `misses >> SKIP_TRIGGER`, so the first `1 << SKIP_TRIGGER` misses
+/// all advance by one. Written as a span because that is the form the search
+/// actually wants -- see [`pack_pass`].
+const SKIP_SPAN: usize = 1 << SKIP_TRIGGER;
+
+/// One position: hash it, record it, and say what match it offers.
+///
+/// Pulled out of the loop body so the search can run it from two places -- a
+/// stride-one lane and the accelerating loop behind it -- without the body
+/// existing twice in the source. `#[inline(always)]` because it must not be a
+/// call: the whole point of the arrangement is that the lane carries nothing
+/// but a cursor.
+///
+/// Returns `(candidate, 0)` when there is no usable match.
+///
+/// # Safety
+///
+/// `at + HASH_WORD <= input.len()`.
+#[inline(always)]
+unsafe fn probe_at<const SHIFT: u32, S: Slot>(
+    input: &[u8],
+    table: &mut [S; HASH_SIZE],
+    at: usize,
+) -> (usize, usize) {
+    // One load, not two. These were written as `word4(at)` and `word8(at)` and
+    // the generated x86 kept them apart, at a load and an address-generation
+    // slot per position. Both are little-endian reads at the same address, so
+    // the four bytes are the low half of the eight.
+    let word = word8(input, at);
+    let here = word as u32;
+    let slot = hash5(word, SHIFT);
+    let stored = table[slot];
+    table[slot] = S::of(at);
+
+    // A slot holds a position from this value or a previous one, and only
+    // positions behind the cursor are usable. An untouched slot holds the
+    // sentinel, which is far enough ahead of any real position that the same
+    // test rejects it.
+    //
+    // The four bytes are compared before anything else happens: the hash is of
+    // exactly these four, so a candidate that disagrees cannot match at all.
+    let candidate = stored.position();
+    if candidate < at && at - candidate <= MAX_OFFSET && word4(input, candidate) == here {
+        (
+            candidate,
+            MIN_MATCH + common_prefix(input, candidate + MIN_MATCH, at + MIN_MATCH),
+        )
+    } else {
+        (candidate, 0)
+    }
 }
 
 /// The eight bytes at `at`, as one word.
@@ -896,14 +958,10 @@ fn pack_pass<const SHIFT: u32, S: Slot>(
     let mut saturated = 0usize;
     let mut at = 0usize;
     let mut literal_start = 0usize;
-    // Starts at the trigger, so the first step is one byte. Starting at one
-    // would make the shift zero and the cursor would sit on the same position
-    // for the first sixty-four attempts.
-    let mut misses = 1usize << SKIP_TRIGGER;
-    // One probe ahead of `at`, so a miss hands over an address that was formed
-    // a loop earlier. Re-seeded from `at` wherever the cursor jumps for another
-    // reason.
-    let mut next_at = at;
+    // The miss counter and the lookahead cursor belong to the accelerating
+    // loop alone and are declared there. The stride-one lane needs neither: its
+    // stride is one by construction and its bound is a limit rather than a
+    // count, which is the whole reason it exists.
     // The shift is a constant here, not a value, and that is worth a whole
     // instruction per position. It takes exactly two values -- 64 - HASH_BITS
     // or 64 - HASH_BITS_LARGE -- chosen once from the length, but x86 has no
@@ -926,120 +984,77 @@ fn pack_pass<const SHIFT: u32, S: Slot>(
     // full hash word above it.
     let last = input.len() - HASH_WORD;
     loop {
-        // The advance sits before the probe, not after it, which is what makes
-        // it a lookahead rather than a rename: the address this iteration loads
-        // from was formed last iteration, so it does not wait on the branch
-        // that closed the last one. lz4_flex writes the same two lines at the
-        // same place.
-        at = next_at;
-        next_at = at + (misses >> SKIP_TRIGGER);
+        //
+        // The stride-one lane.
+        //
+        // The loop below recomputes `misses >> SKIP_TRIGGER` at every position,
+        // and on anything that compresses the answer is always one: a match
+        // resets the counter to its trigger, and compressible data finds a
+        // match long before `SKIP_SPAN` misses accumulate. Profiling the
+        // assembly kernel put that arithmetic and its bookkeeping at 15.7% of
+        // all cycles on `varied` -- more than the entire hash -- for a number
+        // that never changed.
+        //
+        // So the common case gets its own lane, with the counter replaced by a
+        // limit. `stop` answers both questions the lane would otherwise ask per
+        // position -- has the span run out, is the cursor past the end -- and
+        // which of the two ended it is worked out once, below.
+        //
+        // This is not a special case. Stride one is where every compressible
+        // value spends nearly all of its positions.
+        //
         if at > last {
             break;
         }
-        // One load, not two. These were written as `word4(at)` and `word8(at)`
-        // and the generated x86 kept them apart:
-        //
-        //     movl  (%r15,%r14), %esi        ; word4
-        //     movq  (%r15,%r14), %rax        ; word8, same address
-        //
-        // Both are little-endian reads at the same address, so the four bytes
-        // are the low half of the eight and taking them from the register is
-        // exact. That is a load and an address-generation slot per position, on
-        // the path data that does not repeat spends nearly all of its time in.
-        //
-        // SAFETY: `at <= last` is `at + 8 <= input.len()`, which covers both.
-        let word = unsafe { word8(input, at) };
-        let here = word as u32;
-        let slot = hash5(word, SHIFT);
-        let stored = table[slot];
-        table[slot] = S::of(at);
-
-        // A slot holds a position from this value or a previous one, and only
-        // positions behind the cursor are usable. An untouched slot holds
-        // [`EMPTY`], which is far enough ahead of any real position that the
-        // same test rejects it — see the constant.
-        //
-        // The four bytes are compared inline before anything else happens. On
-        // data that varies, almost every candidate fails here — and the
-        // previous form paid two bounds-checked slice constructions and a call
-        // to find that out. Since the hash is of exactly these four bytes, a
-        // candidate that disagrees on them cannot match at all, so this rejects
-        // without touching the extension loop.
-        // Two tests, and they stay two.
-        //
-        // "Behind the cursor" and "inside the window" are one question asked of
-        // the distance -- `(at - candidate - 1) < MAX_OFFSET` in unsigned
-        // arithmetic covers both, since an empty or ahead slot wraps to
-        // something enormous. That was built and measured: noise_4k improved 3%
-        // and everything else got worse, varied_64k by 5%, varied_4k by 4%,
-        // records_4k by 3%. Three runs each.
-        //
-        // The reason is the short circuit. Once the table is warm the first
-        // test is almost always true and almost always predicted, so the second
-        // is cheap; folding them makes both arithmetic on every position
-        // whether or not it is needed. Only on data that does not compress,
-        // where the table holds stale entries and neither test predicts, does
-        // the fold pay.
-        //
-        // Two candidates for a different search were built. Neither wins.
-        //
-        // Folding the two tests into `(at - candidate - 1) < MAX_OFFSET`,
-        // measured back to back against this in one sitting: noise_4k 0.748 ->
-        // 0.734 cycles per byte, varied_64k 3.853 -> 4.331, records_4k 1.014 ->
-        // 1.024. Two percent on the target, twelve against everywhere else.
-        //
-        // Reading the candidate unconditionally and branching only on whether
-        // four bytes agree -- which is what liblz4 does, and why it executes
-        // more instructions per byte than we do: noise_4k flat, varied_64k 11%
-        // worse, worse on every other shape. The unconditional read costs more
-        // where the branch would have predicted than it saves where it would
-        // not, and predictable positions are the overwhelming majority
-        // everywhere except noise.
-        //
-        // A second search remains the right idea -- which search found a match
-        // is invisible to the decoder, so switching costs nothing in the format
-        // and could ride the miss streak the way the split rides the saturation
-        // window. What is missing is a second search that wins on its own
-        // target. These two do not.
-        //
-        // Which is where the real gap is, and it is not this. Profiling both
-        // packers over the same 4 KiB of noise:
-        //
-        //     keva     0.740 cycles/byte   IPC 3.13   2.3 instr/byte   16.5% mispredicts
-        //     liblz4   0.539               IPC 6.12   3.3             2.1%
-        //
-        // liblz4 executes half again as many instructions per byte and is 27%
-        // faster, at twice the issue rate, because it loses almost nothing to
-        // misprediction. Ours is a search whose branches depend on what the
-        // table happens to hold; theirs is shaped so that they do not. Closing
-        // that is a different loop, not a smaller one.
-        let candidate = stored.position();
-        let matched = if candidate < at
-            && at - candidate <= MAX_OFFSET
-            // SAFETY: `candidate < at`, and `at + MIN_MATCH <= input.len()`.
-            && unsafe { word4(input, candidate) } == here
-        {
-            // SAFETY: same, and `candidate + MIN_MATCH < at + MIN_MATCH`.
-            MIN_MATCH + unsafe { common_prefix(input, candidate + MIN_MATCH, at + MIN_MATCH) }
-        } else {
-            0
-        };
-
-        if matched < MIN_MATCH {
-            // The cursor for the next probe is formed here rather than being
-            // derived from this one at the top, which is what lz4_flex does:
-            //
-            //     cur = next_cur;
-            //     next_cur += step_size;
-            //
-            // Same arithmetic, one iteration earlier. The address the next
-            // probe loads from stops depending on this iteration reaching its
-            // end, so the load can issue while the rest of this block is still
-            // in flight instead of after the branch that closes it.
-            misses += 1;
-            continue;
+        let stop = last.min(at + SKIP_SPAN - 1);
+        let mut found = None;
+        while at <= stop {
+            // SAFETY: `at <= stop <= last` is `at + HASH_WORD <= input.len()`.
+            let (c, m) = unsafe { probe_at::<SHIFT, S>(input, table, at) };
+            if m >= MIN_MATCH {
+                found = Some((c, m));
+                break;
+            }
+            at += 1;
         }
-        misses = 1 << SKIP_TRIGGER;
+
+        if found.is_none() {
+            // The span ran out without a match, or the input did.
+            if at > last {
+                break;
+            }
+            // Past `SKIP_SPAN` consecutive misses the cursor may start
+            // skipping, which is the accelerating loop. `at` already stands
+            // where it reads `next_at`, and the counter it wants is the
+            // trigger doubled.
+            let mut misses = 2usize << SKIP_TRIGGER;
+            let mut next_at = at;
+            loop {
+                // The advance sits before the probe, not after it, so the
+                // address this iteration loads from was formed last iteration
+                // and does not wait on the branch that closed the last one.
+                at = next_at;
+                next_at = at + (misses >> SKIP_TRIGGER);
+                if at > last {
+                    break;
+                }
+                // SAFETY: `at <= last` is `at + HASH_WORD <= input.len()`.
+                let (c, m) = unsafe { probe_at::<SHIFT, S>(input, table, at) };
+                if m >= MIN_MATCH {
+                    found = Some((c, m));
+                    break;
+                }
+                misses += 1;
+            }
+            if found.is_none() {
+                break;
+            }
+        }
+
+        // Both lanes only leave here with a match, and a match puts the
+        // counter back at its trigger -- which is the lane's own span, so the
+        // loop simply starts over at the top.
+        let (candidate, matched) = found.unwrap();
 
         // The first match found is not always the one worth taking.
         //
@@ -1171,7 +1186,6 @@ fn pack_pass<const SHIFT: u32, S: Slot>(
         emit_block(literals, at - candidate, matched + back, &mut cur, split, wide);
 
         at += matched;
-        next_at = at;
         literal_start = at;
     }
 
