@@ -399,6 +399,54 @@ L_(emit):
      * the input, so reading past it has to stay inside the input. */
     add     $16, %rdi                       /* WIDE_LITERAL */
     cmp     PACK_SRC_LEN(%rsp), %rdi
+    ja      L_(emit_slow)
+    cmp     $PACK_LIT_MAX, %r9
+    jae     L_(emit_slow)
+    cmp     $PACK_MAT_MAX, %rcx
+    jae     L_(emit_slow)
+
+    /*
+     * The block whose fields all fit: no extension chain on either length, and
+     * a literal run far enough from the end of the input to be copied at a
+     * fixed width. Counting says this is most blocks -- extensions appear on
+     * about one in six.
+     *
+     * Written this way because the general path below is a dependency chain
+     * rather than a sequence of stores. Each of its writes advances the cursor
+     * and the next write's address waits on that advance: token, inc, chain,
+     * inc, literals, add, offset, add -- eight to twelve dependent operations
+     * per block, and the address generation for the next block cannot start
+     * until the last of them retires. That is what holds the block writer at
+     * IPC 4 while the compiler's version sustains 6, and it is worst on data
+     * that compresses well, where blocks are many and short.
+     *
+     * Here the layout is known before anything is written: the token at zero,
+     * the literals at one, the offset at one plus the run. So all three stores
+     * take a displacement off the same base, none of them waits on another,
+     * and the cursor moves once. This is the idiom liblz4 uses -- it advances
+     * its cursor first and stores at a negative displacement, for the same
+     * reason.
+     */
+    lea     (%r15,%r10), %rbx               /* the run's source */
+    mov     %r9, %r8
+    shl     $PACK_TOK_SHIFT, %r8
+    or      %rcx, %r8
+    mov     %r8b, (%rbp)                    /* token */
+    movdqu  (%rbx), %xmm0
+    movdqu  %xmm0, 1(%rbp)                  /* literals, sixteen written */
+    mov     %r13, %r8
+    sub     %rdx, %r8
+    mov     %r8w, 1(%rbp,%r9)               /* offset, past the true length */
+    lea     3(%rbp,%r9), %rbp               /* token + run + offset, once */
+    jmp     L_(emit_done)
+
+L_(emit_slow):
+    /* An extension chain, or a run too near the end of the input to overrun.
+     * The wide test is asked again because the fast path consumed the answer. */
+    mov     %r13, %rdi
+    sub     %r12, %rdi
+    add     $16, %rdi
+    cmp     PACK_SRC_LEN(%rsp), %rdi
     setbe   %dil
     movzbl  %dil, %edi
 
@@ -461,8 +509,16 @@ L_(emit):
     mov     %r8, %rbp                       /* exact, whatever the surplus wrote */
     jmp     14f
 
-    /* Within a block of the input's end: bounded on both sides, so this one
-     * does walk a tail. Once per value at most. */
+    /*
+     * Within a block of the input's end, so nothing may be read past the run
+     * and nothing written past it either. Copied in overlapping pairs rather
+     * than by walking a tail down 8, 4, 2, 1: for a run of five, four bytes
+     * from the front and four from the back write three of them twice and the
+     * whole run exactly once. Two independent copies per size class instead of
+     * a chain of four tests, and no byte is ever moved on its own.
+     *
+     * Exact on both sides, which is the reason this path exists at all.
+     */
 30: cmp     $16, %r9
     jb      31f
     movdqu  (%rbx), %xmm0
@@ -471,24 +527,30 @@ L_(emit):
     add     $16, %rbp
     sub     $16, %r9
     jmp     30b
-31: test    $8, %r9b
-    jz      13f
+31: cmp     $8, %r9
+    jb      13f
     mov     (%rbx), %r8
+    mov     -8(%rbx,%r9), %rdi
     mov     %r8, (%rbp)
-    add     $8, %rbx
-    add     $8, %rbp
-13: test    $4, %r9b
-    jz      15f
+    mov     %rdi, -8(%rbp,%r9)
+    add     %r9, %rbp
+    jmp     14f
+13: cmp     $4, %r9
+    jb      15f
     mov     (%rbx), %r8d
+    mov     -4(%rbx,%r9), %edi
     mov     %r8d, (%rbp)
-    add     $4, %rbx
-    add     $4, %rbp
-15: test    $2, %r9b
-    jz      16f
+    mov     %edi, -4(%rbp,%r9)
+    add     %r9, %rbp
+    jmp     14f
+15: cmp     $2, %r9
+    jb      16f
     movzwl  (%rbx), %r8d
+    movzwl  -2(%rbx,%r9), %edi
     mov     %r8w, (%rbp)
-    add     $2, %rbx
-    add     $2, %rbp
+    mov     %di, -2(%rbp,%r9)
+    add     %r9, %rbp
+    jmp     14f
 16: test    $1, %r9b
     jz      14f
     mov     (%rbx), %r8b
@@ -516,6 +578,7 @@ L_(emit):
     inc     %rbp
 18:
 
+L_(emit_done):
     /* at += matched; next_at = at; literal_start = at */
     add     %rax, %r13
     mov     %r13, %r12

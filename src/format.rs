@@ -251,6 +251,40 @@ fn pack_dispatch(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) 
     pack_with(input, out, table)
 }
 
+/// The portable packer, reachable without the kernel taking the call.
+///
+/// [`Packer`] dispatches to the assembly where a target has it, which is what
+/// production wants and what makes the two impossible to compare inside one
+/// binary. A profiler needs both in one process: separate builds put the code
+/// at different addresses, under different page mappings, with a different
+/// heap, and a two-percent difference does not survive that.
+///
+/// So this is the same pass with the dispatch removed. It is not a fallback and
+/// nothing in the store calls it.
+#[derive(Debug)]
+pub struct PortablePacker {
+    table: Box<[u32; HASH_SIZE]>,
+}
+
+impl Default for PortablePacker {
+    fn default() -> Self {
+        PortablePacker {
+            table: Box::new([EMPTY; HASH_SIZE]),
+        }
+    }
+}
+
+impl PortablePacker {
+    pub fn new() -> PortablePacker {
+        PortablePacker::default()
+    }
+
+    /// Pack `input` into `out`. See [`pack`] for the contract.
+    pub fn pack(&mut self, input: &[u8], out: &mut Vec<u8>) -> bool {
+        pack_with(input, out, &mut self.table)
+    }
+}
+
 /// Why a packed value could not be read back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackError {
