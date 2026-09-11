@@ -403,7 +403,7 @@ L_(emit):
     cmp     $PACK_LIT_MAX, %r9
     jae     L_(emit_slow)
     cmp     $PACK_MAT_MAX, %rcx
-    jae     L_(emit_slow)
+    jae     L_(emit_fast1)
 
     /*
      * The block whose fields all fit: no extension chain on either length, and
@@ -438,6 +438,44 @@ L_(emit):
     sub     %rdx, %r8
     mov     %r8w, 1(%rbp,%r9)               /* offset, past the true length */
     lea     3(%rbp,%r9), %rbp               /* token + run + offset, once */
+    jmp     L_(emit_done)
+
+    /*
+     * The same block with one extension byte on the match length.
+     *
+     * Peeled out because on data that compresses well it is not the exception
+     * but the rule: pack.rs:1120 counts the match field overflowing in 99% of
+     * blocks at a six-fold ratio, since matches there average far more than
+     * the fifteen the nibble can name. The first version of this fast path
+     * treated an extension as rare and sent it to the general path, which is
+     * why restructuring the block writer moved nothing on `records` -- almost
+     * no block was taking the fast path at all.
+     *
+     * One byte rather than a chain, because the chain is only longer when the
+     * match exceeds 270 bytes. The decoder peeled the same case for the same
+     * reason, in 43bf2d8.
+     *
+     * The layout is still known up front: token, run, offset, extension. Four
+     * stores on displacements off one base, and the cursor moves once.
+     */
+L_(emit_fast1):
+    mov     %rcx, %rdi
+    sub     $PACK_MAT_MAX, %rdi
+    cmp     $255, %rdi
+    jae     L_(emit_slow)                   /* needs a chain, not one byte */
+
+    lea     (%r15,%r10), %rbx
+    mov     %r9, %r8
+    shl     $PACK_TOK_SHIFT, %r8
+    or      $PACK_MAT_MAX, %r8              /* the field is saturated */
+    mov     %r8b, (%rbp)
+    movdqu  (%rbx), %xmm0
+    movdqu  %xmm0, 1(%rbp)
+    mov     %r13, %r8
+    sub     %rdx, %r8
+    mov     %r8w, 1(%rbp,%r9)
+    mov     %dil, 3(%rbp,%r9)               /* the extension byte */
+    lea     4(%rbp,%r9), %rbp
     jmp     L_(emit_done)
 
 L_(emit_slow):
