@@ -141,25 +141,12 @@ KEVA_SYM(keva_pack):
     cmp     $2048, %rsi                     /* PROBE_ABOVE */
     jbe     KEVA_LABEL(pack, worth)
 
-    /*
-     * Filled with ones rather than zeros, so a slot can hold the position
-     * itself instead of the position plus one. Zero is a real position and
-     * needs the bias to be distinguishable from an untouched slot; `0xFFFFFFFF`
-     * is not reachable, so it does not. That takes an `lea` out of every
-     * position visited and the displacement out of the compare below.
-     *
-     * Four stores a round rather than one: the fill is a serial chain on its
-     * cursor, and at one store per iteration the chain is the fill.
-     */
     lea     PACK_PROBE(%rsp), %rdi
-    pcmpeqd %xmm0, %xmm0
-    mov     $16, %ecx
+    xorps   %xmm0, %xmm0
+    mov     $1024, %ecx
 1:  movups  %xmm0, (%rdi)
-    movups  %xmm0, 16(%rdi)
-    movups  %xmm0, 32(%rdi)
-    movups  %xmm0, 48(%rdi)
-    add     $64, %rdi
-    dec     %ecx
+    add     $16, %rdi
+    sub     $16, %ecx
     jnz     1b
 
     mov     %rsi, %r8
@@ -173,33 +160,25 @@ KEVA_SYM(keva_pack):
     cmp     %r9, %rdx
     cmovae  %r9, %rdx                       /* last = min(.., len - 4) */
     mov     %r11, %rax                      /* at */
-    mov     $1, %rbx                        /* stride */
+    mov     $32, %rcx                       /* misses = 1 << SKIP_TRIGGER */
 
-    /*
-     * The stride is held rather than recomputed. It follows the same schedule
-     * the search uses -- one for thirty-two positions, then two, then three --
-     * but that schedule only changes every thirty-two steps, and deriving it
-     * from a counter at every step was four instructions of the sixteen. The
-     * same arithmetic the search loop's fast lane stopped doing, in the loop
-     * that answers whether the search runs at all.
-     */
-6:  mov     $32, %rcx                       /* positions before the stride grows */
 3:  cmp     %rdx, %rax
     ja      4f
     mov     (%r15,%rax), %edi               /* word4(at) */
     imul    $0x9E3779B1, %edi, %r11d
     shr     $24, %r11d                      /* 32 - PROBE_BITS */
-    mov     PACK_PROBE(%rsp,%r11,4), %r12d  /* stored */
-    mov     %eax, PACK_PROBE(%rsp,%r11,4)
-    cmp     $-1, %r12d
-    je      5f
-    cmp     (%r15,%r12), %edi
+    mov     PACK_PROBE(%rsp,%r11,4), %r12d  /* stored, one past the position */
+    lea     1(%rax), %r13
+    mov     %r13d, PACK_PROBE(%rsp,%r11,4)
+    test    %r12d, %r12d
+    jz      5f
+    cmp     -1(%r15,%r12), %edi
     je      KEVA_LABEL(pack, worth)
-5:  add     %rbx, %rax
-    dec     %rcx
-    jnz     3b
-    inc     %rbx
-    jmp     6b
+5:  mov     %rcx, %r11
+    shr     $5, %r11
+    add     %r11, %rax
+    inc     %rcx
+    jmp     3b
 
 4:  inc     %r10
     cmp     $4, %r10                        /* PROBE_WINDOWS */
