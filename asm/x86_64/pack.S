@@ -238,9 +238,12 @@ KEVA_LABEL(pack, worth):
     /* Which of the two table widths this value gets. The whole table is always
      * allocated; the shift only decides how much of it a value touches, and
      * touched lines are what the cache charges for. */
+    /* Entered at the stride-one lane: `misses` starts at its trigger, which
+     * is a stride of one, so the general loop would compute that and nothing
+     * else until thirty-two misses accumulate. */
     cmp     $8192, %rcx                     /* NARROW_TABLE_ABOVE */
-    ja      PACK_LBL(el, scan)
-    jmp     PACK_LBL(es, scan)
+    ja      PACK_LBL(el, fast_entry)
+    jmp     PACK_LBL(es, fast_entry)
 
 /* Even split, twelve table bits. The split may change from here. */
 #define PACK_PFX            es

@@ -70,6 +70,79 @@
      * path stays a fall-through: relays after the body would need a jump over
      * them, and that jump would be taken on every match.
      */
+    /*
+     * The stride-one lane.
+     *
+     * The general loop below recomputes `misses >> SKIP_TRIGGER` at every
+     * position, and on anything that compresses the answer is always one: a
+     * match resets the counter to its trigger, and data that compresses finds
+     * one long before thirty-two misses accumulate. Profiling `varied` put the
+     * advance and the miss bookkeeping at 15.7% of all cycles -- more than the
+     * whole hash -- for arithmetic whose result never changes.
+     *
+     * So the common case gets its own lane: the cursor is incremented, the
+     * counter counts down instead of up, and the bound test folds into the
+     * branch that closes the loop. Seventeen instructions per rejected position
+     * become fourteen. On `varied` that is cycles one for one, because the
+     * search runs at the instruction limit -- 18.09 per byte at IPC 5.8 is 3.12
+     * cycles, and 3.14 was measured.
+     *
+     * Not a special case: stride one is where every compressible value spends
+     * nearly all of its positions. The general loop keeps the accelerating
+     * case, which is what incompressible data walks into after thirty-two
+     * consecutive misses.
+     */
+L_(fast_entry):
+    cmp     %r11, %r13
+    ja      L_(tail)
+
+    .p2align 5
+L_(fast):
+    mov     (%r15,%r13), %rax               /* word8(at) */
+    mov     %rax, %rdx
+    shl     $24, %rdx
+    imul    %rsi, %rdx
+    shr     $PACK_HSHIFT, %rdx
+    mov     (%r14,%rdx,4), %ecx             /* stored */
+    mov     %r13d, (%r14,%rdx,4)            /* table[slot] = at */
+    cmp     %r13, %rcx
+    jae     L_(fast_miss)
+    mov     %r13d, %edx
+    sub     %rcx, %rdx
+    cmp     $65535, %edx                    /* MAX_OFFSET */
+    ja      L_(fast_miss)
+    cmp     (%r15,%rcx), %eax               /* word4(candidate) == here */
+    je      L_(to_match)
+
+L_(fast_miss):
+    inc     %r13
+    dec     %rbx                            /* misses left at this stride */
+    jz      L_(fast_spent)
+    cmp     %r11, %r13
+    jbe     L_(fast)
+    jmp     L_(tail)
+
+    /*
+     * Thirty-two misses without a match, so the cursor may start skipping and
+     * the general loop takes over. `at` has already been advanced past the
+     * last position tried, which is exactly what that loop reads as `next_at`,
+     * and the counter it wants is the trigger doubled.
+     */
+L_(fast_spent):
+    mov     %r13, %r12
+    mov     $64, %rbx
+    jmp     L_(scan)
+
+/* The lane's match exit, relayed. Its target sits 132 bytes on, five past
+ * what rel8 reaches, so the branch assembled six bytes wide -- and a branch is
+ * fetched on every iteration whether or not it is taken. From here it is two.
+ * Placed behind the unconditional jump above so nothing falls into it. */
+L_(to_match):
+    jmp     L_(match)
+
+/* The general loop's exits, moved down to sit against it. They used to lead
+ * the body, which was right until the stride-one lane was inserted between
+ * them and their loop and pushed every one of them past rel8's reach. */
 L_(miss):
     inc     %rbx
     jmp     L_(scan)
@@ -140,8 +213,12 @@ L_(scan):
     cmp     (%r15,%rcx), %eax               /* word4(candidate) == here */
     jne     L_(miss)
 
+L_(match):
     /*
-     * A match. From here the position is committed, so next_at (r12) and
+     * A match, reached from either lane with the same three registers live:
+     * rax the eight bytes at `at`, rcx the candidate, r13 the position.
+     *
+     * From here the position is committed, so next_at (r12) and
      * misses (rbx) are dead and serve as temps until they are reassigned.
      *
      * rdx holds the candidate and rax the match length for the rest of this
@@ -399,9 +476,9 @@ L_(emit):
      * the input, so reading past it has to stay inside the input. */
     add     $16, %rdi                       /* WIDE_LITERAL */
     cmp     PACK_SRC_LEN(%rsp), %rdi
-    ja      L_(emit_slow)
+    ja      L_(to_emit_slow)
     cmp     $PACK_LIT_MAX, %r9
-    jae     L_(emit_slow)
+    jae     L_(to_emit_slow)
     cmp     $PACK_MAT_MAX, %rcx
     jae     L_(emit_fast1)
 
@@ -439,6 +516,12 @@ L_(emit):
     mov     %r8w, 1(%rbp,%r9)               /* offset, past the true length */
     lea     3(%rbp,%r9), %rbp               /* token + run + offset, once */
     jmp     L_(emit_done)
+
+/* The emit dispatch's exit, relayed: its three tests sit eleven bytes further
+ * from the general path than rel8 reaches, because the two fast blocks lie
+ * between. Behind the unconditional jump above, so nothing falls in. */
+L_(to_emit_slow):
+    jmp     L_(emit_slow)
 
     /*
      * The same block with one extension byte on the match length.
@@ -617,11 +700,13 @@ L_(emit_slow):
 18:
 
 L_(emit_done):
-    /* at += matched; next_at = at; literal_start = at */
+    /* at += matched; literal_start = at. A match resets the counter to its
+     * trigger, which is stride one, so this returns to the fast lane rather
+     * than to the general loop. `next_at` is not set: only the general loop
+     * reads it, and the transition into it forms it. */
     add     %rax, %r13
-    mov     %r13, %r12
     mov     %r13, %r10
-    mov     $32, %rbx                       /* misses = 1 << SKIP_TRIGGER */
+    mov     $32, %rbx                       /* misses left before the stride grows */
 
     /*
      * No early bail-out, deliberately, though one would be sound: once the
@@ -636,7 +721,7 @@ L_(emit_done):
      * caller sizes the output for the worst case instead, exactly as
      * `Cursor::room` does on the Rust side.
      */
-    jmp     L_(scan)
+    jmp     L_(fast_entry)
 
     /*
      * Everything left over is literals with no match to follow. A zero match
