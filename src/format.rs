@@ -193,6 +193,60 @@ const HASH_SIZE: usize = 1 << HASH_BITS;
 /// sentinel had already made unnecessary.
 const EMPTY: u32 = 0x8000_0000;
 
+/// A table slot, so the same pass can be compiled over two widths.
+///
+/// The profile says the table is where the packer spends its time: on 4 KiB of
+/// records, the store into it and the load that stalls behind it are the two
+/// largest single instructions in the kernel. A 64-byte line holds sixteen
+/// `u32` or thirty-two `u16`, so the same four thousand slots are 256 lines or
+/// 128 -- and touched lines are what the cache charges for.
+///
+/// A position fits in sixteen bits whenever the value does, which the window
+/// already bounds at [`MAX_OFFSET`]. The sentinel is the only thing that does
+/// not carry over: [`EMPTY`] is far above any reachable position and there is
+/// no room for that in sixteen bits. `0xFFFF` serves instead, and is reachable
+/// only by a value long enough that this width is not used for it.
+///
+/// This is liblz4's layout, which holds `u16` entries for an input that fits
+/// the window and widens above it.
+trait Slot: Copy {
+    /// A slot that has never been written.
+    const EMPTY: Self;
+    /// Largest value this width may be used for. Above it a position would not
+    /// fit, or would collide with the sentinel.
+    const LIMIT: usize;
+    fn position(self) -> usize;
+    fn of(at: usize) -> Self;
+}
+
+impl Slot for u32 {
+    const EMPTY: u32 = EMPTY;
+    const LIMIT: usize = usize::MAX;
+    #[inline(always)]
+    fn position(self) -> usize {
+        self as usize
+    }
+    #[inline(always)]
+    fn of(at: usize) -> u32 {
+        at as u32
+    }
+}
+
+impl Slot for u16 {
+    const EMPTY: u16 = 0xFFFF;
+    /// The search stops at `len - HASH_WORD`, so a value of this length never
+    /// reaches position `0xFFFF` and the sentinel stays unambiguous.
+    const LIMIT: usize = 0x1_0000;
+    #[inline(always)]
+    fn position(self) -> usize {
+        self as usize
+    }
+    #[inline(always)]
+    fn of(at: usize) -> u16 {
+        at as u16
+    }
+}
+
 /// The match-finding table, held across calls.
 ///
 /// Clearing this was the dominant cost for small values: sixteen kilobytes of
@@ -282,6 +336,71 @@ impl PortablePacker {
     /// Pack `input` into `out`. See [`pack`] for the contract.
     pub fn pack(&mut self, input: &[u8], out: &mut Vec<u8>) -> bool {
         pack_with(input, out, &mut self.table)
+    }
+}
+
+/// The same pass over a sixteen-bit table, for measuring that width.
+///
+/// Not on any production path and deliberately so. Narrowing the table changes
+/// nothing about which matches are found -- the positions are identical and so
+/// is the output -- but it changes it for whichever packer is narrowed, and the
+/// assembly kernel is still thirty-two bits wide. Switching one of them alone
+/// would leave the two producing different bytes for the same value, and the
+/// test that says they do not is the only reason either is trusted.
+///
+/// So the width is measured first and migrated afterwards, both sides together.
+/// [`Slot::LIMIT`] bounds what this may be handed.
+#[derive(Debug)]
+pub struct NarrowPacker {
+    table: Box<[u16; HASH_SIZE]>,
+}
+
+impl Default for NarrowPacker {
+    fn default() -> Self {
+        NarrowPacker {
+            table: Box::new([<u16 as Slot>::EMPTY; HASH_SIZE]),
+        }
+    }
+}
+
+impl NarrowPacker {
+    pub fn new() -> NarrowPacker {
+        NarrowPacker::default()
+    }
+
+    /// Largest value this packer accepts. Above it a position does not fit.
+    pub const LIMIT: usize = <u16 as Slot>::LIMIT;
+
+    /// Pack `input` into `out`. Returns `false` for a value this width cannot
+    /// index, as well as for one that did not get smaller.
+    pub fn pack(&mut self, input: &[u8], out: &mut Vec<u8>) -> bool {
+        out.clear();
+        if input.len() < HASH_WORD || input.len() > Self::LIMIT {
+            return false;
+        }
+        if !worth_packing(input) {
+            return false;
+        }
+        if input.len() > NARROW_TABLE_ABOVE {
+            pack_pass::<{ (64 - HASH_BITS_LARGE) as u32 }, u16>(
+                input,
+                out,
+                &mut self.table,
+                EVEN,
+                LAZY,
+                ADAPTIVE,
+            );
+        } else {
+            pack_pass::<{ (64 - HASH_BITS) as u32 }, u16>(
+                input,
+                out,
+                &mut self.table,
+                EVEN,
+                LAZY,
+                ADAPTIVE,
+            );
+        }
+        out.len() < input.len()
     }
 }
 
@@ -647,9 +766,9 @@ fn pack_with(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> b
     // One pass. The split is decided while packing, not by packing twice.
     // Which of the two instantiations, decided once for the whole value.
     if input.len() > NARROW_TABLE_ABOVE {
-        pack_pass::<{ (64 - HASH_BITS_LARGE) as u32 }>(input, out, table, EVEN, LAZY, ADAPTIVE);
+        pack_pass::<{ (64 - HASH_BITS_LARGE) as u32 }, u32>(input, out, table, EVEN, LAZY, ADAPTIVE);
     } else {
-        pack_pass::<{ (64 - HASH_BITS) as u32 }>(input, out, table, EVEN, LAZY, ADAPTIVE);
+        pack_pass::<{ (64 - HASH_BITS) as u32 }, u32>(input, out, table, EVEN, LAZY, ADAPTIVE);
     }
     out.len() < input.len()
 }
@@ -723,9 +842,9 @@ fn pack_with_eager(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]
         return false;
     }
     if input.len() > NARROW_TABLE_ABOVE {
-        pack_pass::<{ (64 - HASH_BITS_LARGE) as u32 }>(input, out, table, EVEN, EAGER, FIXED);
+        pack_pass::<{ (64 - HASH_BITS_LARGE) as u32 }, u32>(input, out, table, EVEN, EAGER, FIXED);
     } else {
-        pack_pass::<{ (64 - HASH_BITS) as u32 }>(input, out, table, EVEN, EAGER, FIXED);
+        pack_pass::<{ (64 - HASH_BITS) as u32 }, u32>(input, out, table, EVEN, EAGER, FIXED);
     }
     out.len() < input.len()
 }
@@ -743,10 +862,10 @@ fn pack_with_eager(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]
 /// answers a question two passes could not: which split fits *this part* of the
 /// value. A sample can be unrepresentative and a total cannot see a change of
 /// character; a window sees both.
-fn pack_pass<const SHIFT: u32>(
+fn pack_pass<const SHIFT: u32, S: Slot>(
     input: &[u8],
     out: &mut Vec<u8>,
-    table: &mut [u32; HASH_SIZE],
+    table: &mut [S; HASH_SIZE],
     start_split: Split,
     lazy: bool,
     adaptive: bool,
@@ -833,7 +952,7 @@ fn pack_pass<const SHIFT: u32>(
         let here = word as u32;
         let slot = hash5(word, SHIFT);
         let stored = table[slot];
-        table[slot] = at as u32;
+        table[slot] = S::of(at);
 
         // A slot holds a position from this value or a previous one, and only
         // positions behind the cursor are usable. An untouched slot holds
@@ -894,7 +1013,7 @@ fn pack_pass<const SHIFT: u32>(
         // misprediction. Ours is a search whose branches depend on what the
         // table happens to hold; theirs is shaped so that they do not. Closing
         // that is a different loop, not a smaller one.
-        let candidate = stored as usize;
+        let candidate = stored.position();
         let matched = if candidate < at
             && at - candidate <= MAX_OFFSET
             // SAFETY: `candidate < at`, and `at + MIN_MATCH <= input.len()`.
@@ -965,9 +1084,9 @@ fn pack_pass<const SHIFT: u32>(
                     // Inserted whether or not it wins: the position is real and a
                     // later search may want it, and the search itself would never
                     // have visited it.
-                    table[slot] = next as u32;
+                    table[slot] = S::of(next);
 
-                    let other = stored as usize;
+                    let other = stored.position();
                     if other < next
                         && next - other <= MAX_OFFSET
                         // SAFETY: `other < next` and `next + MIN_MATCH <= input.len()`.
@@ -2051,6 +2170,66 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{} bytes from liblz4: {e}", data.len()));
             assert_eq!(&out[..], &data[..], "differs on {} bytes", data.len());
         }
+    }
+
+    /// A narrower table must find the same matches, not merely valid ones.
+    ///
+    /// The whole argument for sixteen-bit slots is that they change nothing
+    /// except how much cache the table occupies: the positions are the same
+    /// numbers, so the same candidates are proposed and the same bytes come
+    /// out. If that is wrong the width is not a free optimisation but a format
+    /// change, and this is what says which.
+    ///
+    /// It also pins the sentinel. `0xFFFF` stands for an untouched slot, and a
+    /// value long enough to reach position 65535 would make that ambiguous --
+    /// [`NarrowPacker::LIMIT`] is where that line sits, and the boundary
+    /// lengths below are on both sides of it.
+    #[test]
+    fn a_narrow_table_packs_the_same_bytes() {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        let mut cases: Vec<Vec<u8>> = Vec::new();
+        for size in [8usize, 64, 512, 2048, 2049, 4096, 8192, 8193, 40_000, 65_536] {
+            cases.push(records(size));
+            cases.push(vec![b'a'; size]);
+            cases.push((0..size).map(|_| next() as u8).collect());
+        }
+
+        let mut wide_out = Vec::new();
+        let mut narrow_out = Vec::new();
+        let mut wide = PortablePacker::new();
+        let mut narrow = NarrowPacker::new();
+
+        let mut compared = 0usize;
+        for input in &cases {
+            if input.len() > NarrowPacker::LIMIT {
+                continue;
+            }
+            let a = wide.pack(input, &mut wide_out);
+            let b = narrow.pack(input, &mut narrow_out);
+            assert_eq!(
+                a,
+                b,
+                "the two widths disagreed on whether packing helped for {} bytes",
+                input.len()
+            );
+            if a {
+                assert_eq!(
+                    wide_out,
+                    narrow_out,
+                    "a {}-byte value packs differently at sixteen bits",
+                    input.len()
+                );
+                compared += 1;
+            }
+        }
+        assert!(compared > 10, "only {compared} cases actually packed");
     }
 
     /// A block that is one literal run and nothing else, asked of the kernel
