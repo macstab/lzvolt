@@ -233,7 +233,10 @@ KEVA_LABEL(pack, worth):
     mov     $32, %rbx                       /* misses = 1 << SKIP_TRIGGER */
     mov     PACK_SRC_LEN(%rsp), %r11
     sub     $8, %r11                        /* last = len - HASH_WORD */
-    movabs  $889523592379, %rsi             /* the five-byte multiplier */
+    /* The five-byte multiplier with the hash's own `<< 24` folded in.
+     * `(x << 24) * M` and `x * (M << 24)` are the same product modulo 2^64, so
+     * this is exact, and it takes a micro-op out of every position visited. */
+    movabs  $(889523592379 << 24), %rsi
 
     /* Which of the two table widths this value gets. The whole table is always
      * allocated; the shift only decides how much of it a value touches, and

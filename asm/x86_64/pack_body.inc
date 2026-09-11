@@ -95,13 +95,25 @@
 L_(fast_entry):
     cmp     %r11, %r13
     ja      L_(tail)
+    /*
+     * One limit instead of two tests. The lane used to ask twice per position:
+     * has the counter run out, and is the cursor past the end. Both are "may
+     * this position be visited", so both fold into a single bound -- the
+     * earlier of the thirty-second position and the last one the input has.
+     *
+     * Which of the two it was is worked out once, on the cold side, where it
+     * costs nothing. That takes the loop from three micro-ops of bookkeeping
+     * per position to two.
+     */
+    lea     31(%r13), %rbx
+    cmp     %r11, %rbx
+    cmova   %r11, %rbx                      /* min(last, at + 31) */
 
     .p2align 5
 L_(fast):
     mov     (%r15,%r13), %rax               /* word8(at) */
     mov     %rax, %rdx
-    shl     $24, %rdx
-    imul    %rsi, %rdx
+    imul    %rsi, %rdx                      /* the <<24 is folded into rsi */
     shr     $PACK_HSHIFT, %rdx
     mov     (%r14,%rdx,4), %ecx             /* stored */
     mov     %r13d, (%r14,%rdx,4)            /* table[slot] = at */
@@ -116,19 +128,18 @@ L_(fast):
 
 L_(fast_miss):
     inc     %r13
-    dec     %rbx                            /* misses left at this stride */
-    jz      L_(fast_spent)
-    cmp     %r11, %r13
+    cmp     %rbx, %r13
     jbe     L_(fast)
-    jmp     L_(tail)
 
     /*
-     * Thirty-two misses without a match, so the cursor may start skipping and
-     * the general loop takes over. `at` has already been advanced past the
-     * last position tried, which is exactly what that loop reads as `next_at`,
-     * and the counter it wants is the trigger doubled.
+     * Past the limit, so either the input ran out or thirty-two misses did.
+     * Asked here rather than in the loop, once per lane rather than once per
+     * position. In the second case the cursor may start skipping and the
+     * general loop takes over: `at` already stands where that loop reads
+     * `next_at`, and the counter it wants is the trigger doubled.
      */
-L_(fast_spent):
+    cmp     %r11, %r13
+    ja      L_(tail)
     mov     %r13, %r12
     mov     $64, %rbx
     jmp     L_(scan)
@@ -173,8 +184,7 @@ L_(scan):
      * from the register is exact and saves a load per position. */
     mov     (%r15,%r13), %rax               /* word8(at) */
     mov     %rax, %rdx
-    shl     $24, %rdx                       /* hash5 reads five of the eight */
-    imul    %rsi, %rdx
+    imul    %rsi, %rdx                      /* hash5; the <<24 is folded into rsi */
     shr     $PACK_HSHIFT, %rdx
 
     mov     (%r14,%rdx,4), %ecx             /* stored */
@@ -304,7 +314,6 @@ L_(lazy):
 
     mov     (%r15,%rcx), %r12               /* word8(next) */
     mov     %r12, %rbx
-    shl     $24, %rbx
     imul    %rsi, %rbx
     shr     $PACK_HSHIFT, %rbx
 
@@ -706,7 +715,6 @@ L_(emit_done):
      * reads it, and the transition into it forms it. */
     add     %rax, %r13
     mov     %r13, %r10
-    mov     $32, %rbx                       /* misses left before the stride grows */
 
     /*
      * No early bail-out, deliberately, though one would be sound: once the
