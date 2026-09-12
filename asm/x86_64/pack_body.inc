@@ -144,6 +144,20 @@ L_(fast):
      * This is liblz4's prologue idea -- it issues two multiplies before
      * entering its loop for the same reason.
      */
+    /*
+     * Unrolled twice so the hand-over is a name rather than a move.
+     *
+     * Carrying the lookahead across the back edge cost two register copies per
+     * position -- `mov %r8,%rax` and `mov %r9,%rdx`, which the profile put at
+     * 8% of cycles between them, moving bytes that were already in a register.
+     * With the body written twice the two pairs simply swap roles: the half
+     * that reads `rax`/`rdx` writes `r8`/`r9`, and the half after it does the
+     * reverse. Eleven micro-ops per position become nine.
+     *
+     * Worth doing here and not elsewhere because this loop is issue-bound
+     * again: IPC 5.66 against a machine about six wide, and a profile with no
+     * peak above 5.4%. Nothing is waiting, so anything removed is a cycle.
+     */
     mov     1(%r15,%r13), %r8               /* word8(at + 1) */
     mov     %r8, %r9
     imul    %rsi, %r9
@@ -152,18 +166,39 @@ L_(fast):
     mov     (%r14,%rdx,4), %ecx             /* stored, for `at` */
     mov     %r13d, (%r14,%rdx,4)            /* table[slot] = at */
     cmp     %r13, %rcx
-    jae     L_(fast_miss)
+    jae     L_(fast_miss_a)
     mov     %r13d, %edi
     sub     %rcx, %rdi
     cmp     $65535, %edi                    /* MAX_OFFSET */
-    ja      L_(fast_miss)
+    ja      L_(fast_miss_a)
     cmp     (%r15,%rcx), %eax               /* word4(candidate) == here */
     je      L_(to_match)
 
-L_(fast_miss):
+L_(fast_miss_a):
     inc     %r13
-    mov     %r8, %rax                       /* the position ahead becomes this */
-    mov     %r9, %rdx
+    cmp     %rbx, %r13
+    ja      L_(fast_handover)
+
+    /* The same again with the pairs exchanged: this half judges from r8/r9 and
+     * computes ahead into rax/rdx. */
+    mov     1(%r15,%r13), %rax
+    mov     %rax, %rdx
+    imul    %rsi, %rdx
+    shr     $PACK_HSHIFT, %rdx
+
+    mov     (%r14,%r9,4), %ecx
+    mov     %r13d, (%r14,%r9,4)
+    cmp     %r13, %rcx
+    jae     L_(fast_miss_b)
+    mov     %r13d, %edi
+    sub     %rcx, %rdi
+    cmp     $65535, %edi
+    ja      L_(fast_miss_b)
+    cmp     (%r15,%rcx), %r8d
+    je      L_(to_match_b)
+
+L_(fast_miss_b):
+    inc     %r13
     cmp     %rbx, %r13
     jbe     L_(fast)
 
@@ -189,6 +224,13 @@ L_(fast_handover):
  * fetched on every iteration whether or not it is taken. From here it is two.
  * Placed behind the unconditional jump above so nothing falls into it. */
 L_(to_match):
+    jmp     L_(match)
+
+/* The second half judges from r8, but the match path reads the position's word
+ * out of rax like the first half leaves it. One move, on a path taken once per
+ * match rather than once per position. */
+L_(to_match_b):
+    mov     %r8, %rax
     jmp     L_(match)
 
 /* The general loop's exits, moved down to sit against it. They used to lead
