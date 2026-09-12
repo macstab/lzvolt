@@ -65,7 +65,36 @@
 #include "../common.h"
 
 /*
- * The frame. Every slot here is written once per value or once per block, on
+ * # One body, one symbol per part line
+ *
+ * Assembled once per part line, the way the decoder is: a wrapper file defines
+ * one of these and includes this, and the only thing that has to differ is the
+ * exported name. Each wrapper is its own translation unit, so the local labels
+ * inside cost nothing to share.
+ *
+ * Nothing diverges yet -- all three assemble the same instructions, and the
+ * byte-for-byte test proving that is what says the mechanism is sound. The
+ * split exists so Xeon can be tuned without touching AMD, which is first place
+ * on every shape measured and is not to be disturbed for a hypothesis.
+ *
+ * Vendor rather than the decoder's finer split, and the reason is evidence: two
+ * part lines have been measured, Xeon and EPYC. No Core part has. Narrowing the
+ * axis later costs one wrapper and one line of dispatch.
+ */
+#if defined(KEVA_XEON)
+#  define PACK_ENTRY keva_pack_xeon
+#elif defined(KEVA_AMD)
+#  define PACK_ENTRY keva_pack_amd
+#else
+#  define PACK_ENTRY keva_pack
+#endif
+
+/* Two levels, so the argument expands before KEVA_SYM pastes onto it. */
+#define PACK_NAME1(n) KEVA_SYM(n)
+#define PACK_NAME(n) PACK_NAME1(n)
+
+/*
+ * The frame. Every slot here is written once per record or once per block, on
  * the emit path; the search loop never touches it. See pack_body.inc.
  */
 #define PACK_RECENT         0
@@ -86,9 +115,9 @@
 
     .text
     .p2align 4
-    .globl KEVA_SYM(keva_pack)
+    .globl PACK_NAME(PACK_ENTRY)
 
-KEVA_SYM(keva_pack):
+PACK_NAME(PACK_ENTRY):
     push    %rbx
     push    %rbp
     push    %r12
@@ -360,6 +389,6 @@ KEVA_LABEL(pack, give_up):
     ret
 
 #if !defined(__APPLE__)
-    .size KEVA_SYM(keva_pack), . - KEVA_SYM(keva_pack)
+    .size PACK_NAME(PACK_ENTRY), . - PACK_NAME(PACK_ENTRY)
     .section .note.GNU-stack, "", %progbits
 #endif

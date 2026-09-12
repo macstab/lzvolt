@@ -766,7 +766,9 @@ fn pack_with(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> b
     // One pass. The split is decided while packing, not by packing twice.
     // Which of the two instantiations, decided once for the whole value.
     if input.len() > NARROW_TABLE_ABOVE {
-        pack_pass::<{ (64 - HASH_BITS_LARGE) as u32 }, u32>(input, out, table, EVEN, LAZY, ADAPTIVE);
+        pack_pass::<{ (64 - HASH_BITS_LARGE) as u32 }, u32>(
+            input, out, table, EVEN, LAZY, ADAPTIVE,
+        );
     } else {
         pack_pass::<{ (64 - HASH_BITS) as u32 }, u32>(input, out, table, EVEN, LAZY, ADAPTIVE);
     }
@@ -890,7 +892,6 @@ fn pack_pass<const SHIFT: u32, S: Slot>(
     let mut switch: Option<(usize, usize)> = None;
     let mut recent: u32 = 0;
     let mut seen = 0usize;
-
 
     let mut blocks = 0usize;
     let mut saturated = 0usize;
@@ -1168,7 +1169,14 @@ fn pack_pass<const SHIFT: u32, S: Slot>(
         }
         let literals = &input[literal_start..at - back];
         let wide = wide_literals_fit(literals, at - back, input.len());
-        emit_block(literals, at - candidate, matched + back, &mut cur, split, wide);
+        emit_block(
+            literals,
+            at - candidate,
+            matched + back,
+            &mut cur,
+            split,
+            wide,
+        );
 
         at += matched;
         next_at = at;
@@ -1353,7 +1361,6 @@ impl Split {
         }
     }
 }
-
 
 /// Bytes the fixed-width literal move writes, whatever the run's true length.
 ///
@@ -1695,7 +1702,12 @@ fn frame(input: &[u8]) -> Result<Frame<'_>, PackError> {
     let rest = input.get(header..).ok_or(PackError::Truncated)?;
 
     if raw & HYBRID_BIT == 0 {
-        return Ok(Frame { declared, body: rest, split, switch: None });
+        return Ok(Frame {
+            declared,
+            body: rest,
+            split,
+            switch: None,
+        });
     }
 
     let w = switch_width(declared);
@@ -1706,7 +1718,12 @@ fn frame(input: &[u8]) -> Result<Frame<'_>, PackError> {
     if in_at > body.len() || out_at == 0 || out_at >= declared {
         return Err(PackError::Truncated);
     }
-    Ok(Frame { declared, body, split, switch: Some((in_at, out_at)) })
+    Ok(Frame {
+        declared,
+        body,
+        split,
+        switch: Some((in_at, out_at)),
+    })
 }
 
 /// The decoder every kernel is diffed against, and the only place an error is
@@ -2066,14 +2083,14 @@ mod tests {
         // not have has to be refused like any other corruption.
         for len in [0u64, 1, 64, 4096, 1 << 20] {
             for flags in 0u64..4 {
-            for _ in 0..200 {
-                let mut stream = Vec::new();
-                put_varint_into((len << 2) | flags, &mut stream);
-                for _ in 0..(next() % 200) {
-                    stream.push(next() as u8);
+                for _ in 0..200 {
+                    let mut stream = Vec::new();
+                    put_varint_into((len << 2) | flags, &mut stream);
+                    for _ in 0..(next() % 200) {
+                        stream.push(next() as u8);
+                    }
+                    let _ = unpack(&stream, &mut out);
                 }
-                let _ = unpack(&stream, &mut out);
-            }
             }
         }
 
@@ -2195,7 +2212,9 @@ mod tests {
         };
 
         let mut cases: Vec<Vec<u8>> = Vec::new();
-        for size in [8usize, 64, 512, 2048, 2049, 4096, 8192, 8193, 40_000, 65_536] {
+        for size in [
+            8usize, 64, 512, 2048, 2049, 4096, 8192, 8193, 40_000, 65_536,
+        ] {
             cases.push(records(size));
             cases.push(vec![b'a'; size]);
             cases.push((0..size).map(|_| next() as u8).collect());
@@ -2433,9 +2452,17 @@ mod tests {
             assert_eq!(&value[..], &original[..], "the old value came back wrong");
 
             // A write: it goes back in the new format.
-            assert!(pack(&value, &mut repacked), "{} bytes did not pack", value.len());
+            assert!(
+                pack(&value, &mut repacked),
+                "{} bytes did not pack",
+                value.len()
+            );
             unpack(&repacked, &mut check).expect("what we just wrote");
-            assert_eq!(&check[..], &original[..], "the migrated value came back wrong");
+            assert_eq!(
+                &check[..],
+                &original[..],
+                "the migrated value came back wrong"
+            );
 
             was += legacy.len();
             now += repacked.len();
@@ -2514,11 +2541,22 @@ mod tests {
                 refused += 1;
                 continue;
             }
-            assert_eq!(&out[..], &data[..], "liblz4 read {} bytes wrong", data.len());
+            assert_eq!(
+                &out[..],
+                &data[..],
+                "liblz4 read {} bytes wrong",
+                data.len()
+            );
         }
         eprintln!("  even {even}, wide {wide}, refused by liblz4 {refused}");
-        assert!(even > 0, "no case chose the even split, so nothing was tested");
-        assert_eq!(refused, even, "liblz4 accepted one of our blocks -- see the note above");
+        assert!(
+            even > 0,
+            "no case chose the even split, so nothing was tested"
+        );
+        assert_eq!(
+            refused, even,
+            "liblz4 accepted one of our blocks -- see the note above"
+        );
     }
 
     /// The probe judges the whole value, not the part of it it happens to read.
@@ -2623,9 +2661,9 @@ mod tests {
                 }
                 let f = frame(&packed).expect("the packer wrote a header");
                 let took = match f.switch {
-                    None => keva_asm::unpack::unpack_asm(
-                        f.body, &mut out, f.declared, f.split.kernel(),
-                    ),
+                    None => {
+                        keva_asm::unpack::unpack_asm(f.body, &mut out, f.declared, f.split.kernel())
+                    }
                     Some(switch) => keva_asm::unpack::unpack_asm_hybrid(
                         f.body,
                         &mut out,
@@ -2639,7 +2677,11 @@ mod tests {
                     took,
                     "the kernel declined {} bytes ({})",
                     input.len(),
-                    if f.switch.is_some() { "two sections" } else { "one section" }
+                    if f.switch.is_some() {
+                        "two sections"
+                    } else {
+                        "one section"
+                    }
                 );
                 assert_eq!(&out[..], &input[..], "and then lost bytes");
             }
@@ -2709,7 +2751,9 @@ mod tests {
             }
             let f = frame(&packed).expect("the packer wrote a header");
             let took = match f.switch {
-                None => keva_asm::unpack::unpack_asm(f.body, &mut asm_out, f.declared, f.split.kernel()),
+                None => {
+                    keva_asm::unpack::unpack_asm(f.body, &mut asm_out, f.declared, f.split.kernel())
+                }
                 Some(switch) => keva_asm::unpack::unpack_asm_hybrid(
                     f.body,
                     &mut asm_out,
@@ -2723,12 +2767,26 @@ mod tests {
                 took,
                 "the kernel declined a stream the packer produced, {} bytes ({})",
                 input.len(),
-                if f.switch.is_some() { "two sections" } else { "one section" }
+                if f.switch.is_some() {
+                    "two sections"
+                } else {
+                    "one section"
+                }
             );
             unpack_portable(&packed, &mut ref_out).expect("the portable decoder accepts it");
 
-            assert_eq!(asm_out, ref_out, "decoders disagree on {} bytes", input.len());
-            assert_eq!(&asm_out[..], &input[..], "round trip lost {} bytes", input.len());
+            assert_eq!(
+                asm_out,
+                ref_out,
+                "decoders disagree on {} bytes",
+                input.len()
+            );
+            assert_eq!(
+                &asm_out[..],
+                &input[..],
+                "round trip lost {} bytes",
+                input.len()
+            );
         }
     }
 
@@ -2769,7 +2827,9 @@ mod tests {
                 continue;
             };
             let took = match f.switch {
-                None => keva_asm::unpack::unpack_asm(f.body, &mut asm_out, f.declared, f.split.kernel()),
+                None => {
+                    keva_asm::unpack::unpack_asm(f.body, &mut asm_out, f.declared, f.split.kernel())
+                }
                 Some(switch) => keva_asm::unpack::unpack_asm_hybrid(
                     f.body,
                     &mut asm_out,
@@ -2828,8 +2888,12 @@ mod tests {
             let mut i = 0u64;
             while mixed.len() < size {
                 mixed.extend_from_slice(
-                    format!("{{\"k\":\"{:08x}\",\"role\":\"member\",\"n\":{}}}", i.wrapping_mul(2654435761), i % 97)
-                        .as_bytes(),
+                    format!(
+                        "{{\"k\":\"{:08x}\",\"role\":\"member\",\"n\":{}}}",
+                        i.wrapping_mul(2654435761),
+                        i % 97
+                    )
+                    .as_bytes(),
                 );
                 i += 1;
             }
@@ -2839,10 +2903,6 @@ mod tests {
 
         let mut rust_out = Vec::new();
         let mut asm_out = Vec::new();
-        // Both sides start from the sentinel, not from zero: a zero slot reads
-        // as position -1 and would send the kernel's verify load out of bounds.
-        let mut rust_table = Box::new([EMPTY; HASH_SIZE]);
-        let mut asm_table = keva_asm::pack_find::new_table();
         let mut round_trip = Vec::new();
 
         // Which portable packer this kernel is the counterpart of. The two are
@@ -2854,46 +2914,71 @@ mod tests {
         // by accident.
         let production = keva_asm::pack_find::kernel_is_production_packer();
 
-        for input in &cases {
-            let rust_kept = if production {
-                pack_with(input, &mut rust_out, &mut rust_table)
-            } else {
-                pack_with_eager(input, &mut rust_out, &mut rust_table)
-            };
-            let asm_kept =
-                keva_asm::pack_find::pack_asm(input, &mut asm_out, &mut asm_table).is_some();
+        // Coverage asserted rather than assumed: if the dispatch ever stops
+        // reporting the bodies that exist, this test would quietly shrink to
+        // one line and keep passing.
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(
+            keva_asm::pack_find::PartLine::all().len(),
+            3,
+            "x86-64 has three assembled bodies and the test must drive all of them"
+        );
 
-            // The eager kernel writes the even split only. Where the portable
-            // packer chose the wide match it also made a second pass over the
-            // table, so the two tables no longer hold the same thing -- both are
-            // reset rather than letting the divergence follow into later cases.
-            // The production kernel writes every split, so it has nothing to
-            // skip.
-            if rust_kept && !production {
-                let (raw, _) = get_varint(&rust_out).expect("a header");
-                if Split::from_header(raw) != EVEN {
-                    rust_table.fill(EMPTY);
-                    asm_table.fill(EMPTY);
-                    continue;
+        // Every assembled body, not merely the one this machine dispatches to.
+        // The three part lines are identical today and this is what says so;
+        // without it an Intel runner would never execute the AMD body, and a
+        // divergence in it would wait for production to find it.
+        for &line in keva_asm::pack_find::PartLine::all() {
+            // Both sides start from the sentinel, not from zero: a zero slot reads
+            // as position -1 and would send the kernel's verify load out of bounds.
+            // Fresh per line, because the table is carried across records and a
+            // line that inherited another's table would be searching a different
+            // one.
+            let mut rust_table = Box::new([EMPTY; HASH_SIZE]);
+            let mut asm_table = keva_asm::pack_find::new_table();
+
+            for input in &cases {
+                let rust_kept = if production {
+                    pack_with(input, &mut rust_out, &mut rust_table)
+                } else {
+                    pack_with_eager(input, &mut rust_out, &mut rust_table)
+                };
+                let asm_kept =
+                    keva_asm::pack_find::pack_asm_on(line, input, &mut asm_out, &mut asm_table)
+                        .is_some();
+
+                // The eager kernel writes the even split only. Where the portable
+                // packer chose the wide match it also made a second pass over the
+                // table, so the two tables no longer hold the same thing -- both are
+                // reset rather than letting the divergence follow into later cases.
+                // The production kernel writes every split, so it has nothing to
+                // skip.
+                if rust_kept && !production {
+                    let (raw, _) = get_varint(&rust_out).expect("a header");
+                    if Split::from_header(raw) != EVEN {
+                        rust_table.fill(EMPTY);
+                        asm_table.fill(EMPTY);
+                        continue;
+                    }
                 }
-            }
 
-            assert_eq!(
-                rust_kept,
-                asm_kept,
-                "disagreed on whether packing helped for {} bytes",
-                input.len()
-            );
-
-            if rust_kept {
                 assert_eq!(
-                    rust_out,
-                    asm_out,
-                    "different encodings for the same {} byte input",
+                    rust_kept,
+                    asm_kept,
+                    "{line:?} disagreed on whether packing helped for {} bytes",
                     input.len()
                 );
-                unpack(&asm_out, &mut round_trip).expect("assembly output must unpack");
-                assert_eq!(&round_trip, input, "assembly output lost bytes");
+
+                if rust_kept {
+                    assert_eq!(
+                        rust_out,
+                        asm_out,
+                        "{line:?} produced a different encoding for the same {} byte input",
+                        input.len()
+                    );
+                    unpack(&asm_out, &mut round_trip).expect("assembly output must unpack");
+                    assert_eq!(&round_trip, input, "assembly output lost bytes");
+                }
             }
         }
     }
@@ -2909,7 +2994,8 @@ mod tests {
     /// output by 94 bytes.
     #[test]
     fn every_assembled_body_is_reached_and_agrees() {
-        if !keva_asm::pack_find::asm_available() || !keva_asm::pack_find::kernel_is_production_packer()
+        if !keva_asm::pack_find::asm_available()
+            || !keva_asm::pack_find::kernel_is_production_packer()
         {
             return;
         }
@@ -3006,7 +3092,10 @@ mod tests {
         }
 
         assert!(seen_even > 0, "no case stayed in the even split");
-        assert!(seen_hybrid > 0, "no case changed split, so the wide bodies and the trailer went untested");
+        assert!(
+            seen_hybrid > 0,
+            "no case changed split, so the wide bodies and the trailer went untested"
+        );
         assert!(seen_wide_table > 0, "no case used the twelve-bit table");
         assert!(seen_narrow > 0, "no case used the eleven-bit table");
     }

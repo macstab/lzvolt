@@ -286,7 +286,12 @@ fn against_lz4(c: &mut Criterion) {
         // a `Vec` inside every iteration and charge LZ4 for it.
         let mut out = vec![0u8; original + 64];
         group.bench_function(BenchmarkId::new("decompress", label), |b| {
-            b.iter(|| black_box(lz4_flex::block::decompress_into(black_box(&packed), &mut out)));
+            b.iter(|| {
+                black_box(lz4_flex::block::decompress_into(
+                    black_box(&packed),
+                    &mut out,
+                ))
+            });
         });
 
         eprintln!(
@@ -344,7 +349,12 @@ fn same_bytes(c: &mut Criterion) {
     ] {
         let mut block = vec![0u8; data.len() + 1024];
         let n = unsafe {
-            LZ4_compress_default(data.as_ptr(), block.as_mut_ptr(), data.len() as i32, block.len() as i32)
+            LZ4_compress_default(
+                data.as_ptr(),
+                block.as_mut_ptr(),
+                data.len() as i32,
+                block.len() as i32,
+            )
         };
         assert!(n > 0);
         block.truncate(n as usize);
@@ -357,27 +367,47 @@ fn same_bytes(c: &mut Criterion) {
         // size. No allocation, no Vec bookkeeping, no Result on either.
         // Checked once, outside the loop, so the timed body is the same shape
         // on both sides: one call, and the result handed to `black_box`.
-        assert!(keva_asm::unpack::unpack_into_slice(&block, &mut mine, data.len(), keva_asm::unpack::Split::Even));
+        assert!(keva_asm::unpack::unpack_into_slice(
+            &block,
+            &mut mine,
+            data.len(),
+            keva_asm::unpack::Split::Even
+        ));
         group.bench_function(BenchmarkId::new("keva", label), |b| {
             b.iter(|| {
                 black_box(keva_asm::unpack::unpack_into_slice(
-                    black_box(&block), &mut mine, data.len(), keva_asm::unpack::Split::Even))
+                    black_box(&block),
+                    &mut mine,
+                    data.len(),
+                    keva_asm::unpack::Split::Even,
+                ))
             });
         });
         group.bench_function(BenchmarkId::new("liblz4", label), |b| {
             b.iter(|| unsafe {
-                black_box(LZ4_decompress_safe(black_box(block.as_ptr()), theirs.as_mut_ptr(),
-                                              block.len() as i32, data.len() as i32))
+                black_box(LZ4_decompress_safe(
+                    black_box(block.as_ptr()),
+                    theirs.as_mut_ptr(),
+                    block.len() as i32,
+                    data.len() as i32,
+                ))
             });
         });
         // `decompress_into` rather than `decompress`, so this arm reuses its
         // buffer like the other two instead of allocating one per call. The
         // crate is built without `safe-decode`, which is its fast path.
-        assert_eq!(lz4_flex::block::decompress_into(&block, &mut flex).unwrap(), data.len());
+        assert_eq!(
+            lz4_flex::block::decompress_into(&block, &mut flex).unwrap(),
+            data.len()
+        );
         group.bench_function(BenchmarkId::new("lz4_flex", label), |b| {
-            b.iter(|| black_box(lz4_flex::block::decompress_into(black_box(&block), &mut flex)));
+            b.iter(|| {
+                black_box(lz4_flex::block::decompress_into(
+                    black_box(&block),
+                    &mut flex,
+                ))
+            });
         });
-
     }
     group.finish();
 }
@@ -447,7 +477,12 @@ fn own_format(c: &mut Criterion) {
 
         let mut theirs = vec![0u8; data.len() + 1024];
         let n = unsafe {
-            LZ4_compress_default(data.as_ptr(), theirs.as_mut_ptr(), data.len() as i32, theirs.len() as i32)
+            LZ4_compress_default(
+                data.as_ptr(),
+                theirs.as_mut_ptr(),
+                data.len() as i32,
+                theirs.len() as i32,
+            )
         };
         assert!(n > 0);
         theirs.truncate(n as usize);
@@ -459,7 +494,11 @@ fn own_format(c: &mut Criterion) {
             Some((in_at, out_at)) => {
                 keva_asm::unpack::unpack_section(&body[..in_at], mine, out_at, 0, split)
                     && keva_asm::unpack::unpack_section(
-                        &body[in_at..], mine, data.len(), out_at, other,
+                        &body[in_at..],
+                        mine,
+                        data.len(),
+                        out_at,
+                        other,
                     )
             }
         };
@@ -471,8 +510,12 @@ fn own_format(c: &mut Criterion) {
         });
         group.bench_function(BenchmarkId::new("liblz4", label), |b| {
             b.iter(|| unsafe {
-                black_box(LZ4_decompress_safe(black_box(theirs.as_ptr()), yours.as_mut_ptr(),
-                                              theirs.len() as i32, data.len() as i32))
+                black_box(LZ4_decompress_safe(
+                    black_box(theirs.as_ptr()),
+                    yours.as_mut_ptr(),
+                    theirs.len() as i32,
+                    data.len() as i32,
+                ))
             });
         });
         // The Rust port on its own blocks too. It is `#[inline]`, so the
@@ -486,12 +529,21 @@ fn own_format(c: &mut Criterion) {
             data.len()
         );
         group.bench_function(BenchmarkId::new("lz4_flex", label), |b| {
-            b.iter(|| black_box(lz4_flex::block::decompress_into(black_box(&flexed), &mut flexout)));
+            b.iter(|| {
+                black_box(lz4_flex::block::decompress_into(
+                    black_box(&flexed),
+                    &mut flexout,
+                ))
+            });
         });
         eprintln!(
             "  own_format {label}: keva {} B{}, liblz4 {} B",
             ours.len(),
-            if switch.is_some() { " (two sections)" } else { "" },
+            if switch.is_some() {
+                " (two sections)"
+            } else {
+                ""
+            },
             theirs.len()
         );
     }
@@ -549,7 +601,12 @@ fn three_packers(c: &mut Criterion) {
 
         let mut cbuf = vec![0u8; lz4_flex::block::get_maximum_output_size(data.len())];
         let n = unsafe {
-            LZ4_compress_default(data.as_ptr(), cbuf.as_mut_ptr(), data.len() as i32, cbuf.len() as i32)
+            LZ4_compress_default(
+                data.as_ptr(),
+                cbuf.as_mut_ptr(),
+                data.len() as i32,
+                cbuf.len() as i32,
+            )
         };
         assert!(n > 0);
         let lib_len = n as usize;
@@ -564,12 +621,15 @@ fn three_packers(c: &mut Criterion) {
             });
         });
 
-        let flex_len = lz4_flex::block::compress_into(&data, &mut cbuf).expect("sized by its own bound");
+        let flex_len =
+            lz4_flex::block::compress_into(&data, &mut cbuf).expect("sized by its own bound");
         group.bench_function(BenchmarkId::new("lz4_flex", label), |b| {
             b.iter(|| black_box(lz4_flex::block::compress_into(black_box(&data), &mut cbuf)));
         });
 
-        eprintln!("  compress3 {label}: keva {keva_len} B, liblz4 {lib_len} B, lz4_flex {flex_len} B");
+        eprintln!(
+            "  compress3 {label}: keva {keva_len} B, liblz4 {lib_len} B, lz4_flex {flex_len} B"
+        );
     }
     group.finish();
 }
@@ -580,5 +640,16 @@ fn three_packers(_: &mut Criterion) {}
 #[cfg(not(feature = "liblz4"))]
 fn same_bytes(_: &mut Criterion) {}
 
-criterion_group!(benches, packing, packing_asm, sizes, unpacking, ratio, against_lz4, same_bytes, own_format, three_packers);
+criterion_group!(
+    benches,
+    packing,
+    packing_asm,
+    sizes,
+    unpacking,
+    ratio,
+    against_lz4,
+    same_bytes,
+    own_format,
+    three_packers
+);
 criterion_main!(benches);

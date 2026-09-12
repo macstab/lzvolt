@@ -98,6 +98,114 @@ extern "C" {
     ) -> u32;
 }
 
+// One symbol per part line. Declared only where they exist: nothing outside
+// x86-64 links them.
+#[cfg(all(keva_asm, target_arch = "x86_64"))]
+extern "C" {
+    fn keva_pack_xeon(
+        src: *const u8,
+        src_len: usize,
+        dst: *mut u8,
+        dst_cap: usize,
+        table: *mut u32,
+    ) -> u32;
+
+    fn keva_pack_amd(
+        src: *const u8,
+        src_len: usize,
+        dst: *mut u8,
+        dst_cap: usize,
+        table: *mut u32,
+    ) -> u32;
+}
+
+/// Which assembled body a call runs.
+///
+/// The three are identical today and the byte-for-byte test requires them to
+/// stay that way; the split exists so one can be tuned without disturbing
+/// another. AMD is first place on every shape measured, so it is the one that
+/// does not move.
+///
+/// Vendor rather than the decoder's finer part-line split, and that is what the
+/// evidence supports: Xeon and EPYC have been measured, no Core part has.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PartLine {
+    /// A Core part, or a vendor nobody has measured.
+    Baseline,
+    Xeon,
+    Amd,
+}
+
+impl PartLine {
+    /// Every line this build has a body for, so a test can reach all of them.
+    ///
+    /// Dispatch means only one runs on a given machine, so without this an
+    /// Intel runner would never execute the AMD body and a divergence in it
+    /// could sit unnoticed until someone ran it in production.
+    pub fn all() -> &'static [PartLine] {
+        #[cfg(all(keva_asm, target_arch = "x86_64"))]
+        {
+            &[PartLine::Baseline, PartLine::Xeon, PartLine::Amd]
+        }
+        #[cfg(not(all(keva_asm, target_arch = "x86_64")))]
+        {
+            &[PartLine::Baseline]
+        }
+    }
+}
+
+/// The line this machine is, decided from the cached feature set.
+///
+/// `cpu::features()` is a `OnceLock`, so CPUID runs once per process and this
+/// is a predicted branch on a value that never changes -- once per record,
+/// outside the kernel. Inside it there is no CPU check at all.
+#[cfg(all(keva_asm, target_arch = "x86_64"))]
+#[inline]
+fn detect_line() -> PartLine {
+    let f = crate::cpu::features();
+    if f.xeon {
+        PartLine::Xeon
+    } else if f.amd {
+        PartLine::Amd
+    } else {
+        PartLine::Baseline
+    }
+}
+
+/// # Safety
+///
+/// The caller owes what the kernel's contract asks: `dst_cap` bytes writable at
+/// `dst`, `src_len` readable at `src`, and a table of at least [`TABLE_SIZE`].
+#[cfg(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[inline]
+unsafe fn run(
+    line: PartLine,
+    src: *const u8,
+    src_len: usize,
+    dst: *mut u8,
+    dst_cap: usize,
+    table: *mut u32,
+) -> u32 {
+    // The `return` is not needless, whatever clippy sees on the target where
+    // the other arm is compiled out: this is a statement block and the tail
+    // belongs to the other `cfg`.
+    #[cfg(target_arch = "x86_64")]
+    #[allow(clippy::needless_return)]
+    {
+        return match line {
+            PartLine::Xeon => keva_pack_xeon(src, src_len, dst, dst_cap, table),
+            PartLine::Amd => keva_pack_amd(src, src_len, dst, dst_cap, table),
+            PartLine::Baseline => keva_pack(src, src_len, dst, dst_cap, table),
+        };
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = line;
+        keva_pack(src, src_len, dst, dst_cap, table)
+    }
+}
+
 /// Output capacity the x86-64 kernel is given, and what it checks for.
 ///
 /// The Rust packer's own worst case, `Cursor::room`: the whole input as
@@ -145,7 +253,34 @@ fn room(n: usize) -> usize {
 /// overflowing four bits is packed by the portable packer instead, which is
 /// where the choice between the two splits is made.
 pub fn pack_asm(input: &[u8], out: &mut Vec<u8>, table: &mut [u32]) -> Option<usize> {
+    // As above: the tail of this function belongs to the other `cfg`.
+    #[cfg(all(keva_asm, target_arch = "x86_64"))]
+    #[allow(clippy::needless_return)]
+    {
+        return pack_asm_on(detect_line(), input, out, table);
+    }
+    #[cfg(not(all(keva_asm, target_arch = "x86_64")))]
+    #[allow(clippy::needless_return)]
+    {
+        pack_asm_on(PartLine::Baseline, input, out, table)
+    }
+}
+
+/// Pack through one named body, whichever machine this is.
+///
+/// Production goes through [`pack_asm`], which picks the line. This exists so
+/// the differential test can drive every assembled body rather than only the
+/// one the runner happens to be: an Intel machine would otherwise never
+/// execute the AMD body, and a divergence there would wait for production to
+/// find it.
+pub fn pack_asm_on(
+    line: PartLine,
+    input: &[u8],
+    out: &mut Vec<u8>,
+    table: &mut [u32],
+) -> Option<usize> {
     debug_assert!(table.len() >= TABLE_SIZE);
+    let _ = line;
 
     // The `return` is not needless, whatever clippy sees: this is a statement
     // block, not the function's tail, and the tail belongs to the other `cfg`.
@@ -183,7 +318,8 @@ pub fn pack_asm(input: &[u8], out: &mut Vec<u8>, table: &mut [u32]) -> Option<us
         // covers its worst case. `table` is at least `TABLE_SIZE`, which covers
         // every index the hash can produce.
         let written = unsafe {
-            keva_pack(
+            run(
+                line,
                 input.as_ptr(),
                 input.len(),
                 out.as_mut_ptr(),
@@ -215,7 +351,8 @@ pub fn pack_asm(input: &[u8], out: &mut Vec<u8>, table: &mut [u32]) -> Option<us
         // length only moves out to `written`, and every byte below it was
         // written by this call.
         let written = unsafe {
-            keva_pack(
+            run(
+                line,
                 input.as_ptr(),
                 input.len(),
                 out.as_mut_ptr(),
