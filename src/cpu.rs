@@ -121,6 +121,29 @@ pub fn best_isa() -> Isa {
     features().best()
 }
 
+/// Whether a brand string names a part line, ignoring case.
+///
+/// Pulled out of [`detect`] so it can be tested against real strings, which is
+/// the only way this is testable at all — everything around it needs CPUID.
+///
+/// Case-insensitive because the vendors do not agree with themselves. A
+/// Sapphire Rapids part writes `Intel(R) Xeon(R) Platinum 8481C`; an Emerald
+/// Rapids part writes `INTEL(R) XEON(R) PLATINUM 8581C`. Matching `Xeon`
+/// exactly classified the second as an unrecognised part and ran the generic
+/// kernel on it — silently, because the generic kernel is correct, just not the
+/// one tuned for that machine. It was found by a profile that reported no
+/// samples in the symbol it was looking for.
+///
+/// `line` must already be upper case.
+#[cfg(target_arch = "x86_64")]
+fn brand_says(brand: &str, line: &str) -> bool {
+    debug_assert_eq!(line, line.to_ascii_uppercase());
+    brand
+        .as_bytes()
+        .windows(line.len())
+        .any(|w| w.eq_ignore_ascii_case(line.as_bytes()))
+}
+
 fn detect() -> Features {
     let mut f = Features::default();
 
@@ -161,9 +184,9 @@ fn detect() -> Features {
                 }
             }
         }
-        let brand = String::from_utf8_lossy(&brand).to_string();
-        f.xeon = f.intel && brand.contains("Xeon");
-        f.epyc = f.amd && brand.contains("EPYC");
+        let brand = String::from_utf8_lossy(&brand);
+        f.xeon = f.intel && brand_says(&brand, "XEON");
+        f.epyc = f.amd && brand_says(&brand, "EPYC");
         f.avx2 = std::arch::is_x86_feature_detected!("avx2");
         f.avx512f = std::arch::is_x86_feature_detected!("avx512f");
     }
@@ -193,6 +216,34 @@ mod tests {
         }
         if cfg!(target_arch = "aarch64") {
             assert!(f.neon, "NEON is mandatory in AArch64");
+        }
+    }
+
+
+    /// The two spellings of the same word, from two real parts.
+    ///
+    /// `8481C` is what a `c3` instance reports and `8581C` what a `c4` does.
+    /// The second was classified as an unrecognised part for as long as the
+    /// match was case-sensitive, so it never ran the kernel written for it.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn a_part_line_is_recognised_whatever_its_case() {
+        for brand in [
+            "Intel(R) Xeon(R) Platinum 8481C CPU @ 2.70GHz",
+            "INTEL(R) XEON(R) PLATINUM 8581C CPU @ 2.30GHz",
+        ] {
+            assert!(super::brand_says(brand, "XEON"), "missed {brand}");
+            assert!(!super::brand_says(brand, "EPYC"), "false EPYC on {brand}");
+        }
+        assert!(super::brand_says("AMD EPYC 9B14", "EPYC"));
+        assert!(!super::brand_says("AMD EPYC 9B14", "XEON"));
+
+        // A part nobody has measured, and a translator that writes its own
+        // name: neither line matches and the generic kernel runs, which is the
+        // right answer.
+        for other in ["12th Gen Intel(R) Core(TM) i7-1260P", "VirtualApple @ 2.50GHz"] {
+            assert!(!super::brand_says(other, "XEON"));
+            assert!(!super::brand_says(other, "EPYC"));
         }
     }
 
