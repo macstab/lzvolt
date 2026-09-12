@@ -98,46 +98,86 @@ L_(fast_entry):
     /*
      * One limit instead of two tests. The lane used to ask twice per position:
      * has the counter run out, and is the cursor past the end. Both are "may
-     * this position be visited", so both fold into a single bound -- the
-     * earlier of the thirty-second position and the last one the input has.
+     * this position be visited", so both fold into a single bound.
      *
-     * Which of the two it was is worked out once, on the cold side, where it
-     * costs nothing. That takes the loop from three micro-ops of bookkeeping
-     * per position to two.
+     * The bound stops one short of `last`, because the lane reads the position
+     * ahead of the one it is judging -- see below -- and at `last` that read
+     * would go a byte past the input. Whatever the lane leaves goes to the
+     * general loop, which reads only the position it is on. Which positions
+     * get visited does not change, only which loop visits them.
      */
-    lea     31(%r13), %rbx
-    cmp     %r11, %rbx
-    cmova   %r11, %rbx                      /* min(last, at + 31) */
+    mov     %r11, %rbx
+    sub     $1, %rbx                        /* last - 1 */
+    jb      L_(fast_handover)               /* last was zero */
+    cmp     %r13, %rbx
+    jb      L_(fast_handover)               /* only `last` is left */
+    lea     31(%r13), %rcx
+    cmp     %rcx, %rbx
+    cmova   %rcx, %rbx                      /* min(last - 1, at + 31) */
 
-    .p2align 5
-L_(fast):
+    /*
+     * The first position's hash, so the loop can be entered with one already
+     * in hand. Everything inside it is then one position ahead of what it is
+     * judging.
+     */
     mov     (%r15,%r13), %rax               /* word8(at) */
     mov     %rax, %rdx
     imul    %rsi, %rdx                      /* the <<24 is folded into rsi */
-    shr     $PACK_HSHIFT, %rdx
-    mov     (%r14,%rdx,4), %ecx             /* stored */
+    shr     $PACK_HSHIFT, %rdx              /* slot(at) */
+
+    .p2align 5
+L_(fast):
+    /*
+     * Two positions in flight.
+     *
+     * The chain from a position's bytes to its verdict is a load, a multiply,
+     * a shift and a second load -- around seventeen cycles, and every one of
+     * them was previously spent before the next position's chain could start.
+     * The loop measured IPC 4.96 against a machine about six wide: not short
+     * of work to issue, short of work that was ready.
+     *
+     * Nothing in position N+1's hash depends on N's verdict, so it is started
+     * first and finished while N is being judged. The two chains overlap
+     * instead of queueing, and the loop carries the result across the back
+     * edge in `rax` and `rdx`.
+     *
+     * This is liblz4's prologue idea -- it issues two multiplies before
+     * entering its loop for the same reason.
+     */
+    mov     1(%r15,%r13), %r8               /* word8(at + 1) */
+    mov     %r8, %r9
+    imul    %rsi, %r9
+    shr     $PACK_HSHIFT, %r9               /* slot(at + 1), independent */
+
+    mov     (%r14,%rdx,4), %ecx             /* stored, for `at` */
     mov     %r13d, (%r14,%rdx,4)            /* table[slot] = at */
     cmp     %r13, %rcx
     jae     L_(fast_miss)
-    mov     %r13d, %edx
-    sub     %rcx, %rdx
-    cmp     $65535, %edx                    /* MAX_OFFSET */
+    mov     %r13d, %edi
+    sub     %rcx, %rdi
+    cmp     $65535, %edi                    /* MAX_OFFSET */
     ja      L_(fast_miss)
     cmp     (%r15,%rcx), %eax               /* word4(candidate) == here */
     je      L_(to_match)
 
 L_(fast_miss):
     inc     %r13
+    mov     %r8, %rax                       /* the position ahead becomes this */
+    mov     %r9, %rdx
     cmp     %rbx, %r13
     jbe     L_(fast)
 
     /*
-     * Past the limit, so either the input ran out or thirty-two misses did.
-     * Asked here rather than in the loop, once per lane rather than once per
-     * position. In the second case the cursor may start skipping and the
-     * general loop takes over: `at` already stands where that loop reads
-     * `next_at`, and the counter it wants is the trigger doubled.
+     * Past the limit: the input ran out, thirty-two misses did, or the lane
+     * reached the position it may not read ahead of. Asked here rather than in
+     * the loop, once per lane rather than once per position. The general loop
+     * takes over with `at` already standing where it reads `next_at`.
+     *
+     * The counter it is handed is the trigger doubled. Where the lane stopped
+     * for the other two reasons only `last` itself remains, and a stride over
+     * one position is not observable.
      */
+L_(fast_handover):
     cmp     %r11, %r13
     ja      L_(tail)
     mov     %r13, %r12
