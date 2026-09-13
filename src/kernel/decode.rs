@@ -230,16 +230,25 @@ pub enum Lz4Body {
 }
 
 impl Lz4Body {
-    /// Every body this build has, so a test can reach all of them.
+    /// Every body this *machine* can execute, so a test can reach all of them.
+    ///
+    /// Not every body this build contains: the two line bodies copy 256 bits at
+    /// a time, and calling one directly on a part without AVX is an illegal
+    /// instruction rather than a failed assertion. Dispatch would never pick
+    /// them there, and neither does this.
     pub fn all() -> &'static [Lz4Body] {
         #[cfg(all(keva_asm, target_arch = "x86_64"))]
         {
-            &[
-                Lz4Body::Baseline,
-                Lz4Body::Ssse3,
-                Lz4Body::Xeon,
-                Lz4Body::Epyc,
-            ]
+            if crate::cpu::features().avx2 {
+                &[
+                    Lz4Body::Baseline,
+                    Lz4Body::Ssse3,
+                    Lz4Body::Xeon,
+                    Lz4Body::Epyc,
+                ]
+            } else {
+                &[Lz4Body::Baseline, Lz4Body::Ssse3]
+            }
         }
         #[cfg(not(all(keva_asm, target_arch = "x86_64")))]
         {
@@ -258,11 +267,18 @@ fn detect_lz4_body() -> Lz4Body {
         if !f.ssse3 {
             return Lz4Body::Baseline;
         }
-        if f.xeon {
-            return Lz4Body::Xeon;
-        }
-        if f.epyc {
-            return Lz4Body::Epyc;
+        // The two line bodies copy the final literal run 256 bits at a time,
+        // which every Xeon and EPYC since 2011 can do -- but that is an
+        // assumption about a brand string, and a brand string is not a
+        // capability. CPUID is asked as well, and a part that says no gets the
+        // SSSE3 body, which assumes nothing.
+        if f.avx2 {
+            if f.xeon {
+                return Lz4Body::Xeon;
+            }
+            if f.epyc {
+                return Lz4Body::Epyc;
+            }
         }
         Lz4Body::Ssse3
     }

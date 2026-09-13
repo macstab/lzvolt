@@ -150,6 +150,33 @@
 #  define MAT_MAX    15
 #endif
 
+/*
+ * Two hundred and fifty-six bits for the final literal run, where the part is
+ * known to have them.
+ *
+ * The copy loop is sixty-one percent of the kernel on noise_512 and is already
+ * down to five micro-ops a block, so there are no instructions left to remove
+ * from it -- its IPC inside the loop is 3.1, well under the issue width, which
+ * says it is waiting on ports rather than on issue. Two stores per thirty-two
+ * bytes is the wall, and the only way through it is to move more per store.
+ *
+ * Only where the part line is known and only for foreign blocks. `vmovdqu ymm`
+ * is AVX, which every Xeon and EPYC since 2011 has -- but "every" is an
+ * assumption about a brand string, so the dispatch asks CPUID for it as well
+ * and hands a part without it the SSSE3 body. Our own format's bodies are not
+ * touched: the promise attached to them is that they do not change.
+ *
+ * 256 and not 512: AVX-512 is fused off on client parts and downclocks older
+ * server ones, and this loop is bound by store ports rather than by width, so
+ * the wider registers would buy a fraction of what they risk.
+ */
+#if defined(KEVA_LZ4) && (defined(KEVA_XEON) || defined(KEVA_EPYC))
+#  define KEVA_YMM 1
+#  define LIT_BLK  64
+#else
+#  define LIT_BLK  32
+#endif
+
 #define MIN_MATCH         4
 #define OVERRUN           32
 #define FAST_INPUT_SLACK  32
@@ -920,7 +947,7 @@ L(lit_last):
      * the remainder at zero and the microcode start-up is paid in full to copy
      * no bytes. It was the hottest instruction in the kernel, at 18.65%.
      */
-    cmp     $OVERRUN, %rcx
+    cmp     $LIT_BLK, %rcx
     jb      L(lit_b16)
 
     /*
@@ -945,18 +972,34 @@ L(lit_last):
      * and nine micro-ops become five.
      */
     mov     %rcx, %rax
-    and     $-OVERRUN, %rax                 /* whole blocks of it */
+    and     $-LIT_BLK, %rax                 /* whole blocks of it */
     add     %rax, %rsi
     add     %rax, %rdi
     sub     %rax, %rcx                      /* and what the ladder gets */
     neg     %rax
 L(lit_l32):
+#ifdef KEVA_YMM
+    vmovdqu (%rsi,%rax,1), %ymm0
+    vmovdqu 32(%rsi,%rax,1), %ymm1
+    vmovdqu %ymm0, (%rdi,%rax,1)
+    vmovdqu %ymm1, 32(%rdi,%rax,1)
+#else
     movdqu  (%rsi,%rax,1), %xmm0
     movdqu  16(%rsi,%rax,1), %xmm1
     movdqu  %xmm0, (%rdi,%rax,1)
     movdqu  %xmm1, 16(%rdi,%rax,1)
-    add     $OVERRUN, %rax
+#endif
+    add     $LIT_BLK, %rax
     jne     L(lit_l32)
+#ifdef KEVA_YMM
+    /*
+     * Back to legacy width before anything else runs. Everything around this
+     * loop is SSE, and mixing 256-bit VEX with legacy SSE in one function costs
+     * a transition on every Intel part that has both. One instruction, once per
+     * value, against a stall on every `movdqu` after it.
+     */
+    vzeroupper
+#endif
     jmp     L(lit_b16)
 #endif
 

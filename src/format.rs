@@ -2406,9 +2406,22 @@ mod tests {
             // reached a part nobody tests on -- which has happened once
             // already, to the Xeon decoder on Emerald Rapids.
             let bodies = keva_asm::unpack::Lz4Body::all();
+            // Four on an x86-64 part with AVX, two without -- the line bodies
+            // copy 256 bits at a time and are not callable there. One
+            // elsewhere. Pinned so that adding a body without extending this
+            // loop is a failure rather than a silent gap.
+            let want = if cfg!(target_arch = "x86_64") {
+                if keva_asm::cpu::features().avx2 {
+                    4
+                } else {
+                    2
+                }
+            } else {
+                1
+            };
             assert_eq!(
                 bodies.len(),
-                if cfg!(target_arch = "x86_64") { 4 } else { 1 },
+                want,
                 "a body was added or removed without this test noticing"
             );
             for &body in bodies {
