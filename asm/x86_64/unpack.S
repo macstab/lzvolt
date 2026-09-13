@@ -878,6 +878,38 @@ L(lit_wide):
  */
 L(lit_last):
     mov     %r10, %rcx
+#ifdef KEVA_XEON
+    /*
+     * ...and on a part with Fast Short REP MOV the string instruction is still
+     * the right answer once the run is long enough to amortise starting it.
+     *
+     * The first cut of this loop removed `rep movsb` from the LZ4 body outright,
+     * on the reasoning that nothing long would reach it any more. That was an
+     * assumption, and the measurement refused it -- three run lengths on a Xeon
+     * 8481C, GiB/s on the whole value:
+     *
+     *   512 B     rep movsb 16.1   this loop 21.8
+     *   4096 B              59.0             30.6
+     *   65536 B             31.9             31.6
+     *
+     * Two regimes and a crossover. `rep movsb` costs about twenty-two cycles
+     * before it moves a byte and then sustains 23 B/cycle; this loop starts
+     * immediately and sustains 11.9. They meet near 550 bytes, and past 64 KiB
+     * both are held up by memory instead.
+     *
+     * So the threshold sits above the crossover with room on either side: a
+     * 512-byte run takes the loop, which measured 35% better, and a 4 KiB run
+     * takes the string instruction, which measured 93% better. Picking either
+     * one for both loses half the column.
+     *
+     * The axis really is run length. The part line decides *whether* there is a
+     * crossover -- Zen has ERMSB without FSRM and pays tens of cycles on the
+     * same copy, so its body has no such branch -- but it does not decide where.
+     */
+#  define REP_MIN 1024
+    cmp     $REP_MIN, %rcx
+    jae     L(lit_rest)
+#endif
 L(lit_l32):
     cmp     $OVERRUN, %rcx
     jb      L(lit_rest)
