@@ -300,7 +300,7 @@ if [ "${KEVA_QUICK:-0}" = 1 ]; then
         --measurement-time ${KEVA_TIME:-2} --warm-up-time ${KEVA_WARM:-1} --noplot \
         'compress3|own_format|same_bytes' \
         2>&1 | tee "$HOME/run-$KEVA_COMMIT-1.txt" |
-        grep -E 'compress3|same_bytes|thrpt' || echo "   quick bench failed"
+        grep -E 'compress3|own_format|same_bytes|thrpt' || echo "   quick bench failed"
 else
     echo "== throughput, $runs runs"
     for i in $(seq 1 "$runs"); do
