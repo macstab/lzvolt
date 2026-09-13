@@ -85,6 +85,10 @@ QUICK="${QUICK:-0}"
 # evening, so a verdict there needs TIME=5 and a revision in front of it to
 # absorb the cold start a fresh machine gives whatever is measured first.
 TIME="${TIME:-1}"
+# Which benchmark groups the quick run measures. Packing costs ten times what
+# decoding does, so a decoder question that leaves compress3 in spends two
+# thirds of its wall clock producing numbers it will not read.
+GROUPS="${GROUPS:-compress3|own_format|same_bytes}"
 WARM="${WARM:-1}"
 # Unique per invocation, so two runs at once do not fight over one name --
 # which they did, and the loser reported "already exists" from inside the
@@ -200,6 +204,7 @@ export KEVA_COMMIT="${2:-unknown}"
 export KEVA_QUICK="${3:-0}"
 export KEVA_TIME="${4:-1}"
 export KEVA_WARM="${5:-1}"
+export KEVA_GROUPS="${6:-compress3|own_format|same_bytes}"
 report="$HOME/report-$KEVA_COMMIT.txt"
 
 exec > >(tee "$report") 2>&1
@@ -314,9 +319,12 @@ if [ "${KEVA_QUICK:-0}" = 1 ]; then
     # This answers "did it move", not "by exactly how much". A cell that swings
     # five percent between revisions is worth another look at five seconds; one
     # that does not is decided.
+    # GROUPS=... narrows what is measured. Packing is ten times the cost of
+    # decoding, so a decoder question that measures compress3 as well spends
+    # two thirds of its wall clock on numbers it will not read.
     cargo bench -q -p keva-core --features liblz4 --bench pack -- \
         --measurement-time ${KEVA_TIME:-2} --warm-up-time ${KEVA_WARM:-1} --noplot \
-        'compress3|own_format|same_bytes' \
+        "${KEVA_GROUPS:-compress3|own_format|same_bytes}" \
         2>&1 | tee "$HOME/run-$KEVA_COMMIT-1.txt" |
         grep -E 'compress3|own_format|same_bytes|thrpt' || echo "   quick bench failed"
 else
@@ -436,7 +444,7 @@ one () {
     for sha in $SHORT; do
         echo "== running $sha (apt and rustc are paid once, on the first)"
         "${GC[@]}" compute ssh "$vm" --zone="$zone" --quiet \
-            --command="bash ~/run.sh $RUNS $sha $QUICK $TIME $WARM" || echo "== $sha reported a failure"
+            --command="bash ~/run.sh $RUNS $sha $QUICK $TIME $WARM '$GROUPS'" || echo "== $sha reported a failure"
     done
 
     echo "== downloading"
