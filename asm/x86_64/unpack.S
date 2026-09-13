@@ -912,7 +912,26 @@ L(lit_last):
 #endif
 L(lit_l32):
     cmp     $OVERRUN, %rcx
-    jb      L(lit_rest)
+    /*
+     * Past the string instruction, not into it.
+     *
+     * What is left here is under a block -- nought to thirty-one bytes -- and
+     * the threshold above says a run that short is the ladder's business. Going
+     * through L(lit_rest) would run `rep movsb` on it, and on a 512-byte value,
+     * which is exactly sixteen blocks, it runs it on *nothing*: the loop leaves
+     * `rcx` at zero and the microcode start-up is paid in full to copy no bytes.
+     *
+     * It was the single hottest instruction in the kernel. `perf annotate` on
+     * noise_512, cycles:u, the jump standing in for the string operation
+     * in front of it:
+     *
+     *   18.65%  jmp   <- behind rep movsb, rcx = 0
+     *    7.39%  movdqu %xmm1,0x10(%rdi)
+     *    5.58%  add   $0x20,%rdi
+     *
+     * Eighteen percent of the kernel to copy zero bytes, on every value.
+     */
+    jb      L(lit_b16)
     movdqu  (%rsi), %xmm0
     movdqu  16(%rsi), %xmm1
     movdqu  %xmm0, (%rdi)
