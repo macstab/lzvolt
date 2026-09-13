@@ -582,6 +582,107 @@ fn own_format(c: &mut Criterion) {
 #[cfg(not(feature = "liblz4"))]
 fn own_format(_: &mut Criterion) {}
 
+/// The whole read, not the kernel: what a caller of `pack::unpack` pays.
+///
+/// `own_format` strips the header outside the timed loop and hands the kernel a
+/// bare body, so every number this project has published for our own format is
+/// a kernel time. Production does not get that: `store/pack.rs` reads the
+/// varint, derives the split, looks for a hybrid trailer and range-checks both
+/// of its offsets before the kernel is entered -- in Rust, once per value, on
+/// the read path of a store that reads ten times for every write.
+///
+/// Nothing here had ever measured it. The difference between this group and
+/// `own_format` is what that framing costs, and it is the number that decides
+/// whether the header belongs in the kernel.
+///
+/// The other two are end-to-end in the same sense: bytes in, value out,
+/// destination buffer reused across iterations so the comparison is decoding
+/// and not allocation. A value the packer refused is copied, because that is
+/// what the store does with it.
+#[cfg(feature = "liblz4")]
+fn production(c: &mut Criterion) {
+    #[link(name = "lz4")]
+    extern "C" {
+        fn LZ4_compress_default(s: *const u8, d: *mut u8, n: i32, cap: i32) -> i32;
+        fn LZ4_decompress_safe(s: *const u8, d: *mut u8, n: i32, cap: i32) -> i32;
+    }
+
+    let mut group = c.benchmark_group("production");
+    for (label, data) in [
+        ("records_512", records(512)),
+        ("varied_512", varied(512)),
+        ("noise_512", noise(512)),
+        ("records_4k", records(4096)),
+        ("varied_4k", varied(4096)),
+        ("noise_4k", noise(4096)),
+        ("records_64k", records(65_536)),
+        ("varied_64k", varied(65_536)),
+        ("noise_64k", noise(65_536)),
+    ] {
+        let mut ours = Vec::new();
+        let packed = pack::pack(&data, &mut ours);
+
+        let mut theirs = vec![0u8; data.len() + 1024];
+        let n = unsafe {
+            LZ4_compress_default(
+                data.as_ptr(),
+                theirs.as_mut_ptr(),
+                data.len() as i32,
+                theirs.len() as i32,
+            )
+        };
+        assert!(n > 0);
+        theirs.truncate(n as usize);
+        let flexed = lz4_flex::compress(&data);
+
+        let mut mine = Vec::with_capacity(data.len() + 64);
+        let mut yours = vec![0u8; data.len() + 64];
+        let mut flexout = vec![0u8; data.len() + 64];
+
+        if packed {
+            pack::unpack(&ours, &mut mine).expect("our own block");
+            assert_eq!(mine, data);
+        }
+
+        group.throughput(Throughput::Bytes(data.len() as u64));
+        group.bench_function(BenchmarkId::new("keva", label), |b| {
+            if packed {
+                b.iter(|| black_box(pack::unpack(black_box(&ours), &mut mine).is_ok()));
+            } else {
+                // Refused, so the store holds the bytes as they arrived and the
+                // reader copies them out. No header, no kernel.
+                b.iter(|| {
+                    mine.clear();
+                    mine.extend_from_slice(black_box(&data));
+                    black_box(mine.len())
+                });
+            }
+        });
+        group.bench_function(BenchmarkId::new("liblz4", label), |b| {
+            b.iter(|| unsafe {
+                black_box(LZ4_decompress_safe(
+                    black_box(theirs.as_ptr()),
+                    yours.as_mut_ptr(),
+                    theirs.len() as i32,
+                    data.len() as i32,
+                ))
+            });
+        });
+        group.bench_function(BenchmarkId::new("lz4_flex", label), |b| {
+            b.iter(|| {
+                black_box(lz4_flex::block::decompress_into(
+                    black_box(&flexed),
+                    &mut flexout,
+                ))
+            });
+        });
+    }
+    group.finish();
+}
+
+#[cfg(not(feature = "liblz4"))]
+fn production(_: &mut Criterion) {}
+
 /// All three packers over the same input, in one run.
 ///
 /// The packing comparison had only ever been against lz4_flex, which is a Rust
@@ -679,6 +780,7 @@ criterion_group!(
     against_lz4,
     same_bytes,
     own_format,
+    production,
     three_packers
 );
 criterion_main!(benches);
