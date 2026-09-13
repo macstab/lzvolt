@@ -233,7 +233,29 @@
  */
 
     .text
-    .p2align 4
+/*
+ * Sixty-four rather than sixteen, and the reason is a measurement rather than
+ * a rule of thumb.
+ *
+ * Adding the LZ4 bodies put about sixteen kilobytes of text in front of some of
+ * these symbols and changed nothing else -- every one of our own bodies is
+ * byte-identical to what it was, compared in the text section. An EPYC 9B14
+ * still lost 6.6% on records_64k and 4.8% on records_4k, measured A-B-B-A on
+ * one machine so that neither the machine nor the ordering could be the cause:
+ *
+ *   records_64k   12.106  11.068  11.308  11.843   (before, after, after, before)
+ *
+ * The two groups do not overlap. What moved was the address, so the address is
+ * what has to stop moving. At sixteen a symbol lands anywhere in a 64-byte
+ * line depending on what precedes it; at sixty-four it lands at the start of
+ * one, and the aligned loop head inside it keeps a fixed offset from there.
+ *
+ * Zen is where this showed up. The same shift cost 1.7% and 0.8% on a Xeon and
+ * nothing measurable on Axion.
+ *
+ * The cost is up to 48 bytes of padding per symbol, and there are thirteen.
+ */
+    .p2align 6
     .globl KEVA_NAME(KEVA_ENTRY)
 
 KEVA_NAME(KEVA_ENTRY):
