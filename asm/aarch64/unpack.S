@@ -647,6 +647,43 @@ L(litcp_block):
 L(litcp_out):
     b       L(slow_lit_done)
 L(slow_lit_exact):
+#ifdef KEVA_LZ4
+    /*
+     * The last literal run, in blocks that carry their own addressing.
+     *
+     * This is where an incompressible value spends all of its time: liblz4
+     * writes one literal run covering the whole block, that run ends exactly at
+     * the end of the input, so the test above sends it here -- through a call,
+     * and then through a loop that spends four of its eight instructions moving
+     * two pointers and comparing a counter.
+     *
+     * AArch64 does not need any of the four. `ldp`/`stp` post-index advance the
+     * pointer they read, and `subs` sets the flag the branch wants. Eight
+     * instructions a block become four, and the `bl`/`ret` around them goes as
+     * well.
+     *
+     * The x86 body's version of this had to fix a width problem first -- there
+     * the tail path moved sixteen bytes an iteration where the block loop moved
+     * thirty-two. Here both already move thirty-two, so only the bookkeeping is
+     * left, and that is the whole of the difference.
+     *
+     * Under KEVA_LZ4 only: our own format's last run is short, because the
+     * value in front of it compressed, and the promise attached to that body is
+     * that it does not change.
+     */
+    cmp     x2, #32
+    b.lo    L(lz4_lit_tail)
+L(lz4_lit_blk):
+    ldp     q0, q1, [x1], #32
+    stp     q0, q1, [x0], #32
+    subs    x2, x2, #32
+    cmp     x2, #32
+    b.hs    L(lz4_lit_blk)
+L(lz4_lit_tail):
+    cbz     x2, L(slow_lit_done)
+    bl      L(exact)
+    b       L(slow_lit_done)
+#endif
     bl      L(exact)
 
 L(slow_lit_done):
