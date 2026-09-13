@@ -910,36 +910,54 @@ L(lit_last):
     cmp     $REP_MIN, %rcx
     jae     L(lit_rest)
 #endif
-L(lit_l32):
-    cmp     $OVERRUN, %rcx
     /*
      * Past the string instruction, not into it.
      *
-     * What is left here is under a block -- nought to thirty-one bytes -- and
+     * What is left below is under a block -- nought to thirty-one bytes -- and
      * the threshold above says a run that short is the ladder's business. Going
      * through L(lit_rest) would run `rep movsb` on it, and on a 512-byte value,
      * which is exactly sixteen blocks, it runs it on *nothing*: the loop leaves
-     * `rcx` at zero and the microcode start-up is paid in full to copy no bytes.
-     *
-     * It was the single hottest instruction in the kernel. `perf annotate` on
-     * noise_512, cycles:u, the jump standing in for the string operation
-     * in front of it:
-     *
-     *   18.65%  jmp   <- behind rep movsb, rcx = 0
-     *    7.39%  movdqu %xmm1,0x10(%rdi)
-     *    5.58%  add   $0x20,%rdi
-     *
-     * Eighteen percent of the kernel to copy zero bytes, on every value.
+     * the remainder at zero and the microcode start-up is paid in full to copy
+     * no bytes. It was the hottest instruction in the kernel, at 18.65%.
      */
+    cmp     $OVERRUN, %rcx
     jb      L(lit_b16)
-    movdqu  (%rsi), %xmm0
-    movdqu  16(%rsi), %xmm1
-    movdqu  %xmm0, (%rdi)
-    movdqu  %xmm1, 16(%rdi)
-    add     $OVERRUN, %rsi
-    add     $OVERRUN, %rdi
-    sub     $OVERRUN, %rcx
-    jmp     L(lit_l32)
+
+    /*
+     * A negative index counting up to zero, rather than two cursors and a
+     * counter.
+     *
+     * The first version advanced `rsi`, advanced `rdi`, lowered `rcx`, compared
+     * it and jumped back: five instructions of bookkeeping around four that
+     * copy. At IPC 5.37 against an issue width of six that is not overhead, it
+     * is the cost. `perf annotate`, noise_512, the loop being 57.9% of the
+     * kernel:
+     *
+     *    6.11%  cmp    $0x20,%rcx        10.98%  movdqu %xmm1,0x10(%rdi)
+     *    6.36%  movdqu (%rsi),%xmm0       2.67%  add    $0x20,%rsi
+     *    7.00%  movdqu 0x10(%rsi),%xmm1   7.36%  add    $0x20,%rdi
+     *    5.64%  movdqu %xmm0,(%rdi)       3.44%  sub    $0x20,%rcx
+     *                                     8.29%  jmp
+     *
+     * Both cursors move in the addressing mode instead, and the loop ends when
+     * the index reaches zero, which is the flag `add` already set. Five
+     * bookkeeping instructions become one fused pair: ten per block become six,
+     * and nine micro-ops become five.
+     */
+    mov     %rcx, %rax
+    and     $-OVERRUN, %rax                 /* whole blocks of it */
+    add     %rax, %rsi
+    add     %rax, %rdi
+    sub     %rax, %rcx                      /* and what the ladder gets */
+    neg     %rax
+L(lit_l32):
+    movdqu  (%rsi,%rax,1), %xmm0
+    movdqu  16(%rsi,%rax,1), %xmm1
+    movdqu  %xmm0, (%rdi,%rax,1)
+    movdqu  %xmm1, 16(%rdi,%rax,1)
+    add     $OVERRUN, %rax
+    jne     L(lit_l32)
+    jmp     L(lit_b16)
 #endif
 
 /*
