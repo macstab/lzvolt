@@ -17,6 +17,24 @@
 # makes an optimisation loop bearable -- and it removes the machine as a
 # variable between them, which matters more.
 #
+# It introduces one of its own, and on AMD it is large. Measured with two
+# byte-identical revisions -- verified identical in the text section, not
+# assumed -- whichever runs *second* on a c3d is about 11% slower on the
+# 512-byte decoder cells:
+#
+#   position 1   fd6c4ba 9.495   aa9d7b3 9.343
+#   position 2   aa9d7b3 8.478   fd6c4ba 8.449
+#
+# Reversing the order moves the penalty with the position, not with the code.
+# It is not a uniform clock effect: the 4 KiB and 64 KiB cells lose 1-3% while
+# the 512-byte ones lose 11%.
+#
+# So on AMD, compare position against position -- run the pair in both orders
+# and match first against first -- or give each revision its own machine. A
+# straight REVS A B reading on a c3d will report an 11% regression for a change
+# that is not there, and an 11% win for one that is not either. Intel and ARM do
+# not show it at this size, which is not evidence that they never will.
+#
 # The project is named on every call rather than taken from whatever gcloud
 # happens to have configured. A script that creates instances in an unstated
 # project is a way to bill the wrong one.
