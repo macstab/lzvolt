@@ -2311,6 +2311,32 @@ mod tests {
                 continue;
             }
             assert_eq!(&out[..n], &data[..], "wrong bytes for a {n}-byte run");
+
+            // And through every LZ4 body, which is where the wide copy for the
+            // last run lives. Building the block by hand rather than asking
+            // liblz4 for one is what lets this run everywhere: the interop test
+            // needs the library linked, and there is no x86-64 build of it on
+            // an Apple machine, so without this the changed path would be
+            // exercised on rented hardware and nowhere else.
+            for &body in keva_asm::unpack::Lz4Body::all() {
+                let mut out = vec![0u8; n + keva_asm::unpack::UNPACK_SLACK];
+                if !keva_asm::unpack::unpack_lz4_into_slice_on(body, &block, &mut out, n) {
+                    refused.push(n);
+                    continue;
+                }
+                assert_eq!(
+                    &out[..n],
+                    &data[..],
+                    "the {body:?} LZ4 body produced wrong bytes for a {n}-byte run"
+                );
+                // Nothing past the declared length may have been written
+                // outside the slack the caller promised.
+                assert_eq!(
+                    out.len(),
+                    n + keva_asm::unpack::UNPACK_SLACK,
+                    "the buffer moved"
+                );
+            }
         }
 
         assert!(
