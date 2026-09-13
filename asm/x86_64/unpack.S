@@ -177,6 +177,25 @@
 #  define LIT_BLK  32
 #endif
 
+/*
+ * How long a run has to be before `rep movsb` is worth starting.
+ *
+ * Measured on a Xeon 8481C over three run lengths, GiB/s on the whole value:
+ *
+ *   512 B     rep movsb 16.1   the block loop 21.8
+ *   4096 B              59.0                  30.6
+ *   65536 B             31.9                  31.6
+ *
+ * About twenty-two cycles before it moves a byte, then 23 B/cycle against the
+ * loop's 11.9; they cross near 550 bytes and memory holds both past 64 KiB.
+ * The threshold sits above the crossover with room either side.
+ *
+ * Only a Xeon has the branch at all -- Zen has ERMSB without FSRM and pays tens
+ * of cycles on the same copy, so its bodies never reach for the instruction.
+ * The part line decides whether there is a crossover; it does not decide where.
+ */
+#define REP_MIN 1024
+
 #define MIN_MATCH         4
 #define OVERRUN           32
 #define FAST_INPUT_SLACK  32
@@ -955,7 +974,6 @@ L(lit_last):
      * crossover -- Zen has ERMSB without FSRM and pays tens of cycles on the
      * same copy, so its body has no such branch -- but it does not decide where.
      */
-#  define REP_MIN 1024
     cmp     $REP_MIN, %rcx
     jae     L(lit_rest)
 #endif
@@ -1048,10 +1066,25 @@ L(lit_bytes):
 L(lit_rest):
 #ifdef KEVA_XEON
     /*
-     * Ice Lake and later have Fast Short REP MOV, and there the string
-     * instruction is the right answer for a run of a dozen bytes: +8.9% on a
-     * Xeon 8481C against the ladder below.
+     * The string instruction, once the run is long enough to pay for starting
+     * it. The threshold is REP_MIN above.
+     *
+     * This used to be unconditional, on a measurement that said +8.9% for a run
+     * of a dozen bytes. It is the hottest instruction in the kernel on
+     * records_512 -- `perf annotate`, cycles:u, the cost landing on the jump
+     * behind it:
+     *
+     *   17.93%  jmp    <- behind rep movsb
+     *    8.42%  movdqu %xmm0,(%r8)
+     *    7.76%  shl    $0x4,%ecx
+     *
+     * A value that compresses well ends in a short run, so this is exactly the
+     * case the +8.9% was supposed to cover, and it is costing a fifth of the
+     * kernel instead. The threshold the LZ4 body already carries belongs here
+     * too.
      */
+    cmp     $REP_MIN, %rcx
+    jb      L(lit_b16)
     rep movsb
     jmp     L(lit_done)
 #endif
