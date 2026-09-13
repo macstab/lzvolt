@@ -79,7 +79,23 @@
  * overflows four bits in 99% of them on data that compresses six-fold. Six bits
  * take that to zero.
  */
-#ifdef KEVA_WIDE
+/*
+ * And one body per format. LZ4's token is four bits each way, which is the even
+ * split exactly, so this axis changes no constant -- it exists so the two
+ * formats can diverge where their guarantees do without either one's timings
+ * moving because of the other's. See the longer note in the x86-64 unpack.S.
+ */
+#if defined(KEVA_LZ4) && defined(KEVA_WIDE)
+#  error "LZ4 has one token layout and it is the even split"
+#endif
+
+#if defined(KEVA_LZ4)
+#  define KEVA_PFX   l
+#  define KEVA_ENTRY keva_unpack_lz4
+#  define LIT_SHIFT  4
+#  define LIT_MAX    15
+#  define MAT_MAX    15
+#elif defined(KEVA_WIDE)
 #  define KEVA_PFX   w
 #  define KEVA_ENTRY keva_unpack_wide
 #  define LIT_SHIFT  6

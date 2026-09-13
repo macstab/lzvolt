@@ -367,19 +367,20 @@ fn same_bytes(c: &mut Criterion) {
         // size. No allocation, no Vec bookkeeping, no Result on either.
         // Checked once, outside the loop, so the timed body is the same shape
         // on both sides: one call, and the result handed to `black_box`.
-        assert!(keva_asm::unpack::unpack_into_slice(
+        // The LZ4 body, which is what a foreign block reaches in production
+        // too. Identical to the even body today; the point of the separation is
+        // that it stops being so without our own format's timings moving.
+        assert!(keva_asm::unpack::unpack_lz4_into_slice(
             &block,
             &mut mine,
-            data.len(),
-            keva_asm::unpack::Split::Even
+            data.len()
         ));
         group.bench_function(BenchmarkId::new("keva", label), |b| {
             b.iter(|| {
-                black_box(keva_asm::unpack::unpack_into_slice(
+                black_box(keva_asm::unpack::unpack_lz4_into_slice(
                     black_box(&block),
                     &mut mine,
                     data.len(),
-                    keva_asm::unpack::Split::Even,
                 ))
             });
         });

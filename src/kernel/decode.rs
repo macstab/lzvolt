@@ -109,6 +109,54 @@ extern "C" {
         declared: usize,
         start: usize,
     ) -> u32;
+
+    fn keva_unpack_lz4_ssse3(
+        src: *const u8,
+        src_len: usize,
+        dst: *mut u8,
+        dst_cap: usize,
+        declared: usize,
+        start: usize,
+    ) -> u32;
+
+    fn keva_unpack_lz4_xeon(
+        src: *const u8,
+        src_len: usize,
+        dst: *mut u8,
+        dst_cap: usize,
+        declared: usize,
+        start: usize,
+    ) -> u32;
+
+    fn keva_unpack_lz4_epyc(
+        src: *const u8,
+        src_len: usize,
+        dst: *mut u8,
+        dst_cap: usize,
+        declared: usize,
+        start: usize,
+    ) -> u32;
+}
+
+// The body for blocks somebody else wrote.
+//
+// One per part line, no wide variant: LZ4's token is four bits each way, which
+// is the even split. Assembled from the same source as the even body and
+// currently identical to it -- it exists so the two can diverge where their
+// formats' guarantees do. LZ4 promises a block ends in a literal run of at
+// least five bytes with no match inside the last twelve; our packer emits
+// matches up to the final byte, so nothing derived from that promise may live
+// in the body our own values run.
+#[cfg(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+extern "C" {
+    fn keva_unpack_lz4(
+        src: *const u8,
+        src_len: usize,
+        dst: *mut u8,
+        dst_cap: usize,
+        declared: usize,
+        start: usize,
+    ) -> u32;
 }
 
 /// Run the kernel for `split`.
@@ -161,6 +209,169 @@ unsafe fn run(
     match split {
         Split::Even => keva_unpack(src, src_len, dst, dst_cap, declared, start),
         Split::WideMatch => keva_unpack_wide(src, src_len, dst, dst_cap, declared, start),
+    }
+}
+
+/// Which LZ4 body a machine runs.
+///
+/// The same four the even body is built for, minus the pairing with a split:
+/// LZ4 has one token layout. Exposed because dispatch means only one of them
+/// executes on a given machine, and a body no test reaches is a body that can
+/// diverge unnoticed -- that is exactly how a case-sensitive brand match left
+/// the Xeon decoder unrun on Emerald Rapids from the day it was written.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Lz4Body {
+    /// AArch64, or an x86-64 part without SSSE3.
+    Baseline,
+    /// x86-64 with SSSE3 and neither line's name.
+    Ssse3,
+    Xeon,
+    Epyc,
+}
+
+impl Lz4Body {
+    /// Every body this build has, so a test can reach all of them.
+    pub fn all() -> &'static [Lz4Body] {
+        #[cfg(all(keva_asm, target_arch = "x86_64"))]
+        {
+            &[
+                Lz4Body::Baseline,
+                Lz4Body::Ssse3,
+                Lz4Body::Xeon,
+                Lz4Body::Epyc,
+            ]
+        }
+        #[cfg(not(all(keva_asm, target_arch = "x86_64")))]
+        {
+            &[Lz4Body::Baseline]
+        }
+    }
+}
+
+/// The body this machine gets, from the cached feature set.
+#[cfg(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[inline]
+fn detect_lz4_body() -> Lz4Body {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let f = crate::cpu::features();
+        if !f.ssse3 {
+            return Lz4Body::Baseline;
+        }
+        if f.xeon {
+            return Lz4Body::Xeon;
+        }
+        if f.epyc {
+            return Lz4Body::Epyc;
+        }
+        Lz4Body::Ssse3
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        Lz4Body::Baseline
+    }
+}
+
+/// Run the named LZ4 body.
+///
+/// A second function rather than a fourth arm in [`run`]: the two formats pick
+/// from different sets -- there is no wide LZ4 -- and keeping them apart means
+/// our own format's dispatch is not touched when this one grows.
+///
+/// # Safety
+///
+/// As [`run`]: `dst_cap` bytes writable at `dst`, `src_len` readable at `src`.
+#[cfg(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[inline]
+unsafe fn run_lz4(
+    body: Lz4Body,
+    src: *const u8,
+    src_len: usize,
+    dst: *mut u8,
+    dst_cap: usize,
+    declared: usize,
+    start: usize,
+) -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    match body {
+        Lz4Body::Xeon => return keva_unpack_lz4_xeon(src, src_len, dst, dst_cap, declared, start),
+        Lz4Body::Epyc => return keva_unpack_lz4_epyc(src, src_len, dst, dst_cap, declared, start),
+        Lz4Body::Ssse3 => return keva_unpack_lz4_ssse3(src, src_len, dst, dst_cap, declared, start),
+        Lz4Body::Baseline => {}
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = body;
+
+    keva_unpack_lz4(src, src_len, dst, dst_cap, declared, start)
+}
+
+/// [`unpack_lz4_into_slice`] against a named body rather than this machine's.
+///
+/// For the differential test and nothing else: a body only ever runs on the
+/// part it was built for.
+pub fn unpack_lz4_into_slice_on(
+    body: Lz4Body,
+    src: &[u8],
+    dst: &mut [u8],
+    declared: usize,
+) -> bool {
+    #[cfg(not(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    {
+        let _ = (body, src, dst, declared);
+        false
+    }
+
+    #[cfg(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        if declared == 0 {
+            return false;
+        }
+        // SAFETY: `dst.len()` is the true length of the buffer, and the kernel
+        // writes below it or returns zero.
+        let produced = unsafe {
+            run_lz4(
+                body,
+                src.as_ptr(),
+                src.len(),
+                dst.as_mut_ptr(),
+                dst.len(),
+                declared,
+                0,
+            )
+        } as usize;
+        produced == declared
+    }
+}
+
+/// Decode a block written by liblz4 or any other LZ4 implementation.
+///
+/// The counterpart of `LZ4_decompress_safe`, and the only entry that reaches the
+/// LZ4 body. The separation is the point: what makes foreign blocks faster must
+/// not be able to change the timing of our own values, and a shared body cannot
+/// promise that.
+///
+/// `declared` is the uncompressed length, which the caller must supply because
+/// **an LZ4 block does not carry one**. That is also how the two formats are
+/// told apart without a heuristic: ours has its length in a varint at the
+/// front, so its caller does not pass one, and this one's caller must.
+///
+/// `dst` must be at least `declared + UNPACK_SLACK` long; the kernel refuses
+/// otherwise. Returns whether it decoded.
+pub fn unpack_lz4_into_slice(src: &[u8], dst: &mut [u8], declared: usize) -> bool {
+    #[cfg(not(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    {
+        let _ = (src, dst, declared);
+        false
+    }
+
+    #[cfg(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        if declared == 0 {
+            return false;
+        }
+        // SAFETY: `dst.len()` is the true length of the buffer, and the kernel
+        // writes below it or returns zero.
+        unpack_lz4_into_slice_on(detect_lz4_body(), src, dst, declared)
     }
 }
 
@@ -370,6 +581,57 @@ pub fn unpack_asm(body: &[u8], out: &mut Vec<u8>, declared: usize, split: Split)
 
         // SAFETY: the kernel reported writing exactly `declared` bytes from the
         // pointer, and `declared + 64 <= cap` was checked before it started.
+        unsafe { out.set_len(declared) };
+        true
+    }
+}
+
+/// [`unpack_asm`] for a block somebody else wrote.
+///
+/// Same buffer handling, the LZ4 body instead of ours. See
+/// [`unpack_lz4_into_slice`] for why the two are separate symbols and how the
+/// formats are told apart.
+pub fn unpack_lz4_asm(block: &[u8], out: &mut Vec<u8>, declared: usize) -> bool {
+    #[cfg(not(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    {
+        let _ = (block, out, declared);
+        false
+    }
+
+    #[cfg(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        if declared == 0 {
+            return false;
+        }
+
+        out.clear();
+        let want = declared + UNPACK_SLACK;
+        if out.capacity() < want {
+            out.reserve(want);
+        }
+        let cap = out.capacity();
+
+        // SAFETY: as `unpack_asm` -- `cap` is the real capacity, the kernel
+        // writes below `declared + 64` or returns zero, and the length only
+        // moves out to `declared`.
+        let produced = unsafe {
+            run_lz4(
+                detect_lz4_body(),
+                block.as_ptr(),
+                block.len(),
+                out.as_mut_ptr(),
+                cap,
+                declared,
+                0,
+            )
+        } as usize;
+
+        if produced != declared {
+            out.clear();
+            return false;
+        }
+
+        // SAFETY: the kernel reported writing exactly `declared` bytes.
         unsafe { out.set_len(declared) };
         true
     }

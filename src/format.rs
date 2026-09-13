@@ -1665,9 +1665,11 @@ pub fn unpack_into(block: &[u8], out: &mut Vec<u8>, declared: usize) -> Result<(
     if declared > MAX_UNPACKED {
         return Err(PackError::TooLarge);
     }
-    if keva_asm::unpack::asm_available()
-        && keva_asm::unpack::unpack_asm(block, out, declared, EVEN.kernel())
-    {
+    // The LZ4 body, not our own. Which of the two runs is decided here and
+    // nowhere else, by the shape of the call rather than by looking at the
+    // bytes: a caller who has to hand over a length is holding a block that
+    // does not carry one, and only LZ4 blocks do not carry one.
+    if keva_asm::unpack::asm_available() && keva_asm::unpack::unpack_lz4_asm(block, out, declared) {
         return Ok(());
     }
     // The portable decoder wants the header, so give it one.
@@ -2373,22 +2375,37 @@ mod tests {
             assert!(n > 0, "liblz4 refused {label}");
             block.truncate(n as usize);
 
-            let mut out = vec![0u8; data.len() + keva_asm::unpack::UNPACK_SLACK];
-            let ok = keva_asm::unpack::unpack_into_slice(
-                &block,
-                &mut out,
-                data.len(),
-                keva_asm::unpack::Split::Even,
-            );
-            if !ok {
-                refused.push(format!("{label} ({} block bytes)", block.len()));
-                continue;
-            }
+            // Every body, not just this machine's. Dispatch runs one of them
+            // here, so a divergence in any other would sit unseen until it
+            // reached a part nobody tests on -- which has happened once
+            // already, to the Xeon decoder on Emerald Rapids.
+            let bodies = keva_asm::unpack::Lz4Body::all();
             assert_eq!(
-                &out[..data.len()],
-                &data[..],
-                "the kernel decoded {label} to the wrong bytes"
+                bodies.len(),
+                if cfg!(target_arch = "x86_64") { 4 } else { 1 },
+                "a body was added or removed without this test noticing"
             );
+            for &body in bodies {
+                let mut out = vec![0u8; data.len() + keva_asm::unpack::UNPACK_SLACK];
+                let ok = keva_asm::unpack::unpack_lz4_into_slice_on(
+                    body,
+                    &block,
+                    &mut out,
+                    data.len(),
+                );
+                if !ok {
+                    refused.push(format!(
+                        "{label} on {body:?} ({} block bytes)",
+                        block.len()
+                    ));
+                    continue;
+                }
+                assert_eq!(
+                    &out[..data.len()],
+                    &data[..],
+                    "the {body:?} LZ4 body decoded {label} to the wrong bytes"
+                );
+            }
         }
 
         assert!(

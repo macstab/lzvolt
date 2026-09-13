@@ -78,7 +78,43 @@
 #  define KEVA_SSSE3 1
 #endif
 
-#ifdef KEVA_WIDE
+/*
+ * And one body per format.
+ *
+ * LZ4's token is four bits each way, which is our even split exactly, so this
+ * axis changes no constant here -- it exists so the two formats can diverge
+ * where their guarantees do without either one's timings moving because of the
+ * other's. LZ4 promises a block ends in a literal run of at least five bytes
+ * with no match inside the last twelve; our packer emits matches up to the
+ * final byte. Code that may assume the first belongs under KEVA_LZ4 and nowhere
+ * else.
+ *
+ * The rule this axis is here to keep: our own format's body is not edited to
+ * make foreign blocks faster. A separate body cannot change what our own values
+ * execute, which is the only way to promise that and mean it.
+ */
+#if defined(KEVA_LZ4) && defined(KEVA_WIDE)
+#  error "LZ4 has one token layout and it is the even split"
+#endif
+
+#if defined(KEVA_LZ4)
+#  if defined(KEVA_XEON)
+#    define KEVA_PFX   lx
+#    define KEVA_ENTRY keva_unpack_lz4_xeon
+#  elif defined(KEVA_EPYC)
+#    define KEVA_PFX   lp
+#    define KEVA_ENTRY keva_unpack_lz4_epyc
+#  elif defined(KEVA_SSSE3)
+#    define KEVA_PFX   ls
+#    define KEVA_ENTRY keva_unpack_lz4_ssse3
+#  else
+#    define KEVA_PFX   l
+#    define KEVA_ENTRY keva_unpack_lz4
+#  endif
+#  define LIT_SHIFT  4
+#  define LIT_MAX    15
+#  define MAT_MAX    15
+#elif defined(KEVA_WIDE)
 #  if defined(KEVA_XEON)
 #    define KEVA_PFX   wx
 #    define KEVA_ENTRY keva_unpack_wide_xeon

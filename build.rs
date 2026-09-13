@@ -16,6 +16,7 @@ fn main() {
             "asm/aarch64/pack.S",
             "asm/aarch64/unpack.S",
             "asm/aarch64/unpack_wide.S",
+            "asm/aarch64/unpack_lz4.S",
         ],
         "x86_64" => &[
             "asm/x86_64/ctrl_match.S",
@@ -30,6 +31,10 @@ fn main() {
             "asm/x86_64/unpack_wide_xeon.S",
             "asm/x86_64/unpack_epyc.S",
             "asm/x86_64/unpack_wide_epyc.S",
+            "asm/x86_64/unpack_lz4.S",
+            "asm/x86_64/unpack_lz4_ssse3.S",
+            "asm/x86_64/unpack_lz4_xeon.S",
+            "asm/x86_64/unpack_lz4_epyc.S",
         ],
         // Every other target runs the scalar reference. That is a supported
         // configuration, not a degraded one -- correctness does not depend on
