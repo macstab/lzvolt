@@ -429,50 +429,70 @@ fn own_format(c: &mut Criterion) {
     }
 
     let mut group = c.benchmark_group("own_format");
-    // Six, not nine, and the missing three are not an oversight: the packer
-    // refuses noise, so there is no body of ours to decode and the cell does
-    // not exist. `same_bytes` covers the literal path for those shapes instead,
-    // on liblz4's block.
+    // All nine, including the three the packer refuses. Leaving those out was
+    // reporting the wrong thing: the format reads a block that is all literals
+    // perfectly well -- there is a test that builds one by hand for every
+    // boundary between 1 and 65536 bytes -- what does not exist is a noise
+    // block *we wrote*. `index/table.rs` keeps a refused value raw, with
+    // `compressed: false`, and its reader copies the bytes out without a
+    // decoder running at all. That is the cell, and it is a real one: the
+    // reader's cost for noise, against what liblz4 and lz4_flex charge to
+    // decode a literal block for the same result.
     for (label, data) in [
         ("records_512", records(512)),
         ("varied_512", varied(512)),
+        ("noise_512", noise(512)),
         ("records_4k", records(4096)),
         ("varied_4k", varied(4096)),
+        ("noise_4k", noise(4096)),
         ("records_64k", records(65_536)),
         ("varied_64k", varied(65_536)),
+        ("noise_64k", noise(65_536)),
     ] {
         // Ours: the packed body with the header stripped, so the kernel is
         // handed exactly what liblz4's is -- a block and a length.
         let mut ours = Vec::new();
-        assert!(pack::pack(&data, &mut ours), "{label} did not pack");
-        let (raw, header) = keva_core::store::entry::get_varint(&ours).expect("a header");
-        let split = if raw & 1 == 1 {
-            keva_asm::unpack::Split::WideMatch
-        } else {
-            keva_asm::unpack::Split::Even
-        };
-        let other = if split == keva_asm::unpack::Split::Even {
-            keva_asm::unpack::Split::WideMatch
-        } else {
-            keva_asm::unpack::Split::Even
-        };
-        // A value that changes split partway is two calls, and it is measured as
-        // two -- that is what its reader actually pays.
-        let (body, switch) = if raw & 0b10 != 0 {
-            let w = if data.len() <= 0x1_0000 { 2 } else { 4 };
-            let cut = ours.len() - 2 * w;
-            let rd = |b: &[u8]| -> usize {
-                if b.len() == 2 {
-                    u16::from_le_bytes(b.try_into().unwrap()) as usize
-                } else {
-                    u32::from_le_bytes(b.try_into().unwrap()) as usize
-                }
+        let packed = pack::pack(&data, &mut ours);
+        let (body, split, other, switch) = if packed {
+            let (raw, header) = keva_core::store::entry::get_varint(&ours).expect("a header");
+            let split = if raw & 1 == 1 {
+                keva_asm::unpack::Split::WideMatch
+            } else {
+                keva_asm::unpack::Split::Even
             };
-            let in_at = rd(&ours[cut..cut + w]);
-            let out_at = rd(&ours[cut + w..]);
-            (ours[header..cut].to_vec(), Some((in_at, out_at)))
+            let other = if split == keva_asm::unpack::Split::Even {
+                keva_asm::unpack::Split::WideMatch
+            } else {
+                keva_asm::unpack::Split::Even
+            };
+            // A value that changes split partway is two calls, and it is
+            // measured as two -- that is what its reader actually pays.
+            let (body, switch) = if raw & 0b10 != 0 {
+                let w = if data.len() <= 0x1_0000 { 2 } else { 4 };
+                let cut = ours.len() - 2 * w;
+                let rd = |b: &[u8]| -> usize {
+                    if b.len() == 2 {
+                        u16::from_le_bytes(b.try_into().unwrap()) as usize
+                    } else {
+                        u32::from_le_bytes(b.try_into().unwrap()) as usize
+                    }
+                };
+                let in_at = rd(&ours[cut..cut + w]);
+                let out_at = rd(&ours[cut + w..]);
+                (ours[header..cut].to_vec(), Some((in_at, out_at)))
+            } else {
+                (ours[header..].to_vec(), None)
+            };
+            (body, split, other, switch)
         } else {
-            (ours[header..].to_vec(), None)
+            // Nothing is read from these; the raw arm below never looks at
+            // them. They exist so the decode closure has one shape.
+            (
+                Vec::new(),
+                keva_asm::unpack::Split::Even,
+                keva_asm::unpack::Split::Even,
+                None,
+            )
         };
 
         let mut theirs = vec![0u8; data.len() + 1024];
@@ -490,6 +510,13 @@ fn own_format(c: &mut Criterion) {
         let mut mine = vec![0u8; data.len() + 64];
         let mut yours = vec![0u8; data.len() + 64];
         let decode = |body: &[u8], mine: &mut [u8]| match switch {
+            // A value the packer refused is stored as it arrived, so reading it
+            // is a copy of its bytes and no more. Measuring anything else here
+            // would be measuring a path this store never takes.
+            _ if !packed => {
+                mine[..data.len()].copy_from_slice(&data);
+                true
+            }
             None => keva_asm::unpack::unpack_into_slice(body, mine, data.len(), split),
             Some((in_at, out_at)) => {
                 keva_asm::unpack::unpack_section(&body[..in_at], mine, out_at, 0, split)
@@ -538,8 +565,10 @@ fn own_format(c: &mut Criterion) {
         });
         eprintln!(
             "  own_format {label}: keva {} B{}, liblz4 {} B",
-            ours.len(),
-            if switch.is_some() {
+            if packed { ours.len() } else { data.len() },
+            if !packed {
+                " (refused, stored raw)"
+            } else if switch.is_some() {
                 " (two sections)"
             } else {
                 ""
