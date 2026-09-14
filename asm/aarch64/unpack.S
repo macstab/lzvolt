@@ -843,6 +843,53 @@ L(ex_ret):
  * relies on L(exact) leaving x3, x5 and x7 alone.
  */
 L(repeat):
+#ifdef KEVA_LZ4
+    /*
+     * A repeat shorter than a vector, built in one shuffle.
+     *
+     * Below this, the only wide case was an offset of exactly one; everything
+     * from two to fifteen went down the doubling ladder at L(rep_double),
+     * which calls L(exact) once per doubling step and reloads its pointers
+     * from the stack each time. A twenty-byte match at offset four is three
+     * calls. Repetitive data is made of exactly those -- JSON with the same
+     * field names over and over is short offsets and moderate lengths -- so
+     * that ladder is most of what records_512 spends its time in.
+     *
+     * The x86 body has not done this since it was written: it loads the live
+     * bytes, turns them into a full window with one `pshufb`, and then splats
+     * sixteen at a time, advancing the window with a second shuffle. NEON's
+     * `tbl` has the same byte-index semantics -- index j takes source byte j,
+     * anything past fifteen gives zero -- so the two tables carry over
+     * unchanged from the x86 source.
+     *
+     * `adr` rather than `adrp`: a megabyte of reach is plenty for a table in
+     * the same file, and it is spelled the same on Mach-O and ELF, where the
+     * page-relative forms are not.
+     *
+     * The sixteen-byte load reads past the live bytes and the store past the
+     * length. Both are already how this path works -- the offset-one case
+     * below stores in whole vectors too -- and the caller's buffer carries
+     * sixty-four bytes of slack for it.
+     */
+    cmp     x2, #16
+    b.hs    L(rep_checked)
+    ldr     q0, [x1]                    // the live bytes, and some noise
+    lsl     x9, x2, #4                  // offset -> table index
+    adr     x10, L(splat_first)
+    ldr     q2, [x10, x9]
+    adr     x10, L(splat_next)
+    ldr     q3, [x10, x9]
+    tbl     v0.16b, {v0.16b}, v2.16b    // j -> j mod offset
+    mov     x5, #0
+L(lz4_splat):
+    str     q0, [x0, x5]
+    add     x5, x5, #16
+    tbl     v0.16b, {v0.16b}, v3.16b    // advance the window by sixteen
+    cmp     x5, x3
+    b.lo    L(lz4_splat)
+    ret
+L(rep_checked):
+#endif
     stp     x29, x30, [sp, #-32]!
     mov     x29, sp
     stp     x0, x1, [sp, #16]           // destination base and source
@@ -877,6 +924,58 @@ L(rep_step):
     b.lo    L(rep_step)
 
 L(rep_ret):
+
+
+#ifdef KEVA_LZ4
+/*
+ * Shuffle masks for a repeat closer than a vector, indexed by offset * 16.
+ *
+ * `splat_first` turns d live bytes into a full sixteen-byte window: j -> j mod
+ * d. `splat_next` advances a window by sixteen: j -> (j + 16) mod d, which is
+ * the same window shifted, so applying it repeatedly walks the pattern. Row
+ * zero is never used; an offset of zero is rejected long before this.
+ *
+ * Byte-for-byte the tables in the x86 body, because `tbl` and `pshufb` read
+ * their indices the same way.
+ */
+    .p2align 4
+L(splat_first):
+    .byte     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0    // d = 0
+    .byte     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0    // d = 1
+    .byte     0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1    // d = 2
+    .byte     0,  1,  2,  0,  1,  2,  0,  1,  2,  0,  1,  2,  0,  1,  2,  0    // d = 3
+    .byte     0,  1,  2,  3,  0,  1,  2,  3,  0,  1,  2,  3,  0,  1,  2,  3    // d = 4
+    .byte     0,  1,  2,  3,  4,  0,  1,  2,  3,  4,  0,  1,  2,  3,  4,  0    // d = 5
+    .byte     0,  1,  2,  3,  4,  5,  0,  1,  2,  3,  4,  5,  0,  1,  2,  3    // d = 6
+    .byte     0,  1,  2,  3,  4,  5,  6,  0,  1,  2,  3,  4,  5,  6,  0,  1    // d = 7
+    .byte     0,  1,  2,  3,  4,  5,  6,  7,  0,  1,  2,  3,  4,  5,  6,  7    // d = 8
+    .byte     0,  1,  2,  3,  4,  5,  6,  7,  8,  0,  1,  2,  3,  4,  5,  6    // d = 9
+    .byte     0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  0,  1,  2,  3,  4,  5    // d = 10
+    .byte     0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10,  0,  1,  2,  3,  4    // d = 11
+    .byte     0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11,  0,  1,  2,  3    // d = 12
+    .byte     0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12,  0,  1,  2    // d = 13
+    .byte     0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13,  0,  1    // d = 14
+    .byte     0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14,  0    // d = 15
+
+    .p2align 4
+L(splat_next):
+    .byte     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0    // d = 0
+    .byte     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0    // d = 1
+    .byte     0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1,  0,  1    // d = 2
+    .byte     1,  2,  0,  1,  2,  0,  1,  2,  0,  1,  2,  0,  1,  2,  0,  1    // d = 3
+    .byte     0,  1,  2,  3,  0,  1,  2,  3,  0,  1,  2,  3,  0,  1,  2,  3    // d = 4
+    .byte     1,  2,  3,  4,  0,  1,  2,  3,  4,  0,  1,  2,  3,  4,  0,  1    // d = 5
+    .byte     4,  5,  0,  1,  2,  3,  4,  5,  0,  1,  2,  3,  4,  5,  0,  1    // d = 6
+    .byte     2,  3,  4,  5,  6,  0,  1,  2,  3,  4,  5,  6,  0,  1,  2,  3    // d = 7
+    .byte     0,  1,  2,  3,  4,  5,  6,  7,  0,  1,  2,  3,  4,  5,  6,  7    // d = 8
+    .byte     7,  8,  0,  1,  2,  3,  4,  5,  6,  7,  8,  0,  1,  2,  3,  4    // d = 9
+    .byte     6,  7,  8,  9,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  0,  1    // d = 10
+    .byte     5,  6,  7,  8,  9, 10,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9    // d = 11
+    .byte     4,  5,  6,  7,  8,  9, 10, 11,  0,  1,  2,  3,  4,  5,  6,  7    // d = 12
+    .byte     3,  4,  5,  6,  7,  8,  9, 10, 11, 12,  0,  1,  2,  3,  4,  5    // d = 13
+    .byte     2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13,  0,  1,  2,  3    // d = 14
+    .byte     1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14,  0,  1    // d = 15
+#endif
     ldp     x29, x30, [sp], #32
     ret
 
