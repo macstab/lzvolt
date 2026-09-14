@@ -288,80 +288,25 @@ KEVA_NAME(KEVA_ENTRY):
 
 #ifdef KEVA_LZ4
     /*
-     * A block that is one literal run and nothing else, recognised before the
-     * loop is entered at all.
+     * A block that is one literal run and nothing else -- how LZ4 encodes data
+     * that does not compress -- is recognised before the loop is entered.
      *
-     * That is how LZ4 encodes data which does not compress, so it is the
-     * standard shape of an incompressible value rather than an edge case -- and
-     * it is the shape the loop handles worst. The fast path reads the token,
-     * walks the length chain, finds no offset behind the run, and hands over
-     * without having written a byte; the checked path then reads the token and
-     * walks the same chain again. On a 512-byte block that is over thirty
-     * cycles of a forty-eight cycle decode, and it is why an EPYC reads
-     * noise_512 at 0.60x of liblz4 while its 64-byte copy loop is already at
-     * the store limit.
+     * Only the question is asked here; the answering is out of line below. Not
+     * for tidiness: the loop head is `.p2align 5`, so the padding in front of it
+     * absorbs a few bytes added here and `L(block)` keeps the address it had.
+     * The first cut put all thirty instructions inline, moved the loop head by
+     * a hundred bytes, and paid 11.6% of records_512 on an EPYC and 6.3% on a
+     * Xeon for a case those values never take.
      *
-     * Two equalities decide it, and both are exact: the run must end precisely
-     * at the end of the input, and it must produce precisely the declared
-     * length. Anything else falls through to the loop, which is unchanged.
-     *
-     * The chain is bounded by the input, and that is enough -- each turn
-     * advances `rsi` by one and adds at most 255, so a length large enough to
-     * matter cannot be reached before the input runs out, and the two
-     * equalities reject whatever it did reach.
-     *
-     * Our own format never takes this shape: the packer declines a value that
-     * does not compress and the store keeps it raw, so there is no block to
-     * decode. Which is the other reason this lives under KEVA_LZ4 -- it would
-     * be a test on every value to catch a case that cannot arise.
+     * The test itself: a block that is one run has nothing behind that run, so
+     * LZ4 writes zero in the token's match field. A block that compresses has a
+     * match and says so. It does not decide alone -- a match of exactly
+     * MIN_MATCH writes zero too -- which is what the equalities below are for.
      */
-    movzbl  (%r14), %eax                    /* token */
-    /*
-     * The match field settles it for almost every block, and settles it first.
-     *
-     * A block that is one literal run has nothing behind that run, so LZ4
-     * writes zero there. A block that compresses has a match, and its token
-     * says so. Asking this before anything else costs three instructions on
-     * the values that are not this case, where the first cut of this walked
-     * the whole length chain before the equality below turned it away -- and
-     * paid 9% of records_512 for the privilege, on both vendors.
-     *
-     * It does not decide the case on its own: a match of exactly MIN_MATCH
-     * also writes zero. That is what the two equalities below are for. This
-     * only has to be free and never wrong in the direction that matters, and
-     * a non-zero match field is proof there is more than one run.
-     */
+    movzbl  (%r14), %eax
     test    $MAT_MAX, %eax
-    jne     L(lit_only_no)
-    lea     1(%r14), %rsi                   /* where the literals would begin */
-    mov     %eax, %r10d
-    shr     $LIT_SHIFT, %r10d
-    cmp     $LIT_MAX, %r10d
-    jne     L(lit_only_ends)
-
-    xor     %r10, %r10
-L(lit_only_chain):
-    cmp     %r13, %rsi
-    jae     L(lit_only_no)
-    movzbl  (%rsi), %edx
-    inc     %rsi
-    add     %rdx, %r10
-    cmp     $255, %edx
-    je      L(lit_only_chain)
-    add     $LIT_MAX, %r10
-
-L(lit_only_ends):
-    lea     (%rsi,%r10,1), %rax
-    cmp     %r13, %rax                      /* ends exactly at the input's end */
-    jne     L(lit_only_no)
-    lea     (%rdi,%r10,1), %r9
-    cmp     %r12, %r9                       /* and fills the output exactly */
-    jne     L(lit_only_no)
-    test    %r10, %r10
-    je      L(lit_only_no)
-    mov     %rsi, %r14
-    jmp     L(lit_last)
-L(lit_only_no):
+    je      L(lit_only)
+L(lit_only_back):
 #endif
 
 /*
@@ -1268,3 +1213,52 @@ L(ret):
     pop     %rbp
     pop     %rbx
     ret
+
+#ifdef KEVA_LZ4
+/*
+ * Is this block one literal run, exactly filling the output?
+ *
+ * Two exact equalities: the run ends precisely at the end of the input, and it
+ * produces precisely the declared length. Anything else goes back to the loop,
+ * which is unchanged.
+ *
+ * The chain needs no bound of its own -- each turn advances the cursor by one
+ * and adds at most 255, so it runs out of input long before the length matters,
+ * and the equalities reject whatever it reached.
+ *
+ * This can refuse to fire; it cannot fire wrongly. Every way of getting it
+ * wrong sends the block back to the loop, which is why no mutation of it fails
+ * a test, and why only a measurement can show that it fires at all.
+ */
+L(lit_only):
+    /* Reloaded rather than carried, so this reads as one piece. Cold. */
+    movzbl  (%r14), %eax                    /* token */
+    lea     1(%r14), %rsi                   /* where the literals would begin */
+    mov     %eax, %r10d
+    shr     $LIT_SHIFT, %r10d
+    cmp     $LIT_MAX, %r10d
+    jne     L(lit_only_ends)
+
+    xor     %r10, %r10
+L(lit_only_chain):
+    cmp     %r13, %rsi
+    jae     L(lit_only_back)
+    movzbl  (%rsi), %edx
+    inc     %rsi
+    add     %rdx, %r10
+    cmp     $255, %edx
+    je      L(lit_only_chain)
+    add     $LIT_MAX, %r10
+
+L(lit_only_ends):
+    lea     (%rsi,%r10,1), %rax
+    cmp     %r13, %rax                      /* ends exactly at the input's end */
+    jne     L(lit_only_back)
+    lea     (%rdi,%r10,1), %r9
+    cmp     %r12, %r9                       /* and fills the output exactly */
+    jne     L(lit_only_back)
+    test    %r10, %r10
+    je      L(lit_only_back)
+    mov     %rsi, %r14
+    jmp     L(lit_last)
+#endif
