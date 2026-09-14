@@ -273,27 +273,6 @@ L(entry):
     subs    x28, x22, #OUT_MARGIN           // output limit
     csel    x28, x28, xzr, hs
 
-#ifdef KEVA_LZ4
-    /*
-     * A block that is one literal run and nothing else, recognised before
-     * either loop is entered. See the x86-64 body, where this was measured:
-     * +13% to +22% on the noise cells on both vendors.
-     *
-     * Only the question is asked here and the answering is out of line, which
-     * on x86 was worth ten percent of records_512 -- thirty instructions in
-     * front of the loop head moved it across an alignment boundary. AArch64
-     * has no such padding to overrun, but the reason to keep a cold path cold
-     * holds anyway.
-     *
-     * A block that is one run has nothing behind it, so LZ4 writes zero in the
-     * token's match field. A block that compresses has a match and says so.
-     */
-    ldrb    w4, [x19, x23]
-    tst     w4, #MAT_MAX
-    b.eq    L(lit_only)
-L(lit_only_back):
-#endif
-
 /*
  * Two loops over the same format, and that is the whole shape of this file.
  *
@@ -946,53 +925,6 @@ L(rep_step):
 
 L(rep_ret):
 
-
-#ifdef KEVA_LZ4
-/*
- * Is this block one literal run, exactly filling the output?
- *
- * Two exact equalities: it ends precisely at the end of the input, and it
- * produces precisely the declared length. Anything else goes back to the loops,
- * which are unchanged.
- *
- * The chain needs no bound of its own -- each turn advances the cursor by one
- * and adds at most 255, so the input runs out long before the length matters,
- * and the equalities reject whatever it reached.
- *
- * It can refuse to fire; it cannot fire wrongly. Every way of getting it wrong
- * sends the block back to the loops, which is why no mutation of it fails a
- * test and why only a measurement shows that it fires at all.
- */
-L(lit_only):
-    lsr     w5, w4, #LIT_SHIFT
-    add     x6, x23, #1                 // past the token
-    cmp     w5, #LIT_MAX
-    b.ne    L(lit_only_ends)
-    mov     x5, #0
-L(lit_only_chain):
-    cmp     x6, x20
-    b.hs    L(lit_only_back)
-    ldrb    w7, [x19, x6]
-    add     x6, x6, #1
-    add     x5, x5, x7
-    cmp     w7, #255
-    b.eq    L(lit_only_chain)
-    add     x5, x5, #LIT_MAX
-L(lit_only_ends):
-    add     x9, x6, x5                  // where the run ends in the input
-    cmp     x9, x20
-    b.ne    L(lit_only_back)
-    add     x17, x24, x5                // and in the output
-    cmp     x17, x22
-    b.ne    L(lit_only_back)
-    cbz     x5, L(lit_only_back)
-    mov     x15, x5
-    mov     x16, x9
-    add     x0, x21, x24
-    add     x1, x19, x6
-    mov     x2, x5
-    b       L(slow_lit_exact)
-#endif
 
 #ifdef KEVA_LZ4
 /*
