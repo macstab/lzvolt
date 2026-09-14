@@ -313,8 +313,15 @@ L(lit_only_back):
  * The loop head is aligned because the micro-op cache is fed in 32-byte
  * windows and a hot loop that straddles one is delivered from the slower
  * decoders instead. It costs a few bytes of padding once.
+ *
+ * Sixty-four rather than thirty-two, and for the same reason the entry carries
+ * it: at thirty-two, twelve bytes added in front of this -- a token load, a
+ * test and a branch -- push it over a boundary and it moves a whole window.
+ * Measured, that is 12.6% of records_512 on an EPYC and 10.5% on a Xeon, for
+ * three instructions those values execute once. At sixty-four the padding
+ * absorbs the change and the address does not move.
  */
-    .p2align 5
+    .p2align 6
 L(block):
     /*
      * Two branches, not four, and the reason is an ordering rather than a
