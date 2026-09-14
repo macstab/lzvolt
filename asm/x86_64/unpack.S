@@ -316,6 +316,23 @@ KEVA_NAME(KEVA_ENTRY):
      * be a test on every value to catch a case that cannot arise.
      */
     movzbl  (%r14), %eax                    /* token */
+    /*
+     * The match field settles it for almost every block, and settles it first.
+     *
+     * A block that is one literal run has nothing behind that run, so LZ4
+     * writes zero there. A block that compresses has a match, and its token
+     * says so. Asking this before anything else costs three instructions on
+     * the values that are not this case, where the first cut of this walked
+     * the whole length chain before the equality below turned it away -- and
+     * paid 9% of records_512 for the privilege, on both vendors.
+     *
+     * It does not decide the case on its own: a match of exactly MIN_MATCH
+     * also writes zero. That is what the two equalities below are for. This
+     * only has to be free and never wrong in the direction that matters, and
+     * a non-zero match field is proof there is more than one run.
+     */
+    test    $MAT_MAX, %eax
+    jne     L(lit_only_no)
     lea     1(%r14), %rsi                   /* where the literals would begin */
     mov     %eax, %r10d
     shr     $LIT_SHIFT, %r10d
