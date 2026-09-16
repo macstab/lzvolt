@@ -659,6 +659,34 @@ fn production(c: &mut Criterion) {
                 });
             }
         });
+        // The same work with the framing already done: a body, a length and a
+        // split handed over, the Vec bookkeeping still paid. Sitting between
+        // `keva` here and `keva` in own_format, it splits the difference
+        // between those two into the part that is reading the header and the
+        // part that is `clear`, `reserve` and `set_len`. Without it, moving the
+        // varint into the kernel would be a guess about which half is which.
+        if packed {
+            let (raw, header) = keva_core::store::entry::get_varint(&ours).expect("a header");
+            let hybrid = raw & 0b10 != 0;
+            let split = if raw & 1 == 1 {
+                keva_asm::unpack::Split::WideMatch
+            } else {
+                keva_asm::unpack::Split::Even
+            };
+            let body = ours[header..].to_vec();
+            if !hybrid {
+                group.bench_function(BenchmarkId::new("keva_framed", label), |b| {
+                    b.iter(|| {
+                        black_box(keva_asm::unpack::unpack_asm(
+                            black_box(&body),
+                            &mut mine,
+                            data.len(),
+                            split,
+                        ))
+                    });
+                });
+            }
+        }
         group.bench_function(BenchmarkId::new("liblz4", label), |b| {
             b.iter(|| unsafe {
                 black_box(LZ4_decompress_safe(
