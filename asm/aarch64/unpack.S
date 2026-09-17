@@ -103,12 +103,28 @@
 #  define MAT_MAX    63
 #  define MAT_CAP    67                 /* MAT_MAX + MIN_MATCH */
 #else
+/*
+ * Three for the literal run, four for the match, one for "the offset the last
+ * block used". Was four and four.
+ *
+ * The bit is worth more than the literal ceiling it costs: offsets repeat 90%
+ * of the time on 512-byte records and 75.8% at 4 KiB, and a repeat block loads
+ * nothing and computes no address. Measured on the portable pair before any of
+ * this was written -- smaller on every shape, free to pack, faster to read.
+ */
 #  define KEVA_PFX   e
 #  define KEVA_ENTRY keva_unpack
-#  define LIT_SHIFT  4
-#  define LIT_MAX    15
+#  define LIT_SHIFT  5
+#  define LIT_MAX    7
+#  define MAT_SHIFT  1
 #  define MAT_MAX    15
 #  define MAT_CAP    19
+#  define KEVA_REPEAT 1
+#endif
+
+/* The wide split and the LZ4 body spend all eight token bits on lengths. */
+#ifndef MAT_SHIFT
+#  define MAT_SHIFT  0
 #endif
 
 /*
@@ -180,6 +196,7 @@
  *   x20 src_len        x24 produced, the output cursor
  *   x21 dst            x25 cursor past which the fast path is unsafe
  *   x22 declared       x26 the token's match nibble, across helper calls
+ *   x27 the offset the last block used, for the repeat bit
  *
  * The helpers below are called from the loop, so what each one is allowed to
  * destroy is part of its contract:
@@ -239,6 +256,11 @@ L(entry):
     b.lo    L(fail)
 
     mov     x23, #0                     // at
+#ifdef KEVA_REPEAT
+    // A first block claiming a repeat gets offset zero, which the offset check
+    // below refuses -- the same answer any other corruption gets.
+    mov     x27, #0
+#endif
 
     /*
      * The zone the fast loop runs in, as two limits computed once.
@@ -324,7 +346,12 @@ L(fast):
 
     ldrb    w4, [x19, x23]              // token
     lsr     w5, w4, #LIT_SHIFT                  // literal nibble
+#if MAT_SHIFT
+    ubfx    w26, w4, #MAT_SHIFT, #4          // match nibble, above the repeat bit
+    and     w13, w4, #1                      // and the repeat bit beside it
+#else
     and     w26, w4, #MAT_MAX                // match nibble, kept across helpers
+#endif
 
     /*
      * Only the literal nibble gates the block now.
@@ -350,8 +377,32 @@ L(fast):
     str     q0, [x21, x24]
 
 L(fast_offset):
+#ifdef KEVA_REPEAT
+    /*
+     * The offset, unless the token says it is the one from the block before.
+     *
+     * Where the bit is set there is no load and no address to compute -- x27
+     * already holds it, and the match can start as soon as the length is known.
+     * That is two links out of the chain `token -> literal length -> offset
+     * address -> offset`, and on 512-byte records nine blocks in eleven take it.
+     *
+     * Branch rather than `csel` on purpose: a repeat is 90% likely on records
+     * and 5.6% on varied, so it predicts either way, and `csel` would make the
+     * load unconditional and put it back on the chain.
+     */
+    tbnz    w13, #0, L(fast_off_same)
+    ldrh    w11, [x19, x8]              // offset
+    mov     x27, x11
+    add     x23, x8, #2                 // cursor past it
+    b       L(fast_off_done)
+L(fast_off_same):
+    mov     x11, x27
+    mov     x23, x8                     // nothing was written, nothing to skip
+L(fast_off_done):
+#else
     ldrh    w11, [x19, x8]              // offset
     add     x23, x8, #2                 // cursor past it
+#endif
 
     /*
      * This branch is the most expensive one in the loop and it stays.
@@ -554,7 +605,18 @@ L(tail):
     b.hs    L(fail)
     ldrb    w4, [x19, x23]              // token
     lsr     w5, w4, #LIT_SHIFT
+#if MAT_SHIFT
+    ubfx    w26, w4, #MAT_SHIFT, #4
+    /*
+     * The bit goes to x13 rather than staying in the token, because `L(exact)`
+     * is called between here and the offset and its contract destroys x4. The
+     * match nibble lives in x26 for exactly the same reason; x13 is free until
+     * the match begins, and the contract keeps x11-x17 across the call.
+     */
+    and     w13, w4, #1
+#else
     and     w26, w4, #MAT_MAX
+#endif
 
     /* ---- one block, whatever its lengths ----------------------------- */
 L(slow):
@@ -693,10 +755,26 @@ L(slow_lit_done):
     cmp     x24, x22
     b.hs    L(done)                      // the value ends on a literal run
 
+#ifdef KEVA_REPEAT
+    /*
+     * A repeat block has no offset behind its literals, so neither the bound
+     * nor the load belongs on that side of the branch -- checking for two bytes
+     * that were never written would refuse a stream that ends on one.
+     */
+    tbnz    w13, #0, L(slow_off_same)
+#endif
     add     x9, x23, #2
     cmp     x9, x20
     b.hi    L(fail)
     ldrh    w11, [x19, x23]             // offset, kept clear of the length reader
+#ifdef KEVA_REPEAT
+    mov     x27, x11
+    b       L(slow_off_done)
+L(slow_off_same):
+    mov     x11, x27
+    mov     x9, x23                     // nothing was read, nothing to skip
+L(slow_off_done):
+#endif
     mov     x23, x9
 
     mov     x14, x26                    // match length, less MIN_MATCH

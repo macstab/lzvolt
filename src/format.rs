@@ -892,6 +892,9 @@ fn pack_pass<const SHIFT: u32, S: Slot>(
     let mut switch: Option<(usize, usize)> = None;
     let mut recent: u32 = 0;
     let mut seen = 0usize;
+    // The offset the previous block wrote, so this one can say "the same".
+    // `usize::MAX` never matches a real offset, so the first block always writes.
+    let mut last_offset = usize::MAX;
 
     let mut blocks = 0usize;
     let mut saturated = 0usize;
@@ -1165,17 +1168,26 @@ fn pack_pass<const SHIFT: u32, S: Slot>(
             {
                 switch = Some((cur.len() - header_len, literal_start));
                 split = LONG_MATCH;
+                // Nothing on the other side of the boundary may claim a repeat
+                // against a block the decoder read under a different layout.
+                last_offset = usize::MAX;
             }
         }
         let literals = &input[literal_start..at - back];
         let wide = wide_literals_fit(literals, at - back, input.len());
+        let offset = at - candidate;
+        // Only the layout that has the bit may claim a repeat; the wide split
+        // spends all eight token bits on lengths.
+        let repeat = split.rep_bits == 1 && offset == last_offset;
+        last_offset = offset;
         emit_block(
             literals,
-            at - candidate,
+            offset,
             matched + back,
             &mut cur,
             split,
             wide,
+            repeat,
         );
 
         at += matched;
@@ -1311,12 +1323,30 @@ unsafe fn common_prefix(input: &[u8], a: usize, b: usize) -> usize {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Split {
     lit_bits: u32,
+    /// One when the token's low bit says "the offset the last block used".
+    ///
+    /// Measured before it was built: offsets repeat 90% of the time on 512-byte
+    /// records and 75.8% at 4 KiB, and a repeat costs the decoder no load and no
+    /// address to compute. Smaller on every shape tried, free to pack, faster to
+    /// read -- see `docs/ROADMAP.md`.
+    rep_bits: u32,
 }
 
-/// Four bits each, which is also the LZ4 block format.
-const EVEN: Split = Split { lit_bits: 4 };
+/// Three for the literal run, four for the match, one for the repeat.
+///
+/// Was four and four, which is the LZ4 block format. The literal ceiling paid
+/// for the repeat bit: a run of seven or more now writes an extension byte
+/// where fifteen used to fit. On `records_4k` that is nine extra bytes against
+/// 144 saved.
+const EVEN: Split = Split {
+    lit_bits: 3,
+    rep_bits: 1,
+};
 /// Two for the literal run, six for the match.
-const LONG_MATCH: Split = Split { lit_bits: 2 };
+const LONG_MATCH: Split = Split {
+    lit_bits: 2,
+    rep_bits: 0,
+};
 
 impl Split {
     #[inline]
@@ -1325,7 +1355,12 @@ impl Split {
     }
     #[inline]
     fn mat_max(self) -> usize {
-        (1 << (8 - self.lit_bits)) - 1
+        (1 << (8 - self.lit_bits - self.rep_bits)) - 1
+    }
+    /// How far the match field sits above the token's low bit.
+    #[inline]
+    fn mat_shift(self) -> u32 {
+        self.rep_bits
     }
     #[inline]
     fn shift(self) -> u32 {
@@ -1472,6 +1507,7 @@ fn emit_block(
     out: &mut Cursor,
     split: Split,
     wide: bool,
+    repeat: bool,
 ) {
     let match_extra = matched - MIN_MATCH;
     let lit_field = literals.len().min(split.lit_max());
@@ -1479,7 +1515,11 @@ fn emit_block(
     // SAFETY: the pass reserved `Cursor::room` before the first block, and a
     // debug build checks every write against it.
     unsafe {
-        out.byte(((lit_field as u8) << split.shift()) | mat_field as u8);
+        out.byte(
+            ((lit_field as u8) << split.shift())
+                | ((mat_field as u8) << split.mat_shift())
+                | (repeat as u8 & split.rep_bits as u8),
+        );
         if literals.len() >= split.lit_max() {
             put_extended(literals.len() - split.lit_max(), out);
         }
@@ -1488,7 +1528,9 @@ fn emit_block(
         } else {
             out.literals(literals);
         }
-        out.offset(offset as u16);
+        if !repeat {
+            out.offset(offset as u16);
+        }
         if match_extra >= split.mat_max() {
             put_extended(match_extra - split.mat_max(), out);
         }
@@ -1743,6 +1785,9 @@ fn unpack_portable(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
     let base = out.as_mut_ptr();
     let mut produced = 0usize;
     let mut at = 0usize;
+    // The offset a repeat block reuses. Cleared at the switch, where the layout
+    // changes and the packer stops claiming repeats across it.
+    let mut last_offset = 0usize;
     let input = body;
 
     while produced < declared {
@@ -1753,6 +1798,7 @@ fn unpack_portable(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
         // corruption.
         if switch_at == Some(produced) {
             split = split.other();
+            last_offset = 0;
         }
         let token = *input.get(at).ok_or(PackError::Truncated)?;
 
@@ -1766,7 +1812,8 @@ fn unpack_portable(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
         // LZ4 owes most of its decode speed to exactly this shape. Without it
         // a block costs a dozen branches; with it, four.
         let short_literal = (token >> split.shift()) as usize;
-        let short_match = (token & split.mat_max() as u8) as usize;
+        let short_match = ((token >> split.mat_shift()) & split.mat_max() as u8) as usize;
+        let repeat = split.rep_bits == 1 && token & 1 == 1;
         // The fixed-size match copy below moves one OVERRUN block, so a match
         // longer than that belongs on the exact path. Under the even split no
         // short match can reach it -- fourteen plus four is eighteen -- but the
@@ -1782,8 +1829,14 @@ fn unpack_portable(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
             // Left bounds-checked deliberately. Replacing this with two
             // unchecked byte reads measured 4.5% *slower*: the checked slice
             // becomes one 16-bit load, the unchecked pair does not.
-            let offset =
-                u16::from_le_bytes(input[offset_at..offset_at + 2].try_into().unwrap()) as usize;
+            // Where the bit is set there is nothing to read and no address to
+            // compute: the value is already here from the block before.
+            let offset = if repeat {
+                last_offset
+            } else {
+                u16::from_le_bytes(input[offset_at..offset_at + 2].try_into().unwrap()) as usize
+            };
+            last_offset = offset;
             let match_len = short_match + MIN_MATCH;
             let after_literals = produced + short_literal;
 
@@ -1812,7 +1865,7 @@ fn unpack_portable(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
             }
 
             produced = after_literals + match_len;
-            at = offset_at + 2;
+            at = offset_at + if repeat { 0 } else { 2 };
             continue;
         }
 
@@ -1856,11 +1909,16 @@ fn unpack_portable(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
             break;
         }
 
-        let offset_bytes = input.get(at..at + 2).ok_or(PackError::Truncated)?;
-        let offset = u16::from_le_bytes([offset_bytes[0], offset_bytes[1]]) as usize;
-        at += 2;
+        let offset = if repeat {
+            last_offset
+        } else {
+            let b = input.get(at..at + 2).ok_or(PackError::Truncated)?;
+            at += 2;
+            u16::from_le_bytes([b[0], b[1]]) as usize
+        };
+        last_offset = offset;
 
-        let mut match_len = (token & split.mat_max() as u8) as usize;
+        let mut match_len = ((token >> split.mat_shift()) & split.mat_max() as u8) as usize;
         if match_len == split.mat_max() {
             match_len += get_extended(input, &mut at)?;
         }
@@ -2300,17 +2358,11 @@ mod tests {
             }
             block.extend_from_slice(&data);
 
-            let mut out = vec![0u8; n + keva_asm::unpack::UNPACK_SLACK];
-            if !keva_asm::unpack::unpack_into_slice(
-                &block,
-                &mut out,
-                n,
-                keva_asm::unpack::Split::Even,
-            ) {
-                refused.push(n);
-                continue;
-            }
-            assert_eq!(&out[..n], &data[..], "wrong bytes for a {n}-byte run");
+            // Through the LZ4 body only. These blocks are LZ4's token layout,
+            // and our even split stopped being that when it took a bit for the
+            // repeat code -- three for the literal run, four for the match, one
+            // for "same offset as last time". Handing them to our own body
+            // would be asking it to read a format it does not claim to read.
 
             // And through every LZ4 body, which is where the wide copy for the
             // last run lives. Building the block by hand rather than asking
