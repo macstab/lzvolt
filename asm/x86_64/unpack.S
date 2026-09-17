@@ -145,9 +145,26 @@
 #    define KEVA_PFX   e
 #    define KEVA_ENTRY keva_unpack
 #  endif
-#  define LIT_SHIFT  4
-#  define LIT_MAX    15
+/*
+ * Three for the literal run, four for the match, one for "the offset the last
+ * block used". Was four and four, which is also LZ4's token -- and this is
+ * where our format stops being able to claim that.
+ *
+ * The bit is worth more than the literal ceiling it costs: offsets repeat 90%
+ * of the time on 512-byte records and 75.8% at 4 KiB, and a repeat block loads
+ * nothing and computes no address. Measured on the portable pair before any
+ * kernel was touched: smaller on every shape, free to pack, faster to read.
+ */
+#  define LIT_SHIFT  5
+#  define LIT_MAX    7
+#  define MAT_SHIFT  1
 #  define MAT_MAX    15
+#  define KEVA_REPEAT 1
+#endif
+
+/* The wide split and the LZ4 body spend all eight token bits on lengths. */
+#ifndef MAT_SHIFT
+#  define MAT_SHIFT  0
 #endif
 
 /*
@@ -265,6 +282,19 @@ KEVA_NAME(KEVA_ENTRY):
     push    %r13
     push    %r14
     push    %r15
+#ifdef KEVA_REPEAT
+    /*
+     * Sixteen bytes for the repeat code: the offset the last block wrote, and
+     * the token's low bit. All fifteen registers are spoken for, and the red
+     * zone is not something to lean on -- this is tested under a binary
+     * translator, which is free to use the space below the stack pointer.
+     *
+     *   (%rsp)   the token byte of the block being read
+     *   8(%rsp)  the offset to reuse where its low bit is set
+     */
+    sub     $16, %rsp
+    movq    $0, 8(%rsp)
+#endif
 
     mov     %rdi, %r14                      /* src cursor, before rdi is reused */
     lea     (%rdi,%rsi,1), %r13             /* src end */
@@ -352,15 +382,52 @@ L(block):
     cmp     %rbp, %rdi
     ja      L(dst_edge)                     /* too near the end to read ahead */
 
+#ifdef KEVA_REPEAT
+    /*
+     * The token's low bit, parked where every path can reach it.
+     *
+     * It cannot stay in the token: the long-literal path overwrites `eax`
+     * walking its length chain, and it cannot ride in `r11d` beside the match
+     * field without breaking the comparisons against MAT_MAX. All fifteen
+     * registers are spoken for and this function calls nothing, so the red zone
+     * below the stack pointer is ours -- a byte store per block, a byte test
+     * where it is read.
+     */
+    mov     %al, (%rsp)
+#endif
     mov     %eax, %r10d
     shr     $LIT_SHIFT, %r10d               /* short literal */
     mov     %eax, %r11d
+#if MAT_SHIFT
+    shr     $MAT_SHIFT, %r11d
+#endif
     and     $MAT_MAX, %r11d                 /* short match */
     lea     1(%r14), %rsi                   /* where the literals begin */
     cmp     $LIT_MAX, %r10d
     je      L(fast_litext)
 
+#ifdef KEVA_REPEAT
+    /*
+     * The offset, unless the token's low bit says it is the one from the block
+     * before. Where it does there is no load and no address to compute, and the
+     * match can start as soon as its length is known -- two links out of the
+     * chain `token -> literal length -> offset address -> offset`.
+     *
+     * Kept below the stack pointer rather than in a register: all fifteen are
+     * spoken for, and this function calls nothing, so the red zone is ours. A
+     * store on a fresh offset, a load on a repeat, both aligned and both in L1.
+     */
+    testb   $1, (%rsp)
+    jne     L(fast_same)
     movzwl  (%rsi,%r10,1), %ecx             /* offset */
+    mov     %rcx, 8(%rsp)
+    jmp     L(fast_offdone)
+L(fast_same):
+    mov     8(%rsp), %rcx
+L(fast_offdone):
+#else
+    movzwl  (%rsi,%r10,1), %ecx             /* offset */
+#endif
     lea     (%rdi,%r10,1), %r8              /* dst after the literals */
 
     /*
@@ -394,7 +461,15 @@ L(block):
     movdqu  %xmm0, (%rdi)
 
 L(fast_litdone):
+#ifdef KEVA_REPEAT
+    lea     (%rsi,%r10,1), %r14             /* past the literals */
+    testb   $1, (%rsp)
+    jne     L(fast_cursor_done)
+    add     $2, %r14                        /* and past the offset it wrote */
+L(fast_cursor_done):
+#else
     lea     2(%rsi,%r10,1), %r14            /* past the literals and the offset */
+#endif
 
     /*
      * A match whose length escaped the token used to leave for the checked
@@ -502,7 +577,18 @@ L(fast_litchain):
     cmp     %r12, %r8
     ja      L(fail)
 
+#ifdef KEVA_REPEAT
+    testb   $1, (%rsp)
+    jne     L(fastlit_same)
     movzwl  (%rsi,%r10,1), %ecx             /* offset */
+    mov     %rcx, 8(%rsp)
+    jmp     L(fastlit_offdone)
+L(fastlit_same):
+    mov     8(%rsp), %rcx
+L(fastlit_offdone):
+#else
+    movzwl  (%rsi,%r10,1), %ecx             /* offset */
+#endif
     test    %ecx, %ecx
     je      L(fail)
     mov     %r8, %rax
@@ -859,6 +945,11 @@ L(fast_litend):
 
 L(slow):
     inc     %r14
+#ifdef KEVA_REPEAT
+    /* Every entry to this path reloads the token, so the bit is parked again
+     * here -- the fast path's copy belongs to whichever block wrote it. */
+    mov     %al, (%rsp)
+#endif
     mov     %eax, %r11d                     /* token, kept across both copies */
 
     mov     %r11d, %r10d
@@ -1136,13 +1227,27 @@ L(lit_done):
     cmp     %r12, %rdi
     je      L(done)
 
+#ifdef KEVA_REPEAT
+    testb   $1, (%rsp)
+    jne     L(slow_same)
+#endif
     lea     2(%r14), %rax
     cmp     %r13, %rax
     ja      L(fail)
     movzwl  (%r14), %ecx                    /* offset */
     mov     %rax, %r14
+#ifdef KEVA_REPEAT
+    mov     %rcx, 8(%rsp)
+    jmp     L(slow_offdone)
+L(slow_same):
+    mov     8(%rsp), %rcx                  /* no bytes were written for it */
+L(slow_offdone):
+#endif
 
     mov     %r11d, %r10d
+#if MAT_SHIFT
+    shr     $MAT_SHIFT, %r10d
+#endif
     and     $MAT_MAX, %r10d
     cmp     $MAT_MAX, %r10d
     jne     L(mat_len)
@@ -1213,6 +1318,9 @@ L(fail):
     xor     %eax, %eax
 
 L(ret):
+#ifdef KEVA_REPEAT
+    add     $16, %rsp
+#endif
     pop     %r15
     pop     %r14
     pop     %r13

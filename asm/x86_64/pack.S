@@ -108,6 +108,8 @@
 #define PACK_SRC_END        64
 #define PACK_SWITCH_CAP     72
 #define PACK_HAVE_SWITCH    80
+/* The offset the last block wrote, for the repeat bit. */
+#define PACK_LAST_OFFSET    88
 #define PACK_PROBE          96
 #define PACK_FRAME          1128
 
@@ -255,6 +257,13 @@ KEVA_LABEL(pack, worth):
     movups  %xmm0, PACK_RECENT(%rsp)        /* recent, seen */
     movq    $0, PACK_COUNT(%rsp)
     movq    $0, PACK_HAVE_SWITCH(%rsp)
+    /*
+     * No real offset is -1, so the first block of a value can never claim a
+     * repeat against whatever the frame happened to hold. Left uninitialised it
+     * matched by chance and the decoder rejected the stream -- which is the
+     * right answer to a block claiming a repeat with nothing behind it.
+     */
+    movq    $-1, PACK_LAST_OFFSET(%rsp)
 
     xor     %r13d, %r13d                    /* at */
     xor     %r12d, %r12d                    /* next_at */
@@ -280,9 +289,11 @@ KEVA_LABEL(pack, worth):
 /* Even split, twelve table bits. The split may change from here. */
 #define PACK_PFX            es
 #define PACK_HSHIFT         52
-#define PACK_LIT_MAX        15
+#define PACK_LIT_MAX        7
 #define PACK_MAT_MAX        15
-#define PACK_TOK_SHIFT      4
+#define PACK_TOK_SHIFT      5
+#define PACK_MAT_SHIFT      1
+#define PACK_REPEAT         1
 #define PACK_ADAPTIVE       1
 #define PACK_SWITCH_TO      PACK_LBL(ws, emit)
 #include "pack_body.inc"
@@ -291,15 +302,21 @@ KEVA_LABEL(pack, worth):
 #undef PACK_LIT_MAX
 #undef PACK_MAT_MAX
 #undef PACK_TOK_SHIFT
+#undef PACK_MAT_SHIFT
+#ifdef PACK_REPEAT
+#undef PACK_REPEAT
+#endif
 #undef PACK_ADAPTIVE
 #undef PACK_SWITCH_TO
 
 /* Even split, eleven table bits. */
 #define PACK_PFX            el
 #define PACK_HSHIFT         53
-#define PACK_LIT_MAX        15
+#define PACK_LIT_MAX        7
 #define PACK_MAT_MAX        15
-#define PACK_TOK_SHIFT      4
+#define PACK_TOK_SHIFT      5
+#define PACK_MAT_SHIFT      1
+#define PACK_REPEAT         1
 #define PACK_ADAPTIVE       1
 #define PACK_SWITCH_TO      PACK_LBL(wl, emit)
 #include "pack_body.inc"
@@ -308,6 +325,10 @@ KEVA_LABEL(pack, worth):
 #undef PACK_LIT_MAX
 #undef PACK_MAT_MAX
 #undef PACK_TOK_SHIFT
+#undef PACK_MAT_SHIFT
+#ifdef PACK_REPEAT
+#undef PACK_REPEAT
+#endif
 #undef PACK_ADAPTIVE
 #undef PACK_SWITCH_TO
 
@@ -317,6 +338,7 @@ KEVA_LABEL(pack, worth):
 #define PACK_LIT_MAX        3
 #define PACK_MAT_MAX        63
 #define PACK_TOK_SHIFT      6
+#define PACK_MAT_SHIFT      0
 #define PACK_ADAPTIVE       0
 #define PACK_SWITCH_TO      PACK_LBL(ws, emit)
 #include "pack_body.inc"
@@ -325,6 +347,10 @@ KEVA_LABEL(pack, worth):
 #undef PACK_LIT_MAX
 #undef PACK_MAT_MAX
 #undef PACK_TOK_SHIFT
+#undef PACK_MAT_SHIFT
+#ifdef PACK_REPEAT
+#undef PACK_REPEAT
+#endif
 #undef PACK_ADAPTIVE
 #undef PACK_SWITCH_TO
 
@@ -334,6 +360,7 @@ KEVA_LABEL(pack, worth):
 #define PACK_LIT_MAX        3
 #define PACK_MAT_MAX        63
 #define PACK_TOK_SHIFT      6
+#define PACK_MAT_SHIFT      0
 #define PACK_ADAPTIVE       0
 #define PACK_SWITCH_TO      PACK_LBL(wl, emit)
 #include "pack_body.inc"
@@ -342,6 +369,10 @@ KEVA_LABEL(pack, worth):
 #undef PACK_LIT_MAX
 #undef PACK_MAT_MAX
 #undef PACK_TOK_SHIFT
+#undef PACK_MAT_SHIFT
+#ifdef PACK_REPEAT
+#undef PACK_REPEAT
+#endif
 #undef PACK_ADAPTIVE
 #undef PACK_SWITCH_TO
 

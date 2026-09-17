@@ -595,18 +595,50 @@ L_(emit):
      * its cursor first and stores at a negative displacement, for the same
      * reason.
      */
-    lea     (%r15,%r10), %rbx               /* the run's source */
+    /*
+     * The offset goes in rbx and the run is addressed off r15 and r10 directly,
+     * rather than through the `lea` that used to hold it: rax carries `matched`
+     * all the way to the cursor advance at the bottom, rdx is the candidate the
+     * offset is derived from, and rdi belongs to the extension byte one path
+     * over. rbx is the only register free here, so the source pointer gives it
+     * up -- and loses a micro-op doing so, since the address it held was one
+     * the load could form itself.
+     */
+    mov     %r13, %rbx
+    sub     %rdx, %rbx                      /* this block's offset */
     mov     %r9, %r8
     shl     $PACK_TOK_SHIFT, %r8
+#if PACK_MAT_SHIFT
+    lea     (%r8,%rcx,2), %r8               /* the match field, one bit up */
+#else
     or      %rcx, %r8
+#endif
+#ifdef PACK_REPEAT
+    /*
+     * The low bit says the offset is the one the block before wrote, and then
+     * the two bytes are not written at all -- so the test that sets the bit is
+     * the same test that picks the store and the cursor step, and it is asked
+     * once rather than set branchlessly and read back.
+     */
+    cmp     PACK_LAST_OFFSET(%rsp), %rbx
+    je      L_(emit_fast_rep)
+    mov     %rbx, PACK_LAST_OFFSET(%rsp)
+#endif
     mov     %r8b, (%rbp)                    /* token */
-    movdqu  (%rbx), %xmm0
+    movdqu  (%r15,%r10), %xmm0
     movdqu  %xmm0, 1(%rbp)                  /* literals, sixteen written */
-    mov     %r13, %r8
-    sub     %rdx, %r8
-    mov     %r8w, 1(%rbp,%r9)               /* offset, past the true length */
+    mov     %bx, 1(%rbp,%r9)                /* offset, past the true length */
     lea     3(%rbp,%r9), %rbp               /* token + run + offset, once */
     jmp     L_(emit_done)
+#ifdef PACK_REPEAT
+L_(emit_fast_rep):
+    inc     %r8                             /* the low bit, and it was clear */
+    mov     %r8b, (%rbp)
+    movdqu  (%r15,%r10), %xmm0
+    movdqu  %xmm0, 1(%rbp)
+    lea     1(%rbp,%r9), %rbp               /* token + run, no offset */
+    jmp     L_(emit_done)
+#endif
 
 /* The emit dispatch's exit, relayed: its three tests sit eleven bytes further
  * from the general path than rel8 reaches, because the two fast blocks lie
@@ -638,19 +670,33 @@ L_(emit_fast1):
     cmp     $255, %rdi
     jae     L_(emit_slow)                   /* needs a chain, not one byte */
 
-    lea     (%r15,%r10), %rbx
+    mov     %r13, %rbx
+    sub     %rdx, %rbx                      /* this block's offset */
     mov     %r9, %r8
     shl     $PACK_TOK_SHIFT, %r8
-    or      $PACK_MAT_MAX, %r8              /* the field is saturated */
+    or      $(PACK_MAT_MAX << PACK_MAT_SHIFT), %r8  /* the field is saturated */
+#ifdef PACK_REPEAT
+    cmp     PACK_LAST_OFFSET(%rsp), %rbx
+    je      L_(emit_fast1_rep)
+    mov     %rbx, PACK_LAST_OFFSET(%rsp)
+#endif
     mov     %r8b, (%rbp)
-    movdqu  (%rbx), %xmm0
+    movdqu  (%r15,%r10), %xmm0
     movdqu  %xmm0, 1(%rbp)
-    mov     %r13, %r8
-    sub     %rdx, %r8
-    mov     %r8w, 1(%rbp,%r9)
+    mov     %bx, 1(%rbp,%r9)
     mov     %dil, 3(%rbp,%r9)               /* the extension byte */
     lea     4(%rbp,%r9), %rbp
     jmp     L_(emit_done)
+#ifdef PACK_REPEAT
+L_(emit_fast1_rep):
+    inc     %r8                             /* the low bit, and it was clear */
+    mov     %r8b, (%rbp)
+    movdqu  (%r15,%r10), %xmm0
+    movdqu  %xmm0, 1(%rbp)
+    mov     %dil, 1(%rbp,%r9)               /* no offset, so the byte moves up */
+    lea     2(%rbp,%r9), %rbp
+    jmp     L_(emit_done)
+#endif
 
 L_(emit_slow):
     /* An extension chain, or a run too near the end of the input to overrun.
@@ -670,7 +716,20 @@ L_(emit_slow):
     mov     $PACK_MAT_MAX, %rbx
     cmp     %rbx, %rcx
     cmovb   %rcx, %rbx
+#if PACK_MAT_SHIFT
+    shl     $PACK_MAT_SHIFT, %rbx
+#endif
     or      %rbx, %r8
+#ifdef PACK_REPEAT
+    /* rbx again, and for the same reason the fast paths take it: rax is the
+     * match length the cursor advances by once the block is out. */
+    mov     %r13, %rbx
+    sub     %rdx, %rbx                      /* this block's offset */
+    cmp     PACK_LAST_OFFSET(%rsp), %rbx
+    jne     L_(emit_slow_new)
+    inc     %r8                             /* the low bit, and it was clear */
+L_(emit_slow_new):
+#endif
     mov     %r8b, (%rbp)
     inc     %rbp
 
@@ -770,11 +829,28 @@ L_(emit_slow):
     inc     %rbp
 14:
 
-    /* The offset, always two bytes. */
+    /* The offset -- two bytes, or none where the token claimed a repeat. */
     mov     %r13, %r8
     sub     %rdx, %r8
+#ifdef PACK_REPEAT
+    /*
+     * Asked again rather than carried: the literal copy above runs between the
+     * token and here, and no register survives it that is not already spoken
+     * for. The comparison is two instructions on the path that already accepted
+     * a chain.
+     *
+     * The slot is written only where the offset is, so a run of repeats keeps
+     * comparing against the block that last wrote one.
+     */
+    cmp     PACK_LAST_OFFSET(%rsp), %r8
+    je      L_(emit_slow_off)
+    mov     %r8, PACK_LAST_OFFSET(%rsp)
+#endif
     mov     %r8w, (%rbp)
     add     $2, %rbp
+#ifdef PACK_REPEAT
+L_(emit_slow_off):
+#endif
 
     /* An extended match length, the same chain. */
     cmp     $PACK_MAT_MAX, %rcx
