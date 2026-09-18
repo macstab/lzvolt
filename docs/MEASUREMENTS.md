@@ -406,3 +406,78 @@ all worth recording because they are the obvious suspects:
 
 None of them was the cause because there was no cause. The number was an
 artefact of the baseline.
+
+---
+
+## 2026-09-18 -- the header: what it actually carries
+
+Not a benchmark. Three counts and two facts read out of the code, because the
+header was about to be redesigned on assumptions again.
+
+### Prior art: the prefix varint exists and the tradeoff is known
+
+The scheme -- length in the leading bits of the first byte instead of a
+continuation bit per byte -- is **PrefixVarint**. 7-Zip ships it, WebAssembly
+weighed it against LEB128 and kept LEB128 (design#601), and `prefix_uvarint` is
+a Rust crate. Both claims we argued out are settled in the literature:
+
+> *"PrefixVarint is expected to be faster to encode and decode and **has the
+> same encoded size as LEB128**."*
+
+> *"This improves coding speed by **reducing the number of branches** evaluated
+> to code longer values."*
+
+`h14s.p5r.org/2024/11/11/bigger-better-varints.html` compares the family and
+finds no scheme that beats LEB128 on size below 35 bits. That is not an
+implementation gap: the length costs one bit per byte wherever it is written.
+Our maximum is 29 bits (`MAX_UNPACKED` = 512 MiB), so we are entirely inside the
+range where every scheme is the same size. **Any header change is a decode-speed
+change, not a size change.**
+
+### Header bytes by scheme, counted
+
+`declared` is the *unpacked* length; today's encoding is `varint(declared << 2 |
+hybrid << 1 | split)`.
+
+| declared | today LEB<<2 | 2-bit prefix + x3 | LEB + x3 | truncated unary + x3 |
+|---|---|---|---|---|
+| 32 - 42 | 2 | 2 | **1** | **1** |
+| 48 - 4095 | 2 | 2 | 2 | 2 |
+| 4096 - 5460 | 3 | **2** | **2** | **2** |
+| 8192 - 65536 | 3 | 3 | 3 | 3 |
+| 1 MiB | 4 | **3** | 4 | 4 |
+| 256 MiB | 5 | **4** | 5 | out of range |
+
+One-byte ceiling: today **31**, a fixed 2-bit prefix **21**, LEB or unary with
+base-3 flags **42**. A fixed two-bit prefix costs two bits in the one-byte case
+where a unary prefix costs one; it wins back more than that above a megabyte.
+
+### Two facts that make the small case free
+
+**A value of 63 bytes or less can only be plain even, never hybrid, never wide.**
+
+1. The switch is gated on `seen >= SPLIT_WINDOW` with `SPLIT_WINDOW = 16`, and a
+   block produces at least `MIN_MATCH` = 4 bytes. So a value needs **at least 64
+   bytes of output** before the packer even evaluates the switch.
+2. Nothing starts in the wide split. All six `pack_pass` call sites pass `EVEN`
+   (pack.rs:385, 394, 769, 773, 847, 849), and `unpack_into_slice` writes
+   `EVEN.bit()` too. The wide split is reachable *only* through the hybrid
+   switch.
+
+So for values up to 63 bytes the flag state is a constant, and a prefix that
+means "short and plain" needs no flag bits at all. Six bits of payload stay six
+bits of payload.
+
+### And bit 0 of the header is dead
+
+It follows from fact 2: `split` is never set on write, so `Split::from_header`
+reads a bit that is always zero. Every header dumped today was flags=0 or
+flags=2, never 1 or 3. The header carries **one** bit of real information and
+`<< 2` pays for two, halving the range that fits in a byte for nothing.
+
+**What this sets up.** The header has three live states, not four, and only one
+of them can occur below 64 bytes. `MAX_UNPACKED` at 512 MiB needs 29 bits, which
+does not fit a 2-bit prefix's 30-bit top class once flags are folded in by
+multiplication -- so either the top class carries an extra byte, or the flags sit
+in fixed bits below the prefix, or the limit drops to 256 MiB. That is the one
+open decision.
