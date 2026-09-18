@@ -289,11 +289,10 @@ KEVA_LABEL(pack, worth):
 /* Even split, twelve table bits. The split may change from here. */
 #define PACK_PFX            es
 #define PACK_HSHIFT         52
-#define PACK_LIT_MAX        7
+#define PACK_LIT_MAX        15
 #define PACK_MAT_MAX        15
-#define PACK_TOK_SHIFT      5
-#define PACK_MAT_SHIFT      1
-#define PACK_REPEAT         1
+#define PACK_TOK_SHIFT      4
+#define PACK_MAT_SHIFT      0
 #define PACK_ADAPTIVE       1
 #define PACK_SWITCH_TO      PACK_LBL(ws, emit)
 #include "pack_body.inc"
@@ -312,11 +311,10 @@ KEVA_LABEL(pack, worth):
 /* Even split, eleven table bits. */
 #define PACK_PFX            el
 #define PACK_HSHIFT         53
-#define PACK_LIT_MAX        7
+#define PACK_LIT_MAX        15
 #define PACK_MAT_MAX        15
-#define PACK_TOK_SHIFT      5
-#define PACK_MAT_SHIFT      1
-#define PACK_REPEAT         1
+#define PACK_TOK_SHIFT      4
+#define PACK_MAT_SHIFT      0
 #define PACK_ADAPTIVE       1
 #define PACK_SWITCH_TO      PACK_LBL(wl, emit)
 #include "pack_body.inc"
@@ -336,9 +334,10 @@ KEVA_LABEL(pack, worth):
 #define PACK_PFX            ws
 #define PACK_HSHIFT         52
 #define PACK_LIT_MAX        3
-#define PACK_MAT_MAX        63
+#define PACK_MAT_MAX        31
 #define PACK_TOK_SHIFT      6
-#define PACK_MAT_SHIFT      0
+#define PACK_MAT_SHIFT      1
+#define PACK_REPEAT         1
 #define PACK_ADAPTIVE       0
 #define PACK_SWITCH_TO      PACK_LBL(ws, emit)
 #include "pack_body.inc"
@@ -358,9 +357,10 @@ KEVA_LABEL(pack, worth):
 #define PACK_PFX            wl
 #define PACK_HSHIFT         53
 #define PACK_LIT_MAX        3
-#define PACK_MAT_MAX        63
+#define PACK_MAT_MAX        31
 #define PACK_TOK_SHIFT      6
-#define PACK_MAT_SHIFT      0
+#define PACK_MAT_SHIFT      1
+#define PACK_REPEAT         1
 #define PACK_ADAPTIVE       0
 #define PACK_SWITCH_TO      PACK_LBL(wl, emit)
 #include "pack_body.inc"

@@ -349,3 +349,60 @@ today as costing more than it saves.
 walks one layout, so they are not in the table. They are also where the old
 statistics were most interesting -- offsets were 48% of records_64k's output.
 Worth a census that follows the switch.
+
+---
+
+## 2026-09-18 -- the repeat bit moved to the wide split
+
+M2 Max. Even goes back to four and four; wide becomes two, five and one. All
+four kernels, Rust and both architectures. Baseline measured in the same run as
+the result, which matters -- see the method note below.
+
+### Size, and this part is a count
+
+| shape | before | after | | liblz4 | |
+|---|---|---|---|---|---|
+| records_4k | 603 B | **488 B** | -19.1% | 660 B | 26% smaller |
+| records_64k | 6509 B | **5524 B** | -15.1% | 7722 B | 28% smaller |
+| records_512 | 195 B | 195 B | -- | 192 B | |
+| varied_512 / 4k / 64k | unchanged | | | | never reach wide |
+
+Block counts do not move: records_4k stays at 96 blocks, records_64k at 1567.
+The bytes come out of offsets alone -- 58 of records_4k's 96 blocks and 493 of
+records_64k's 1567 now write none.
+
+### Throughput
+
+| shape | vs. before |
+|---|---|
+| records_4k | **-0.3%** |
+| records_64k | **-3.5%** |
+| records_512 | -0.2% |
+| varied_512 | -0.4% |
+| varied_64k | -0.6% |
+
+records_4k is 19% smaller for free. records_64k costs 3.5%, which is outside
+the +/-1.5% noise floor and is the one open item.
+
+### Method note, and it cost an hour
+
+The first measurement of this change read **-7.1% on records_4k** against a
+baseline saved three hours earlier at the same settings. Re-baselining inside
+the same run turned that into -0.3%. The machine drifts; a saved Criterion
+baseline is only comparable to a run taken near it.
+
+An hour went into chasing the -7.1% through three hypotheses, all refuted and
+all worth recording because they are the obvious suspects:
+
+- **the branch on the repeat bit** -- reversing it so the repeat case falls
+  through changes nothing, because both arms already take exactly one taken
+  branch. `tbnz` taken for a repeat, or `tbnz` not taken and `b` taken for a
+  load: one either way.
+- **code placement** -- `.p2align 6` on the loop head instead of `.p2align 4`:
+  -7.8%, slightly worse.
+- **the narrower fixed match move** -- MAT_CAP falls from 67 to 35 with the
+  five-bit field, taking COPY_MAX from 96 to 64. Forcing MAT_CAP back to 67:
+  -6.9%, unchanged.
+
+None of them was the cause because there was no cause. The number was an
+artefact of the baseline.

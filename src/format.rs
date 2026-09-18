@@ -1334,18 +1334,35 @@ struct Split {
 
 /// Three for the literal run, four for the match, one for the repeat.
 ///
-/// Was four and four, which is the LZ4 block format. The literal ceiling paid
-/// for the repeat bit: a run of seven or more now writes an extension byte
-/// where fifteen used to fit. On `records_4k` that is nine extra bytes against
-/// 144 saved.
+/// Four bits each, which is also the LZ4 block format.
+///
+/// The repeat bit was taken out of this field and put back: it cost 22.9% on
+/// records_512 and 21.5% on varied_512. The census said why -- the share of
+/// blocks whose literal length needs an extension chain doubled, and a
+/// saturated literal length is the one thing that branches out of the decoder's
+/// hot loop, where a saturated match length does not. See docs/MEASUREMENTS.md.
 const EVEN: Split = Split {
-    lit_bits: 3,
-    rep_bits: 1,
+    lit_bits: 4,
+    rep_bits: 0,
 };
-/// Two for the literal run, six for the match.
+/// Two for the literal run, five for the match, one for the repeat.
+///
+/// Was two and six. This is where the repeat bit belongs and the census is not
+/// ambiguous about it: in the wide split 31.8% of records_64k's offsets repeat
+/// the one before and 72.8% of records_4k's, while a five-bit match field costs
+/// *nothing* -- the share of blocks needing a chain goes 32.5% -> 32.5% on
+/// records_64k and 32.1% -> 33.3% on records_4k.
+///
+/// Free here and ruinous in the even split because wide match lengths are
+/// bimodal: what passes 31 almost always passes 63 as well, so the blocks that
+/// need a chain need one either way. Literal lengths are not like that. They
+/// cluster just above whatever the ceiling is.
+///
+/// Records reach this split after fifteen blocks and stay, so it is the layout
+/// they are decoded under: 1552 of records_64k's 1567 blocks.
 const LONG_MATCH: Split = Split {
     lit_bits: 2,
-    rep_bits: 0,
+    rep_bits: 1,
 };
 
 impl Split {

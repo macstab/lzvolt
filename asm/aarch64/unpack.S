@@ -96,35 +96,55 @@
 #  define LIT_MAX    15
 #  define MAT_MAX    15
 #elif defined(KEVA_WIDE)
+/*
+ * Two for the literal run, five for the match, one for "the offset the last
+ * block used". Was two and six.
+ *
+ * This is the body records are decoded under -- they reach this split after
+ * fifteen blocks and stay, 1552 of records_64k's 1567 -- and it is where the
+ * repeat bit is free. 31.8% of records_64k's offsets repeat the one before and
+ * 72.8% of records_4k's, while dropping the match field from six bits to five
+ * moves the share of blocks needing a chain by 0.0 and 1.2 percentage points.
+ * Wide match lengths are bimodal: what passes 31 almost always passes 63 too,
+ * so those blocks were paying for a chain either way.
+ *
+ * The even split is the opposite and was measured so: the same bit taken from
+ * its literal field cost 22.9% on records_512. See docs/MEASUREMENTS.md.
+ */
 #  define KEVA_PFX   w
 #  define KEVA_ENTRY keva_unpack_wide
 #  define LIT_SHIFT  6
 #  define LIT_MAX    3
-#  define MAT_MAX    63
-#  define MAT_CAP    67                 /* MAT_MAX + MIN_MATCH */
+#  define MAT_SHIFT  1
+#  define MAT_BITS   5
+#  define MAT_MAX    31
+#  define MAT_CAP    35                 /* MAT_MAX + MIN_MATCH */
+#  define KEVA_REPEAT 1
 #else
 /*
- * Three for the literal run, four for the match, one for "the offset the last
- * block used". Was four and four.
+ * Four bits each, which is also what a block liblz4 wrote uses.
  *
- * The bit is worth more than the literal ceiling it costs: offsets repeat 90%
- * of the time on 512-byte records and 75.8% at 4 KiB, and a repeat block loads
- * nothing and computes no address. Measured on the portable pair before any of
- * this was written -- smaller on every shape, free to pack, faster to read.
+ * The repeat bit was taken out of the literal field here and put back. It cost
+ * 22.9% on records_512 and 21.5% on varied_512, and the census said why: the
+ * share of blocks whose literal length needs a chain doubled. A saturated
+ * literal length branches out to L(fast_litlong) and back; a saturated match
+ * length is handled inside the loop. So the bit went to the wide body, where
+ * the field it costs is the one whose overflow stays home.
  */
 #  define KEVA_PFX   e
 #  define KEVA_ENTRY keva_unpack
-#  define LIT_SHIFT  5
-#  define LIT_MAX    7
-#  define MAT_SHIFT  1
+#  define LIT_SHIFT  4
+#  define LIT_MAX    15
 #  define MAT_MAX    15
 #  define MAT_CAP    19
-#  define KEVA_REPEAT 1
 #endif
 
-/* The wide split and the LZ4 body spend all eight token bits on lengths. */
+/* The even split and the LZ4 body spend all eight token bits on lengths. */
 #ifndef MAT_SHIFT
 #  define MAT_SHIFT  0
+#endif
+#ifndef MAT_BITS
+#  define MAT_BITS   4
 #endif
 
 /*
@@ -347,7 +367,7 @@ L(fast):
     ldrb    w4, [x19, x23]              // token
     lsr     w5, w4, #LIT_SHIFT                  // literal nibble
 #if MAT_SHIFT
-    ubfx    w26, w4, #MAT_SHIFT, #4          // match nibble, above the repeat bit
+    ubfx    w26, w4, #MAT_SHIFT, #MAT_BITS          // match nibble, above the repeat bit
     and     w13, w4, #1                      // and the repeat bit beside it
 #else
     and     w26, w4, #MAT_MAX                // match nibble, kept across helpers
@@ -606,7 +626,7 @@ L(tail):
     ldrb    w4, [x19, x23]              // token
     lsr     w5, w4, #LIT_SHIFT
 #if MAT_SHIFT
-    ubfx    w26, w4, #MAT_SHIFT, #4
+    ubfx    w26, w4, #MAT_SHIFT, #MAT_BITS
     /*
      * The bit goes to x13 rather than staying in the token, because `L(exact)`
      * is called between here and the offset and its contract destroys x4. The

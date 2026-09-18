@@ -128,9 +128,24 @@
 #    define KEVA_PFX   w
 #    define KEVA_ENTRY keva_unpack_wide
 #  endif
+/*
+ * Two for the literal run, five for the match, one for "the offset the last
+ * block used". Was two and six.
+ *
+ * This is the body records are decoded under -- they reach this split after
+ * fifteen blocks and stay, 1552 of records_64k's 1567 -- and the bit is free
+ * here: 31.8% of records_64k's offsets repeat the one before and 72.8% of
+ * records_4k's, while a five-bit match field moves the share of blocks needing
+ * a chain by 0.0 and 1.2 percentage points. Wide match lengths are bimodal, so
+ * what passes 31 almost always passes 63 too and was paying for a chain either
+ * way. In the even split the same bit cost 22.9%. See docs/MEASUREMENTS.md.
+ */
 #  define LIT_SHIFT  6
 #  define LIT_MAX    3
-#  define MAT_MAX    63
+#  define MAT_SHIFT  1
+#  define MAT_BITS   5
+#  define MAT_MAX    31
+#  define KEVA_REPEAT 1
 #else
 #  if defined(KEVA_XEON)
 #    define KEVA_PFX   ex
@@ -146,25 +161,25 @@
 #    define KEVA_ENTRY keva_unpack
 #  endif
 /*
- * Three for the literal run, four for the match, one for "the offset the last
- * block used". Was four and four, which is also LZ4's token -- and this is
- * where our format stops being able to claim that.
+ * Four bits each, which is also LZ4's token.
  *
- * The bit is worth more than the literal ceiling it costs: offsets repeat 90%
- * of the time on 512-byte records and 75.8% at 4 KiB, and a repeat block loads
- * nothing and computes no address. Measured on the portable pair before any
- * kernel was touched: smaller on every shape, free to pack, faster to read.
+ * The repeat bit was taken out of the literal field here and put back: it cost
+ * 22.9% on records_512 and 21.5% on varied_512, because the share of blocks
+ * whose literal length needs an extension chain doubled and a saturated literal
+ * length is the one thing that leaves the hot path. It lives in the wide body
+ * now, where the field it costs is the one whose overflow stays home.
  */
-#  define LIT_SHIFT  5
-#  define LIT_MAX    7
-#  define MAT_SHIFT  1
+#  define LIT_SHIFT  4
+#  define LIT_MAX    15
 #  define MAT_MAX    15
-#  define KEVA_REPEAT 1
 #endif
 
-/* The wide split and the LZ4 body spend all eight token bits on lengths. */
+/* The even split and the LZ4 body spend all eight token bits on lengths. */
 #ifndef MAT_SHIFT
 #  define MAT_SHIFT  0
+#endif
+#ifndef MAT_BITS
+#  define MAT_BITS   4
 #endif
 
 /*

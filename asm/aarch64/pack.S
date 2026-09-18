@@ -79,13 +79,6 @@ KEVA_SYM(keva_pack):
     mov     x26, #32                    // misses = 1 << SKIP_TRIGGER
 
     /*
-     * The offset the last block wrote, for the token's repeat bit. Minus one
-     * because no real offset is: the first block of a value has nothing behind
-     * it and must never claim a repeat.
-     */
-    mov     x28, #-1
-
-    /*
      * Header: LEB128 of the length, shifted up by one to leave room for the
      * split bit. This kernel only emits the even split, so the bit is zero --
      * a value that wants the wide match is packed by the portable packer,
@@ -312,35 +305,26 @@ KEVA_SYM(keva_pack):
     cbz     x2, .Lblock_token
     sub     x5, x2, #4
 
-/*
- * The token is 3/4/1: three bits of literal length, four of match, and a low
- * bit that says the offset is the one the block before wrote -- in which case
- * the two offset bytes below are not written at all.
- *
- * The tail block carries no match, so it gets neither a match field nor a
- * repeat bit: there is no offset behind it to repeat, and the decoder stops on
- * the declared length before it would look for one.
- */
 .Lblock_token:
-    mov     x9, #7
-    cmp     x3, #7
-    csel    x10, x3, x9, lo             // literal field, three bits
     mov     x9, #15
+    cmp     x3, #15
+    csel    x10, x3, x9, lo             // literal nibble
     cmp     x5, #15
-    csel    x12, x5, x9, lo             // match field, four bits
-    lsl     w10, w10, #5
-    cbz     x2, .Lblock_tok_store
-    orr     w10, w10, w12, lsl #1
-    cmp     x4, x28
-    cinc    w10, w10, eq                // the low bit, and it was clear
-.Lblock_tok_store:
+    csel    x12, x5, x9, lo             // match nibble
+    cbz     x2, .Lblock_no_match_nibble
+    b       .Lblock_have_nibbles
+.Lblock_no_match_nibble:
+    mov     x12, #0
+.Lblock_have_nibbles:
+    lsl     w10, w10, #4
+    orr     w10, w10, w12
     strb    w10, [x21, x23]
     add     x23, x23, #1
 
     // Extended literal length.
-    cmp     x3, #7
+    cmp     x3, #15
     b.lo    .Lblock_literals
-    sub     x9, x3, #7
+    sub     x9, x3, #15
 .Lblock_lit_ext:
     cmp     x9, #255
     b.lo    .Lblock_lit_ext_last
@@ -483,22 +467,12 @@ KEVA_SYM(keva_pack):
 .Lblock_offset:
     cbz     x2, .Lblock_done            // the tail carries no match
 
-    /*
-     * Asked again rather than carried: the literal copy runs between the token
-     * and here and has the scratch registers. The slot is written only where
-     * the offset is, so a run of repeats keeps comparing against the block that
-     * last wrote one.
-     */
-    cmp     x4, x28
-    b.eq    .Lblock_match_len           // the token already said so
-    mov     x28, x4
     strb    w4, [x21, x23]
     add     x23, x23, #1
     lsr     w9, w4, #8
     strb    w9, [x21, x23]
     add     x23, x23, #1
 
-.Lblock_match_len:
     cmp     x5, #15
     b.lo    .Lblock_done
     sub     x9, x5, #15
