@@ -641,3 +641,58 @@ varied_512:   keva  356 B   liblz4  366 B   lz4_flex  368 B
 `create` to measuring in minutes, not the twenty the script's own comments
 claim. There is no case for leaving machines up between runs, and idle machines
 are billed. `KEEP=1` stays off.
+
+---
+
+## 2026-09-18 -- all four parts, the whole day's format work
+
+`12760b2` (before anything today) against `6652ba2` (wide repeat bit + prefix
+header). `QUICK=1`, `KEVA_FILTER=own_format`, one run per revision, one second
+per cell. liblz4 and lz4_flex sit in the same runs and touch none of our code,
+so their movement is each machine's error bar.
+
+### Our own format, decoding -- percent change
+
+| shape | M2 Max | Axion | Xeon | EPYC |
+|---|---|---|---|---|
+| records_512 | -0.2% | +1.2% | +0.1% | +0.1% |
+| varied_512 | -0.4% | -0.3% | -0.2% | +1.2% |
+| records_4k | -0.3% | **+10.8%** | -12.1% | -4.9% |
+| varied_4k | -- | -0.6% | +3.8% | +4.0% |
+| records_64k | -3.5% | **+13.7%** | -1.4% | -2.1% |
+| varied_64k | -0.6% | +0.7% | -0.2% | -0.6% |
+| noise_512 | -- | -2.0% | -50.3% | +1.5% |
+| noise_4k | -- | +1.4% | +36.0% | +0.2% |
+| noise_64k | -- | +0.2% | -1.2% | -9.4% |
+
+### The error bars, from code we did not touch
+
+| | liblz4 worst | lz4_flex worst |
+|---|---|---|
+| Axion | +1.4% | -4.1% |
+| EPYC | +8.5% | **-19.4%** |
+| Xeon | **-12.6%** | +2.5% |
+
+**What can be read from this, and what cannot.**
+
+- **Axion is the clean measurement and it is a large win.** Controls within
+  +/-1.4%, and the two cells the wide repeat bit touches gain 10.8% and 13.7%.
+  Those are exactly the two shapes that read 15-19% fewer bytes. A core with a
+  narrower memory path converts the size saving into throughput; the M2 Max,
+  with bandwidth to spare, does not.
+- **Xeon is unreadable.** liblz4 moves 12.6% on varied_512 with no code change,
+  and the two extreme keva cells are `noise`, which is stored raw -- a memcpy
+  that no format change can touch. Single run, one second a cell, shared VM.
+- **EPYC is marginal.** Controls reach 19.4%; records_4k at -4.9% is inside
+  that. Also the A-B-B-A did not survive the file naming: the script names
+  result files by sha, so positions 3 and 4 overwrote 1 and 2. What is compared
+  above is position 4 against position 3, which is *less* biased than 1-vs-2 but
+  is not the design.
+- **The M2 Max is quiet on everything**, the -3.5% on records_64k included; it
+  is the one machine where three separate runs agreed.
+
+**The honest summary.** One machine of four shows a double-digit gain, one shows
+a small loss, two are too noisy to say. The size result is not in question and
+does not depend on the machine: records_4k 603 -> 487 bytes, records_64k 6509 ->
+5524, both around 30% under liblz4. Anyone wanting a throughput number to quote
+needs medians of three, and that is not what QUICK is for.
