@@ -696,3 +696,39 @@ a small loss, two are too noisy to say. The size result is not in question and
 does not depend on the machine: records_4k 603 -> 487 bytes, records_64k 6509 ->
 5524, both around 30% under liblz4. Anyone wanting a throughput number to quote
 needs medians of three, and that is not what QUICK is for.
+
+---
+
+## 2026-09-18 -- a 48-byte fixed match move
+
+`f6490c8` (64-byte move) against `64f5537` (48). Axion, `QUICK=1`, one run.
+
+The wide split carries 35 bytes of match inline since the repeat bit took a
+match bit. `COPY_MAX` followed `MAT_CAP` from 96 down to 64 on its own, but its
+steps were 32/64/96 and 35 wants 48 -- so the fixed move wrote a fourth sixteen
+bytes for nothing, on the body 1552 of records_64k's 1567 blocks pass through.
+
+| shape | 64 B | 48 B | | liblz4 | lz4_flex |
+|---|---|---|---|---|---|
+| records_4k | 12.38 | **12.76** | **+3.1%** | -0.1% | -0.1% |
+| records_64k | 12.39 | **12.81** | **+3.4%** | +0.7% | +0.6% |
+| records_512 | 10.94 | 11.36 | +3.8% | -3.6% | +2.1% |
+| varied_512 | 8.70 | 8.76 | +0.7% | -0.6% | -0.4% |
+| varied_4k | 7.32 | 7.33 | +0.1% | -0.4% | +1.5% |
+| varied_64k | 7.01 | 7.02 | +0.2% | -0.0% | -0.1% |
+| noise_4k | 77.49 | 77.39 | -0.1% | +0.6% | -0.1% |
+| noise_64k | 85.70 | 86.34 | +0.7% | -1.9% | -1.0% |
+
+**The mechanism is confirmed by the rows that did not move.** `varied` decodes
+under the even split, where `MAT_CAP` is 19 and `COPY_MAX` was and remains 32 --
++0.1%. `noise` is stored raw and never decoded -- +0.7%. Only `records` reaches
+the wide body, and only `records` gains. That is exactly the shape of the
+prediction, which is stronger evidence than the size of the number.
+
+Controls sit under 1% on records_4k and records_64k, so +3.1% and +3.4% are
+real. records_512 at +3.8% is inside its own control's 3.6% and is not a claim.
+
+M2 Max on the same change: **-0.6%**, its noise floor -- the same non-answer it
+gave the repeat bit, and for the same reason. Two changes now, both aimed at
+reading or writing fewer bytes, both invisible on a machine with bandwidth to
+spare and both worth 3-14% on one without.
