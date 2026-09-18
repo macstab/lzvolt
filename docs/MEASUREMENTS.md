@@ -201,3 +201,60 @@ field at all -- it needs a layout of its own, chosen per value, or a place
 outside the token.
 
 Reverted. `56770f8` (3/4/1) stands.
+
+---
+
+## 2026-09-18 -- three streams instead of one
+
+M2 Max, portable throwaway (`examples/streams.rs`, deleted after this entry).
+One matcher, two serialisations of its identical block list, two decoders
+written in the same style with the same wide copies, so the only variable is the
+layout.
+
+**The hypothesis.** The decoder is latency-bound, not issue-bound -- `unpack.S`
+measured that and says so in as many words. The chain per block is
+
+    load token -> extract literal length -> form offset address -> load offset
+
+two dependent loads with arithmetic between them. Put the offsets in a stream of
+their own and the address becomes `offsets + 2*i`, which depends on nothing, so
+both loads issue together. Zstd is built this way.
+
+**Method note, which is half the entry.** The first attempt took the minimum of
+seven short bursts. It reported records_512 anywhere between 3.14 and 8.17 GiB/s
+across three runs of the same binary -- a factor of 2.6 on a number meant to
+resolve 5% -- and produced a +50.7% and a +57.3% that were pure artefact. Small
+inputs finish inside one scheduling quantum, so a burst either lands on a clean
+slice or it does not, and the minimum keeps whichever the turbo state favoured.
+Replaced with fixed 20 ms spans, the two layouts alternating within each round so
+drift hits both, medians of nine rounds.
+
+### Result -- three runs, each the median of nine alternating rounds
+
+| shape | run 1 | run 2 | run 3 | size |
+|---|---|---|---|---|
+| records_512 | +0.0% | -2.0% | -2.0% | +1.5% |
+| varied_512 | -2.1% | +0.0% | +0.1% | +0.8% |
+| records_4k | -0.2% | +0.0% | +0.7% | +0.6% |
+| varied_4k | +2.8% | +0.3% | -0.2% | +0.2% |
+| records_64k | +0.0% | -0.0% | +1.1% | +0.0% |
+| varied_64k | -2.6% | -0.6% | +5.1% | +0.0% |
+
+Absolute throughput 4.4 to 7.6 GiB/s, against 8 to 15 for the kernels -- close
+enough that the same bottleneck should be visible, far enough that this is
+evidence and not proof.
+
+**What this refuted, and it is the idea the roadmap called the larger structural
+one.** Splitting the streams buys nothing. Zero on every shape, and the size
+goes very slightly the wrong way because the header grows two varints.
+
+**Why, and this is the part worth keeping.** There are two chains per block, not
+one, and only the cheap one was addressed. The *address* chain -- token to
+literal length to offset address -- is what three streams break. The *progress*
+chain is `produced += lit; produced += mat`, and the position of the next token
+depends on it in both layouts. An out-of-order core overlaps the address chain
+across blocks quite happily; it cannot overlap the progress chain, because it
+does not know where the next block starts until this one's lengths are decoded.
+
+That is also why "fewer and bigger blocks" worked twice at about 19% each. It
+is the only lever that touches the progress chain: it runs it fewer times.
