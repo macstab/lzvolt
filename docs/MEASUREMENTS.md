@@ -807,3 +807,51 @@ bought and it has to clear a bar.
 Nothing the benchmark packs is affected -- every shape saves between 30% and
 88%. The one value that changes behaviour is the one that was trading 78% of its
 read speed for 3% of its size.
+
+---
+
+## 2026-09-18 -- the whole day, all four parts, properly
+
+`12760b2` against `bbac13d`: wide repeat bit, prefix header, 48-byte match move,
+worth-storing rule. M2 Max is medians of three runs at 2 s a cell; the three
+rented parts are single runs at 3 s a cell. Controls in the same runs.
+
+### records cells, decoding our own format
+
+| | Axion | M2 Max | Xeon | EPYC |
+|---|---|---|---|---|
+| records_4k | **+12.9%** | **-7.2%** | **-14.4%** | -5.2% |
+| records_64k | **+18.8%** | **-4.8%** | +2.2% | -1.1% |
+| worst control | 1.0% | 0.5% | 3.8% | 11.0% |
+
+### everything else
+
+`varied` and `noise` move within their controls on every part: +/-0.3% on
+Axion, +/-0.2% on the M2 Max, +/-1.4% on Xeon, +/-5.1% on EPYC. Neither reaches
+the wide split, so neither should move, and neither does.
+
+### Size, which does not depend on the machine
+
+| shape | before | after | | liblz4 |
+|---|---|---|---|---|
+| records_4k | 603 B | **487 B** | -19.2% | 658 B |
+| records_64k | 6509 B | **5524 B** | -15.1% | 7992 B |
+| varied_4k | 2229 B | 2228 B | -- | 2333 B |
+| varied_512 | 356 B | 356 B | -- | 366 B |
+
+**The finding, and it reverses what single runs said.** Three parts of four lose
+5-14% on records_4k. Only Axion gains, and it gains a lot. The M2 Max number is
+the most trustworthy figure in the table -- medians of three with controls under
+0.5% -- and it is **-7.2%**, where an earlier single run reported -0.3%.
+
+**A retraction.** Two hours ago this file would have said x86 loses because the
+repeat offset lives in the stack frame there while AArch64 keeps it in x27. The
+M2 Max is AArch64, uses x27, and loses 7.2%. The split is not architectural.
+Axion is the outlier, not x86, and what makes it one is not established.
+
+**Where that leaves the day's work.** Size is unambiguous and machine
+independent: about 30% under liblz4 on records shapes, 15-19% under our own
+previous format. Throughput was traded for it on three parts of four. Whether
+that trade is right is a decision about the store, not about the decoder -- the
+sweep from L1 to RAM in the entry above shows the size paying for itself once
+the working set stops fitting, and none of these cells measure that.
