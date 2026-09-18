@@ -10,6 +10,7 @@
 #   PROJECT=my-project scripts/bench-on-gce.sh
 #   REVS="a1b2c3 d4e5f6" scripts/bench-on-gce.sh intel
 #   QUICK=1 REVS="..." scripts/bench-on-gce.sh intel   # direction only, ~2 min/rev
+#   KEVA_FILTER='own_format' ...                       # narrow what is measured
 #
 # REVS measures several revisions on the *same* machine in one visit. Renting a
 # machine takes twenty minutes of installing before it measures anything, so
@@ -88,7 +89,12 @@ TIME="${TIME:-1}"
 # Which benchmark groups the quick run measures. Packing costs ten times what
 # decoding does, so a decoder question that leaves compress3 in spends two
 # thirds of its wall clock producing numbers it will not read.
-GROUPS="${GROUPS:-compress3|own_format|same_bytes}"
+# Not GROUPS: bash defines that one itself, holding the caller's group ids, and
+# assigning to it is silently ignored. So the filter reached the remote runner as
+# "20" and Criterion matched that string against benchmark ids -- which selects
+# `pack/sizes/pack/2048` and nothing else. Three machines were rented to measure
+# two cells nobody asked for. See docs/MEASUREMENTS.md.
+KEVA_FILTER="${KEVA_FILTER:-compress3|own_format|same_bytes}"
 WARM="${WARM:-1}"
 # Unique per invocation, so two runs at once do not fight over one name --
 # which they did, and the loser reported "already exists" from inside the
@@ -319,7 +325,7 @@ if [ "${KEVA_QUICK:-0}" = 1 ]; then
     # This answers "did it move", not "by exactly how much". A cell that swings
     # five percent between revisions is worth another look at five seconds; one
     # that does not is decided.
-    # GROUPS=... narrows what is measured. Packing is ten times the cost of
+    # KEVA_FILTER=... narrows what is measured. Packing is ten times the cost of
     # decoding, so a decoder question that measures compress3 as well spends
     # two thirds of its wall clock on numbers it will not read.
     cargo bench -q -p keva-core --features liblz4 --bench pack -- \
@@ -444,7 +450,7 @@ one () {
     for sha in $SHORT; do
         echo "== running $sha (apt and rustc are paid once, on the first)"
         "${GC[@]}" compute ssh "$vm" --zone="$zone" --quiet \
-            --command="bash ~/run.sh $RUNS $sha $QUICK $TIME $WARM '$GROUPS'" || echo "== $sha reported a failure"
+            --command="bash ~/run.sh $RUNS $sha $QUICK $TIME $WARM '$KEVA_FILTER'" || echo "== $sha reported a failure"
     done
 
     echo "== downloading"

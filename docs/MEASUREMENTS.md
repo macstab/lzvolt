@@ -595,3 +595,49 @@ across our own revisions -- which is the strongest evidence for it so far.
 block count already leads both competitors, and buying fewer blocks by searching
 harder was measured at -24% pack throughput for -2.7% blocks. 21.5 bytes per
 block is a property of the data.
+
+---
+
+## 2026-09-18 -- three rented machines that measured nothing
+
+Intel (c3-standard-4), AMD (c3d-standard-4) and ARM (Axion), `QUICK=1`,
+`12760b2` against `06b0d92`. Every run completed, every machine was deleted on
+the way out, and the throughput numbers are worthless.
+
+Each run measured exactly two cells:
+
+```
+pack/sizes/pack/2048      1.30 GiB/s
+pack/sizes/unpack/2048    6.73 GiB/s
+```
+
+**Why.** `bench-on-gce.sh` held the Criterion filter in a variable called
+`GROUPS`. Bash defines `GROUPS` itself -- it holds the caller's group ids -- and
+assigning to it is silently ignored. So the filter reached the remote runner as
+the string `20`, Criterion matched that against benchmark ids, and `2048` was
+the only thing in the suite that contained it.
+
+```
+$ bash -c 'echo $GROUPS; GROUPS="compress3|own_format"; echo $GROUPS'
+20
+20
+```
+
+Renamed to `KEVA_FILTER`. The bug was silent in both directions: the script
+reported success, the machines reported success, the tests passed (103 green on
+each), and the result files are full of plausible-looking Criterion output.
+
+**What the runs did confirm**, because the bench prints sizes while setting up,
+and they are identical on all three architectures and to the M2 Max:
+
+```
+records_4k:   keva  487 B   liblz4  658 B   lz4_flex  660 B
+records_64k:  keva 5524 B   liblz4 7992 B   lz4_flex 7722 B
+varied_4k:    keva 2228 B   liblz4 2333 B   lz4_flex 2329 B
+varied_512:   keva  356 B   liblz4  366 B   lz4_flex  368 B
+```
+
+**And one thing worth keeping about cost.** A cold c3-standard-4 went from
+`create` to measuring in minutes, not the twenty the script's own comments
+claim. There is no case for leaving machines up between runs, and idle machines
+are billed. `KEEP=1` stays off.
