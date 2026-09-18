@@ -320,3 +320,32 @@ block and gained 1.0% on records_64k, the shape where nothing else got worse.
   repeat bit where it pays. Both of these are per-*value* decisions, so they
   belong in the header where they cost the token no bits and the decoder no
   cycles -- only a choice of which kernel runs.
+
+---
+
+## 2026-09-18 -- one-byte offsets, decided by a census rather than a benchmark
+
+Ten seconds, no benchmark needed: the question was how many bytes a header bit
+saying "every offset in this value is one byte" would save, and that is a count.
+
+| shape | packed B | offsets written | all < 256 | saves |
+|---|---|---|---|---|
+| records_512 | 180 | **2** | yes | 2 B = 1.1% (9 blocks repeat) |
+| varied_512 | 340 | 7 | no | 0 |
+| varied_4k | 2222 | 150 | no | 0 |
+| varied_64k | 33801 | 2882 | no | 0 |
+
+**What this refuted.** Its own premise. The earlier offset census -- 100% of
+records_512's offsets below 256, 31% of records_4k's -- was taken *before* the
+repeat bit existed. The repeat bit removes the same bytes, and it got there
+first: records_512 writes eleven offsets under 4/4 and two under 3/4/1. One byte
+each would now save two bytes.
+
+And on varied the header form never fires: "all of them fit" is false on every
+varied shape. A bit *per block* would fire, but that is the thing measured twice
+today as costing more than it saves.
+
+**Still open.** records_4k and records_64k switch split partway and the census
+walks one layout, so they are not in the table. They are also where the old
+statistics were most interesting -- offsets were 48% of records_64k's output.
+Worth a census that follows the switch.
