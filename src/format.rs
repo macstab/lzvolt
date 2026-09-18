@@ -1476,7 +1476,6 @@ impl Split {
     fn shift(self) -> u32 {
         8 - self.lit_bits
     }
-    #[inline]
     /// The other of the two splits.
     #[inline]
     fn other(self) -> Split {
@@ -1486,7 +1485,6 @@ impl Split {
             EVEN
         }
     }
-    #[inline]
     #[inline]
     fn kernel(self) -> keva_asm::unpack::Split {
         if self == LONG_MATCH {

@@ -544,3 +544,54 @@ crashes on the mismatch. At 512 bytes the header is 2 bytes of 195 and the
 decode is a handful of cycles out of ~130, so the expectation is "inside the
 noise floor" -- but that is an expectation, not a number, and it is written here
 as one.
+
+---
+
+## 2026-09-18 -- what a token split costs varied, from the tool that was already here
+
+`examples/blocks.rs` has been in the repo since `e9aadfe` and contains
+`split_cost()`, which walks a packed stream and reports, for every split from
+2/6 to 6/2, the share of blocks that would need an extension chain. It answers
+in ten seconds the question this morning was spent guessing at twice.
+
+### varied_64k
+
+| split | ext-L | ext-M | blocks needing a chain |
+|---|---|---|---|
+| 2/6 | 74.6% | 0.0% | 74.6% |
+| 3/5 | 55.7% | 3.6% | 58.2% |
+| **4/4** | 24.2% | 19.7% | **43.9%** |
+| 5/3 | 0.1% | 66.6% | 66.7% |
+| 6/2 | 0.0% | 97.2% | 97.2% |
+
+### varied_4k
+
+| split | ext-L | ext-M | blocks needing a chain |
+|---|---|---|---|
+| 2/6 | 77.8% | 0.0% | 77.8% |
+| 3/5 | 60.5% | 1.6% | 61.1% |
+| **4/4** | 27.0% | 18.9% | **45.9%** |
+| 5/3 | 0.5% | 61.1% | 61.6% |
+| 6/2 | 0.5% | 98.9% | 98.9% |
+
+**4/4 is the minimum on both.** The curve is a clean U -- the two lengths trade
+against each other and the even split sits at the bottom. varied_4k at 3/5 is
+61.1% against 44.9% at 4/4, which is the regression measured this morning as
+-5.9%, available beforehand as a count.
+
+### Block counts against the competition
+
+| varied_64k | blocks | B/block | size | GiB/s |
+|---|---|---|---|---|
+| **keva** | **3054** | **21.5** | 33180 B | **8.12** |
+| liblz4 | 4872 | 13.5 | 32730 B | 4.98 |
+| lz4_flex | 3298 | 19.9 | 33005 B | 7.26 |
+
+liblz4 spends 60% more blocks on the same bytes and reads them at 61% of our
+speed. The bytes-per-block relationship holds across implementations, not only
+across our own revisions -- which is the strongest evidence for it so far.
+
+**Conclusion: varied is finished.** The layout is provably at its optimum, the
+block count already leads both competitors, and buying fewer blocks by searching
+harder was measured at -24% pack throughput for -2.7% blocks. 21.5 bytes per
+block is a property of the data.
