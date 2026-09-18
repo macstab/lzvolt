@@ -218,23 +218,71 @@ PACK_NAME(PACK_ENTRY):
 
 KEVA_LABEL(pack, worth):
     /*
-     * The header, written with the flag bits clear. Their value cannot be
-     * known yet and does not need to be: the varint's length is fixed by the
-     * declared size, so the pass commits to nothing and the bits are set at the
-     * end if the split changed.
+     * The header: a two-bit class in the top of the first byte, then the length
+     * big-endian in what is left.
+     *
+     *   00 LLLLLL              up to 63
+     *   01 H LLLLL + 1 byte    up to 8191
+     *   10 H LLLLL + 2 bytes   up to 2097151
+     *   11 H LLLLL + 3 bytes   up to 536870911
+     *
+     * The hybrid flag is written clear and set at the end if the split changed.
+     * Its value cannot be known yet and does not need to be: the class is fixed
+     * by the declared size, so the pass commits to nothing.
+     *
+     * Big-endian so the top of the length shares the first byte with the class
+     * and the decoder can mask and shift one word. Was a LEB128 of
+     * `declared << 2`, which had to be walked a byte at a time and paid two
+     * flag bits to carry one -- nothing ever starts in the wide split.
      */
     mov     PACK_SRC_LEN(%rsp), %rax
-    shl     $2, %rax
-6:  mov     %al, %cl
-    and     $0x7F, %cl
-    shr     $7, %rax
-    jz      7f
+    cmp     $63, %rax
+    jbe     KEVA_LABEL(pack, hdr1)
+    cmp     $0x1FFF, %rax
+    jbe     KEVA_LABEL(pack, hdr2)
+    cmp     $0x1FFFFF, %rax
+    jbe     KEVA_LABEL(pack, hdr3)
+
+    mov     %eax, %ecx
+    shr     $24, %ecx
+    or      $0xC0, %cl
+    mov     %cl, (%rbp)
+    mov     %eax, %ecx
+    shr     $16, %ecx
+    mov     %cl, 1(%rbp)
+    mov     %eax, %ecx
+    shr     $8, %ecx
+    mov     %cl, 2(%rbp)
+    mov     %al, 3(%rbp)
+    add     $4, %rbp
+    jmp     KEVA_LABEL(pack, hdr_done)
+
+KEVA_LABEL(pack, hdr3):
+    mov     %eax, %ecx
+    shr     $16, %ecx
     or      $0x80, %cl
     mov     %cl, (%rbp)
+    mov     %eax, %ecx
+    shr     $8, %ecx
+    mov     %cl, 1(%rbp)
+    mov     %al, 2(%rbp)
+    add     $3, %rbp
+    jmp     KEVA_LABEL(pack, hdr_done)
+
+KEVA_LABEL(pack, hdr2):
+    mov     %eax, %ecx
+    shr     $8, %ecx
+    or      $0x40, %cl
+    mov     %cl, (%rbp)
+    mov     %al, 1(%rbp)
+    add     $2, %rbp
+    jmp     KEVA_LABEL(pack, hdr_done)
+
+KEVA_LABEL(pack, hdr1):
+    mov     %al, (%rbp)
     inc     %rbp
-    jmp     6b
-7:  mov     %cl, (%rbp)
-    inc     %rbp
+
+KEVA_LABEL(pack, hdr_done):
 
     mov     %rbp, %rax
     sub     PACK_OUT_BASE(%rsp), %rax
@@ -398,7 +446,7 @@ KEVA_LABEL(pack, finish):
     mov     %edx, 4(%rbp)
     add     $8, %rbp
 12: mov     PACK_OUT_BASE(%rsp), %rax
-    orb     $2, (%rax)                      /* HYBRID_BIT */
+    orb     $0x20, (%rax)                   /* HYBRID_BIT */
 10:
 
     mov     %rbp, %rax

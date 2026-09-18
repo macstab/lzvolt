@@ -79,23 +79,50 @@ KEVA_SYM(keva_pack):
     mov     x26, #32                    // misses = 1 << SKIP_TRIGGER
 
     /*
-     * Header: LEB128 of the length, shifted up by one to leave room for the
-     * split bit. This kernel only emits the even split, so the bit is zero --
-     * a value that wants the wide match is packed by the portable packer,
-     * which is the one that decides.
+     * Header: a two-bit class in the top of the first byte, then the length
+     * big-endian in what is left.
+     *
+     *   00 LLLLLL              up to 63
+     *   01 H LLLLL + 1 byte    up to 8191
+     *   10 H LLLLL + 2 bytes   up to 2097151
+     *
+     * This kernel only emits the even split and never switches, so the hybrid
+     * flag is zero -- a value that wants the wide match is packed by the
+     * portable packer, which is the one that decides. It is also bounded by
+     * `Slot::LIMIT`, 64 KiB, so the four-byte class cannot occur here.
+     *
+     * Written big-endian so the first byte carries the top of the length and a
+     * decoder can mask and shift a single word. The classes are three, and the
+     * branches picking between them are on a path taken once per value.
      */
-    lsl     x9, x20, #2                 // two flag bits now: split and hybrid
-.Lvarint:
-    and     w10, w9, #0x7F
-    lsr     x9, x9, #7
-    cbz     x9, .Lvarint_last
-    orr     w10, w10, #0x80
+    mov     w9, #63
+    cmp     x20, x9
+    b.hi    .Lhdr2
+    strb    w20, [x21, x23]             // 00 LLLLLL
+    add     x23, x23, #1
+    b       .Lhdr_done
+.Lhdr2:
+    mov     w9, #0x1FFF
+    cmp     x20, x9
+    b.hi    .Lhdr3
+    lsr     w10, w20, #8
+    orr     w10, w10, #0x40             // 01 H LLLLL, H clear
     strb    w10, [x21, x23]
     add     x23, x23, #1
-    b       .Lvarint
-.Lvarint_last:
+    strb    w20, [x21, x23]
+    add     x23, x23, #1
+    b       .Lhdr_done
+.Lhdr3:
+    lsr     w10, w20, #16
+    orr     w10, w10, #0x80             // 10 H LLLLL, H clear
     strb    w10, [x21, x23]
     add     x23, x23, #1
+    lsr     w10, w20, #8
+    strb    w10, [x21, x23]
+    add     x23, x23, #1
+    strb    w20, [x21, x23]
+    add     x23, x23, #1
+.Lhdr_done:
 
     sub     x8, x20, #8                 // scan limit: the hash reads eight
     mov     x7, #0xDCBB                 // 889523592379: the five-byte multiplier

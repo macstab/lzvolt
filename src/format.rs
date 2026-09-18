@@ -68,7 +68,6 @@
 //! several times the CPU on both sides. If a namespace needs archival density
 //! it wants a different tool, not a slower version of this one.
 
-use crate::store::entry::{get_varint, put_varint};
 
 /// Shortest run worth encoding as a reference rather than as literals.
 ///
@@ -874,7 +873,8 @@ fn pack_pass<const SHIFT: u32, S: Slot>(
 ) {
     // Written with the flag bits clear. Their value cannot be known yet, and
     // does not need to be: the varint's length is fixed by `input.len()`.
-    put_varint_into(((input.len() as u64) << 2) | start_split.bit(), out);
+    debug_assert_eq!(start_split, EVEN, "nothing starts in the wide split");
+    put_header(input.len(), false, out);
     let header_len = out.len();
     // Reserved once, so nothing below has to ask again -- and asked about
     // first, because the caller reuses its buffer and growth is the case that
@@ -1208,15 +1208,113 @@ fn pack_pass<const SHIFT: u32, S: Slot>(
         let w = switch_width(input.len());
         put_switch(in_at, w, out);
         put_switch(out_at, w, out);
-        // The low bits live in the first byte whatever the varint's length.
-        out[0] |= HYBRID_BIT as u8;
+        // The flag lives in the first byte whatever the class, and a value
+        // that switches is far past the one-byte class that has no room.
+        debug_assert!(out[0] >> 6 != 0, "a switching value is never one byte");
+        out[0] |= HYBRID_BIT;
     }
     let _ = (blocks, saturated);
 }
 
-/// Header bit 0: which split the first section uses.
-/// Header bit 1: whether there is a second section.
-const HYBRID_BIT: u64 = 0b10;
+/// A LEB128 varint into a `Vec`. Only the tests use it now -- the header stopped
+/// being one -- and they need it to build streams the decoder must reject.
+#[cfg(test)]
+fn put_varint_into(value: u64, out: &mut Vec<u8>) {
+    let mut buf = [0u8; 10];
+    let used = crate::store::entry::put_varint(&mut buf, value);
+    out.extend_from_slice(&buf[..used]);
+}
+
+/// The block header: a two-bit class, one flag, and the length.
+///
+/// ```text
+///   00 LLLLLL              1 byte,   6 bits, up to 63
+///   01 H LLLLL + 1 byte    2 bytes, 13 bits, up to 8191
+///   10 H LLLLL + 2 bytes   3 bytes, 21 bits, up to 2097151
+///   11 H LLLLL + 3 bytes   4 bytes, 29 bits, up to 536870911
+/// ```
+///
+/// Was `varint(declared << 2 | hybrid << 1 | split)`, and two things were wrong
+/// with that. `split` was never set -- all six `pack_pass` call sites pass
+/// `EVEN`, so the wide layout is reachable only through the hybrid switch -- so
+/// the header paid two bits to carry one. And LEB128 has to be walked a byte at
+/// a time, each byte a dependent load and a branch the predictor cannot see
+/// through.
+///
+/// Here the class says how many bytes to read before any of them is examined,
+/// so the whole header is one load and a shift. `MASK` and `SHIFT` are indexed
+/// by the class rather than branched on, which is also what keeps the one-byte
+/// case at six bits of payload while the others spend one on `hybrid`.
+///
+/// The short class needs no flag because it cannot have one: a value of 63
+/// bytes or less is always plain even. The switch is gated on sixteen blocks
+/// and a block produces at least `MIN_MATCH` bytes, so nothing under 64 bytes
+/// of output ever reaches the question. See docs/MEASUREMENTS.md.
+///
+/// Size is unchanged against LEB128 in the range we use -- both spend one bit
+/// per byte on the length, and no encoding does better below 35 bits. This buys
+/// decode, not bytes.
+const HEADER_MASK: [u8; 4] = [0x3F, 0x1F, 0x1F, 0x1F];
+const HEADER_SHIFT: [u32; 4] = [24, 16, 8, 0];
+const HYBRID_BIT: u8 = 0x20;
+
+/// Bytes the header will take for this length.
+#[inline]
+fn header_len(declared: usize) -> usize {
+    match declared {
+        0..=63 => 1,
+        64..=8191 => 2,
+        8192..=2_097_151 => 3,
+        _ => 4,
+    }
+}
+
+/// Write the header. `hybrid` is ignored in the one-byte class, which cannot
+/// occur with a switch.
+#[inline]
+fn put_header(declared: usize, hybrid: bool, out: &mut Vec<u8>) {
+    let n = header_len(declared);
+    let class = (n - 1) as u8;
+    let payload = declared as u32;
+    let top = (payload >> (8 * (n - 1))) as u8;
+    debug_assert!(top & !HEADER_MASK[class as usize] == 0);
+    let mut first = (class << 6) | top;
+    if hybrid && n > 1 {
+        first |= HYBRID_BIT;
+    }
+    out.push(first);
+    for i in (0..n - 1).rev() {
+        out.push((payload >> (8 * i)) as u8);
+    }
+}
+
+/// Read it back: one four-byte load, one shift, no branch on the length.
+///
+/// The load is unconditional because a header is never the whole stream -- a
+/// body always follows, and the shortest body is a token and a literal. Callers
+/// that hand in fewer than four bytes get `None` rather than a wild read.
+#[inline]
+fn get_header(input: &[u8]) -> Option<(usize, bool, usize)> {
+    let head: [u8; 4] = match input.get(..4) {
+        Some(b) => b.try_into().unwrap(),
+        // A stream this short is malformed, but it must not fault; pad and let
+        // the length checks downstream reject it.
+        None => {
+            let mut b = [0u8; 4];
+            b[..input.len()].copy_from_slice(input);
+            b
+        }
+    };
+    let class = (head[0] >> 6) as usize;
+    let declared = u32::from_be_bytes([head[0] & HEADER_MASK[class], head[1], head[2], head[3]])
+        >> HEADER_SHIFT[class];
+    let hybrid = class != 0 && head[0] & HYBRID_BIT != 0;
+    let n = class + 1;
+    if input.len() < n {
+        return None;
+    }
+    Some((declared as usize, hybrid, n))
+}
 
 /// Bytes each of the two switch offsets takes at the end of a hybrid stream.
 ///
@@ -1259,11 +1357,6 @@ fn get_switch(bytes: &[u8]) -> usize {
     }
 }
 
-fn put_varint_into(value: u64, out: &mut Vec<u8>) {
-    let mut buf = [0u8; 10];
-    let used = put_varint(&mut buf, value);
-    out.extend_from_slice(&buf[..used]);
-}
 
 /// Length of the shared prefix, eight bytes at a time.
 ///
@@ -1384,13 +1477,6 @@ impl Split {
         8 - self.lit_bits
     }
     #[inline]
-    fn from_header(bit: u64) -> Split {
-        if bit & 1 == 1 {
-            LONG_MATCH
-        } else {
-            EVEN
-        }
-    }
     /// The other of the two splits.
     #[inline]
     fn other(self) -> Split {
@@ -1401,9 +1487,6 @@ impl Split {
         }
     }
     #[inline]
-    fn bit(self) -> u64 {
-        (self.lit_bits == LONG_MATCH.lit_bits) as u64
-    }
     #[inline]
     fn kernel(self) -> keva_asm::unpack::Split {
         if self == LONG_MATCH {
@@ -1733,7 +1816,7 @@ pub fn unpack_into(block: &[u8], out: &mut Vec<u8>, declared: usize) -> Result<(
     }
     // The portable decoder wants the header, so give it one.
     let mut framed = Vec::with_capacity(block.len() + 10);
-    put_varint_into(((declared as u64) << 2) | EVEN.bit(), &mut framed);
+    put_header(declared, false, &mut framed);
     framed.extend_from_slice(block);
     unpack_portable(&framed, out)
 }
@@ -1754,15 +1837,15 @@ struct Frame<'a> {
 /// everything downstream can treat them as ordinary positions, and anything
 /// inconsistent is a truncated stream rather than a silent mis-decode.
 fn frame(input: &[u8]) -> Result<Frame<'_>, PackError> {
-    let (raw, header) = get_varint(input).ok_or(PackError::Truncated)?;
-    let declared = usize::try_from(raw >> 2).map_err(|_| PackError::TooLarge)?;
+    let (declared, hybrid, header) = get_header(input).ok_or(PackError::Truncated)?;
     if declared > MAX_UNPACKED {
         return Err(PackError::TooLarge);
     }
-    let split = Split::from_header(raw);
+    // Only the switch reaches the wide split, so a stream always starts even.
+    let split = EVEN;
     let rest = input.get(header..).ok_or(PackError::Truncated)?;
 
-    if raw & HYBRID_BIT == 0 {
+    if !hybrid {
         return Ok(Frame {
             declared,
             body: rest,
@@ -2645,8 +2728,10 @@ mod tests {
             if !pack(data, &mut packed) {
                 continue;
             }
-            let (raw, header) = get_varint(&packed).expect("a header");
-            if Split::from_header(raw) != EVEN {
+            let (_, hybrid, header) = get_header(&packed).expect("a header");
+            // A value that switches is read by two calls; this test wants the
+            // single-body case, and counts the others so the split is visible.
+            if hybrid {
                 wide += 1;
                 continue;
             }
@@ -3079,8 +3164,8 @@ mod tests {
                 // The production kernel writes every split, so it has nothing to
                 // skip.
                 if rust_kept && !production {
-                    let (raw, _) = get_varint(&rust_out).expect("a header");
-                    if Split::from_header(raw) != EVEN {
+                    let (_, hybrid, _) = get_header(&rust_out).expect("a header");
+                    if hybrid {
                         rust_table.fill(EMPTY);
                         asm_table.fill(EMPTY);
                         continue;
@@ -3203,10 +3288,10 @@ mod tests {
             unpack(&asm_out, &mut round_trip).expect("assembly output must unpack");
             assert_eq!(&round_trip, input, "assembly output lost bytes");
 
-            let (raw, _) = get_varint(&asm_out).expect("a header");
-            if raw & HYBRID_BIT == HYBRID_BIT {
+            let (_, hybrid, _) = get_header(&asm_out).expect("a header");
+            if hybrid {
                 seen_hybrid += 1;
-            } else if Split::from_header(raw) == EVEN {
+            } else {
                 seen_even += 1;
             }
             if input.len() > NARROW_TABLE_ABOVE {

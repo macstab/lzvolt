@@ -92,6 +92,20 @@ fn noise(total: usize) -> Vec<u8> {
         .collect()
 }
 
+/// Read the block header: a two-bit class, one hybrid flag, the length
+/// big-endian in what is left. Mirrors `pack.rs`'s `get_header`.
+#[allow(dead_code)]
+fn header_of(b: &[u8]) -> (u64, bool, usize) {
+    const MASK: [u8; 4] = [0x3F, 0x1F, 0x1F, 0x1F];
+    const SHIFT: [u32; 4] = [24, 16, 8, 0];
+    let mut h = [0u8; 4];
+    let n = b.len().min(4);
+    h[..n].copy_from_slice(&b[..n]);
+    let class = (h[0] >> 6) as usize;
+    let declared = u32::from_be_bytes([h[0] & MASK[class], h[1], h[2], h[3]]) >> SHIFT[class];
+    (declared as u64, class != 0 && h[0] & 0x20 != 0, class + 1)
+}
+
 fn packing(c: &mut Criterion) {
     let mut group = c.benchmark_group("pack/compress");
 
@@ -440,6 +454,13 @@ fn own_format(c: &mut Criterion) {
     // reader's cost for noise, against what liblz4 and lz4_flex charge to
     // decode a literal block for the same result.
     for (label, data) in [
+        // The small ones are where the header is a visible share of the output
+        // and where its one-byte class lives. Without them a header change is
+        // unmeasurable: at 512 bytes it is 2 bytes of 195. Nothing between 48
+        // and 128 is here because records-shaped data does not compress at that
+        // length -- the packer refuses and the cell would measure a copy.
+        ("records_32", records(32)),
+        ("records_192", records(192)),
         ("records_512", records(512)),
         ("varied_512", varied(512)),
         ("noise_512", noise(512)),
@@ -455,12 +476,9 @@ fn own_format(c: &mut Criterion) {
         let mut ours = Vec::new();
         let packed = pack::pack(&data, &mut ours);
         let (body, split, other, switch) = if packed {
-            let (raw, header) = keva_core::store::entry::get_varint(&ours).expect("a header");
-            let split = if raw & 1 == 1 {
-                keva_asm::unpack::Split::WideMatch
-            } else {
-                keva_asm::unpack::Split::Even
-            };
+            let (_declared, hybrid, header) = header_of(&ours);
+            // Nothing starts in the wide split; it is reached only by switching.
+            let split = keva_asm::unpack::Split::Even;
             let other = if split == keva_asm::unpack::Split::Even {
                 keva_asm::unpack::Split::WideMatch
             } else {
@@ -468,7 +486,7 @@ fn own_format(c: &mut Criterion) {
             };
             // A value that changes split partway is two calls, and it is
             // measured as two -- that is what its reader actually pays.
-            let (body, switch) = if raw & 0b10 != 0 {
+            let (body, switch) = if hybrid {
                 let w = if data.len() <= 0x1_0000 { 2 } else { 4 };
                 let cut = ours.len() - 2 * w;
                 let rd = |b: &[u8]| -> usize {
@@ -666,13 +684,9 @@ fn production(c: &mut Criterion) {
         // part that is `clear`, `reserve` and `set_len`. Without it, moving the
         // varint into the kernel would be a guess about which half is which.
         if packed {
-            let (raw, header) = keva_core::store::entry::get_varint(&ours).expect("a header");
-            let hybrid = raw & 0b10 != 0;
-            let split = if raw & 1 == 1 {
-                keva_asm::unpack::Split::WideMatch
-            } else {
-                keva_asm::unpack::Split::Even
-            };
+            let (_declared, hybrid, header) = header_of(&ours);
+            // Nothing starts in the wide split; it is reached only by switching.
+            let split = keva_asm::unpack::Split::Even;
             let body = ours[header..].to_vec();
             if !hybrid {
                 group.bench_function(BenchmarkId::new("keva_framed", label), |b| {

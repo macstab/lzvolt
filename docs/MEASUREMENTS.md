@@ -481,3 +481,66 @@ does not fit a 2-bit prefix's 30-bit top class once flags are folded in by
 multiplication -- so either the top class carries an extra byte, or the flags sit
 in fixed bits below the prefix, or the limit drops to 256 MiB. That is the one
 open decision.
+
+---
+
+## 2026-09-18 -- the prefix header, built
+
+Replaced `varint(declared << 2 | hybrid << 1 | split)` with
+
+```text
+  00 LLLLLL              1 byte,   6 bits, up to 63
+  01 H LLLLL + 1 byte    2 bytes, 13 bits, up to 8191
+  10 H LLLLL + 2 bytes   3 bytes, 21 bits, up to 2097151
+  11 H LLLLL + 3 bytes   4 bytes, 29 bits, up to 536870911
+```
+
+One flag, not two, because `split` was dead. The short class carries no flag at
+all because it cannot need one, and keeps six bits of payload. Decoding is one
+four-byte load, a table-indexed mask and a shift -- no loop, no branch on the
+length. Rust, both assembly packers and the bench all read and write it; 99
+tests green on aarch64 and 99 on x86-64.
+
+### What it did to size
+
+| shape | packed | liblz4 | lz4_flex |
+|---|---|---|---|
+| records_4k | **487 B** | 658 B | 660 B |
+| records_64k | **5524 B** | 7992 B | 7722 B |
+| varied_4k | **2228 B** | 2333 B | 2329 B |
+| varied_512 | **356 B** | 366 B | 368 B |
+| varied_64k | 33180 B | **32730 B** | 33005 B |
+
+One byte on records_4k (488 -> 487), as counted in advance. Everything at 64
+bytes or more is in the two-byte class either way, so that is the whole size
+story -- as the prior-art entry said it would be.
+
+### The one case that moved, and it is not the header
+
+`records(32)` packs to **31 bytes with a one-byte header**. Under LEB128 the
+header was two bytes, the output came to 32, and `out.len() < input.len()` was
+false -- so the value was **stored raw**. The shorter header pushed it over the
+line.
+
+That is not obviously a win:
+
+| | throughput |
+|---|---|
+| stored raw (LEB128 header, packer refused) | 6.31 GiB/s |
+| packed (prefix header, one byte saved) | 1.75 GiB/s |
+
+Reading it went from a `memcpy` to a decode. **-72% to save one byte of 32.**
+
+**What this refutes: the "worth packing" rule.** `out.len() < input.len()` says
+yes to a value that saves a single byte and costs three quarters of its read
+speed. The rule needs a margin, and the header change is what made that visible
+-- it is not a reason to keep the longer header.
+
+### What is not measured
+
+Decode throughput of the header itself at 192 bytes and up. The bench parses the
+header too, so it cannot run against both encodings, and a stashed-source A/B
+crashes on the mismatch. At 512 bytes the header is 2 bytes of 195 and the
+decode is a handful of cycles out of ~130, so the expectation is "inside the
+noise floor" -- but that is an expectation, not a number, and it is written here
+as one.
