@@ -6,6 +6,23 @@
 
 use keva_core::store::pack;
 
+/// Records-shaped, which is what reaches the wide split and where the day's
+/// format work landed. Pass "varied" on the command line for the other one.
+fn records(total: usize) -> Vec<u8> {
+    let (mut o, mut i) = (Vec::new(), 0u64);
+    while o.len() < total {
+        o.extend_from_slice(
+            format!("{{\"id\":{i},\"tenant\":\"tenant42\",\"active\":true,\"role\":\"member\",\
+                     \"created\":\"2026-09-0{}T1{}:0{}:00Z\",\"score\":{},\"region\":\"eu-central-1\"}}",
+                    i % 9, i % 10, i % 10, i % 1000)
+                .as_bytes(),
+        );
+        i += 1;
+    }
+    o.truncate(total);
+    o
+}
+
 fn varied(total: usize) -> Vec<u8> {
     let mut state = 0x2545_F491_4F6C_DD1Du64;
     let mut next = move || {
@@ -39,13 +56,27 @@ fn varied(total: usize) -> Vec<u8> {
 }
 
 fn main() {
-    let data = varied(65_536);
+    let args: Vec<String> = std::env::args().collect();
+    let shape = args.get(1).map(String::as_str).unwrap_or("records_4k");
+    let data = match shape {
+        "varied_64k" => varied(65_536),
+        "varied_4k" => varied(4096),
+        "records_64k" => records(65_536),
+        _ => records(4096),
+    };
+    eprintln!("Profil: {shape}, {} B", data.len());
     let mut packed = Vec::new();
     assert!(pack::pack(&data, &mut packed));
 
     let mut out = Vec::with_capacity(data.len() + 64);
     let mut sink = 0u64;
-    for _ in 0..200_000 {
+    // Runs until killed: a fixed count finishes before a sampler can attach,
+    // and the point here is to be sampled rather than to be timed.
+    let rounds: u64 = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(u64::MAX);
+    for _ in 0..rounds {
         pack::unpack(&packed, &mut out).unwrap();
         sink = sink.wrapping_add(out[0] as u64);
     }

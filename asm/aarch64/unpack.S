@@ -370,7 +370,6 @@ L(fast):
     lsr     w5, w4, #LIT_SHIFT                  // literal nibble
 #if MAT_SHIFT
     ubfx    w26, w4, #MAT_SHIFT, #MAT_BITS          // match nibble, above the repeat bit
-    and     w13, w4, #1                      // and the repeat bit beside it
 #else
     and     w26, w4, #MAT_MAX                // match nibble, kept across helpers
 #endif
@@ -412,7 +411,7 @@ L(fast_offset):
      * and 5.6% on varied, so it predicts either way, and `csel` would make the
      * load unconditional and put it back on the chain.
      */
-    tbnz    w13, #0, L(fast_off_same)
+    tbnz    w4, #0, L(fast_off_same)
     ldrh    w11, [x19, x8]              // offset
     mov     x27, x11
     add     x23, x8, #2                 // cursor past it
@@ -636,19 +635,30 @@ L(tail):
     lsr     w5, w4, #LIT_SHIFT
 #if MAT_SHIFT
     ubfx    w26, w4, #MAT_SHIFT, #MAT_BITS
-    /*
-     * The bit goes to x13 rather than staying in the token, because `L(exact)`
-     * is called between here and the offset and its contract destroys x4. The
-     * match nibble lives in x26 for exactly the same reason; x13 is free until
-     * the match begins, and the contract keeps x11-x17 across the call.
-     */
-    and     w13, w4, #1
 #else
     and     w26, w4, #MAT_MAX
 #endif
 
     /* ---- one block, whatever its lengths ----------------------------- */
 L(slow):
+#if MAT_SHIFT
+    /*
+     * The repeat bit, extracted here rather than in the loop head.
+     *
+     * It goes to x13 rather than staying in the token because `L(exact)` is
+     * called below and its contract destroys x4 -- but that is only true on
+     * *this* path. The fast path reaches its offset without a call, so it tests
+     * the token directly and the extraction is pure cost there. It used to sit
+     * in the loop head because the three exits above jump straight to this
+     * label and relied on it; putting it here serves them and the fall-through
+     * both, and takes an instruction out of every fast block to pay for one in
+     * the blocks that were leaving anyway.
+     *
+     * The profile is what found it: the loop head went from 946 samples to 1245
+     * when the repeat bit arrived, while the offset handling stayed at 16%.
+     */
+    and     w13, w4, #1
+#endif
     add     x23, x23, #1
 
     mov     x15, x5                     // literal length
