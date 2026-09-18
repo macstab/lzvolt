@@ -774,3 +774,36 @@ shows what happens at exactly that boundary.
 at any size, so the question is only what the space buys. records(32) saves one
 byte in thirty-two -- 3% -- for that factor. A 512-byte value saves 62%. The
 rule `out.len() < input.len()` cannot tell those apart and should be a ratio.
+
+---
+
+## 2026-09-18 -- OUT_MARGIN was already right, and the worth-packing rule was not
+
+**OUT_MARGIN.** After COPY_MAX fell to 48 the margin dropped to 16 -- the bound
+`LIT_MAX + COPY_MAX - 64` went negative, leaving only the heuristic constant. It
+looked worth re-tuning. It is not: M2 Max, against 16 as the baseline,
+
+| | records_512 | varied_512 | records_4k |
+|---|---|---|---|
+| 8 | -0.67% | -0.01% | -0.60% |
+| 24 | -0.44% | +0.49% | -0.95% |
+| 32 | -0.17% | -0.88% | -1.09% |
+
+all inside +/-1%. The constant answers "how long is a final literal run", which
+the format change did not touch. Left at 16.
+
+**The worth-packing rule.** `out.len() < input.len()` replaced with
+`worth_storing`: at least an eighth saved, and at least eight bytes. The read
+costs a factor of four to five whatever the size, so the space is the only thing
+bought and it has to clear a bar.
+
+| original | packed | before | after |
+|---|---|---|---|
+| 32 B | 31 B (3%) | stored packed | **stored raw** |
+| 192 B | 134 B (30%) | packed | packed |
+| 512 B | 195 B (62%) | packed | packed |
+| 4096 B | 487 B (88%) | packed | packed |
+
+Nothing the benchmark packs is affected -- every shape saves between 30% and
+88%. The one value that changes behaviour is the one that was trading 78% of its
+read speed for 3% of its size.

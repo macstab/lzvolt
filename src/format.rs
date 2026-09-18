@@ -399,7 +399,7 @@ impl NarrowPacker {
                 ADAPTIVE,
             );
         }
-        out.len() < input.len()
+        worth_storing(out.len(), input.len())
     }
 }
 
@@ -710,6 +710,31 @@ const PROBE_ABOVE: usize = 2048;
 /// loop in two costs more than the branch did.
 ///
 /// It skips on misses exactly as the search does, so it is cheap from both
+/// Whether a packed result is worth storing instead of the original bytes.
+///
+/// Was `out.len() < input.len()`, which says yes to saving a single byte. That
+/// is a bad trade and the measurement is unambiguous: reading a packed value
+/// costs a factor of four to five against the memcpy that reads a stored one,
+/// at every size, because one is arithmetic and the other is not. The space is
+/// the only thing bought, so the space is what has to clear a bar.
+///
+/// An eighth. A 512-byte record packs to 195 and clears it by a mile; a
+/// 32-byte one saved exactly one byte -- 3% for that factor of five -- and no
+/// longer qualifies. The floor of eight bytes keeps the rule from admitting
+/// tiny absolute wins on tiny values where the ratio flatters them.
+///
+/// Where the trade is genuinely good this changes nothing: every shape the
+/// benchmark packs saves between 30% and 62%. See docs/MEASUREMENTS.md, the
+/// sweep from L1 to RAM.
+#[inline]
+fn worth_storing(packed: usize, original: usize) -> bool {
+    let saved = match original.checked_sub(packed) {
+        Some(n) => n,
+        None => return false,
+    };
+    saved >= 8 && saved * 8 >= original
+}
+
 /// ends: on data that repeats it returns on one of the first few positions, and
 /// on data that does not it accelerates away rather than walking the kilobyte.
 #[inline(never)]
@@ -771,7 +796,7 @@ fn pack_with(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> b
     } else {
         pack_pass::<{ (64 - HASH_BITS) as u32 }, u32>(input, out, table, EVEN, LAZY, ADAPTIVE);
     }
-    out.len() < input.len()
+    worth_storing(out.len(), input.len())
 }
 
 /// How far past a match the search looks for a longer one.
@@ -847,7 +872,7 @@ fn pack_with_eager(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]
     } else {
         pack_pass::<{ (64 - HASH_BITS) as u32 }, u32>(input, out, table, EVEN, EAGER, FIXED);
     }
-    out.len() < input.len()
+    worth_storing(out.len(), input.len())
 }
 
 /// One pass, deciding the split as it goes.
@@ -2079,6 +2104,31 @@ mod tests {
             unpack(&packed, &mut unpacked).expect("must unpack what it packed");
             assert_eq!(unpacked, input, "round trip changed the bytes");
         }
+    }
+
+    /// The rule that decides whether a packed value replaces the original.
+    ///
+    /// Reading a packed value costs a factor of four to five against reading a
+    /// stored one, at every size, so a saving has to be worth that. One byte in
+    /// thirty-two is not.
+    #[test]
+    fn a_saving_has_to_be_worth_the_decode() {
+        // One byte of thirty-two: what `out.len() < input.len()` used to accept,
+        // measured at -78% on the read for 3% of the space.
+        assert!(!worth_storing(31, 32));
+        // The floor, so a tiny absolute win cannot ride in on a good ratio.
+        assert!(!worth_storing(9, 16));
+        assert!(worth_storing(8, 16));
+        // An eighth exactly, and one byte short of it.
+        assert!(worth_storing(896, 1024));
+        assert!(!worth_storing(897, 1024));
+        // Every shape the benchmark packs clears it with room to spare.
+        assert!(worth_storing(195, 512));
+        assert!(worth_storing(487, 4096));
+        assert!(worth_storing(5524, 65536));
+        // A packer that grew the value says no rather than underflowing.
+        assert!(!worth_storing(600, 512));
+        assert!(!worth_storing(512, 512));
     }
 
     #[test]
