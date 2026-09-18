@@ -732,3 +732,45 @@ M2 Max on the same change: **-0.6%**, its noise floor -- the same non-answer it
 gave the repeat bit, and for the same reason. Two changes now, both aimed at
 reading or writing fewer bytes, both invisible on a machine with bandwidth to
 spare and both worth 3-14% on one without.
+
+---
+
+## 2026-09-18 -- packed or raw, swept from L1 to RAM
+
+M2 Max, three runs. N values of 512 bytes each in two arenas -- one raw, one
+packed -- read in a fixed random order, one at a time, both sides writing into a
+buffer that already has its capacity. Throughput against unpacked bytes.
+
+| values | raw MiB | packed MiB | run 1 | run 2 | run 3 |
+|---|---|---|---|---|---|
+| 64 | 0.03 | 0.01 | -77.8% | -76.8% | -77.8% |
+| 1 024 | 0.5 | 0.2 | -72.5% | -72.2% | -73.1% |
+| 8 192 | 4.0 | 1.5 | -58.1% | -68.1% | -71.2% |
+| **65 536** | **32.0** | **12.3** | **+4.2%** | **+13.5%** | **+4.7%** |
+| 262 144 | 128.0 | 48.8 | -44.1% | -46.7% | -46.0% |
+| 1 048 576 | 512.0 | 194.9 | -54.5% | -55.0% | -53.8% |
+
+**Three regimes, three different bottlenecks.**
+
+*In cache, to about 4 MiB.* Raw runs at 44-61 GiB/s, the decoder at 12-13.
+Arithmetic against memcpy, a factor of four to five. This is the worst case for
+packing and the only one an earlier measurement here looked at.
+
+*The window at 32 MiB raw.* The raw arena falls out of the M2 Max's system level
+cache; the packed one at 12.3 MiB still fits. Raw drops from 21 to 8.6 GiB/s,
+packed holds at 9, and **packed wins** -- in all three runs.
+
+*Past that, 128 MiB and up.* Both arenas are in RAM, both are miss-bound, and
+the decode is charged on top. Packing loses 45-55%. Worth noting that the packed
+side reads 62% fewer bytes and is still slower: at 1.57 GiB/s the limit is cache
+misses and decode, not bandwidth.
+
+**What this does not measure, and it is the point of packing.** 512 MiB of RAM
+holds 2.6x as many values packed. That is not a throughput effect; it is the
+difference between a working set fitting and not fitting, and the sweep above
+shows what happens at exactly that boundary.
+
+**For the "worth packing" rule.** The cost is a factor of four to five on reads
+at any size, so the question is only what the space buys. records(32) saves one
+byte in thirty-two -- 3% -- for that factor. A 512-byte value saves 62%. The
+rule `out.len() < input.len()` cannot tell those apart and should be a ratio.
