@@ -154,8 +154,10 @@
  */
 #if MAT_CAP > 64
 #  define COPY_MAX   96
-#elif MAT_CAP > 32
+#elif MAT_CAP > 48
 #  define COPY_MAX   64
+#elif MAT_CAP > 32
+#  define COPY_MAX   48
 #else
 #  define COPY_MAX   32
 #endif
@@ -471,17 +473,24 @@ L(fast_copy):
      * the match length, not against the width of the move.
      *
      * The move covers the longest match this split can carry without an
-     * extension: one vector pair under the even split, two under the wide one,
-     * where a match runs to 66 bytes.
+     * extension: one vector pair under the even split, a pair and a single
+     * under the wide one, where a match now runs to 35 bytes rather than 66.
      */
     cmp     x11, x14
     b.lo    L(fast_near)
 
     ldp     q0, q1, [x15]
     stp     q0, q1, [x13]
-#if MAT_CAP > 32
+#if MAT_CAP > 48
     ldp     q2, q3, [x15, #32]
     stp     q2, q3, [x13, #32]
+#elif MAT_CAP > 32
+    /* Sixteen, not thirty-two: the wide split carries 35 bytes inline since the
+     * repeat bit took a match bit, so the third quarter of a 64-byte move was
+     * being written for nothing. This is the loop's largest single store pair,
+     * on the body 1552 of records_64k's 1567 blocks go through. */
+    ldr     q2, [x15, #32]
+    str     q2, [x13, #32]
 #endif
 #if MAT_CAP > 64
     ldp     q4, q5, [x15, #64]

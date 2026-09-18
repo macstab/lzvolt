@@ -222,8 +222,10 @@
  */
 #if MAT_CAP > 64
 #  define COPY_MAX   96
-#elif MAT_CAP > 32
+#elif MAT_CAP > 48
 #  define COPY_MAX   64
+#elif MAT_CAP > 32
+#  define COPY_MAX   48
 #else
 #  define COPY_MAX   32
 #endif
@@ -518,11 +520,17 @@ L(fast_matgo):
     movdqu  16(%rsi), %xmm1
     movdqu  %xmm0, (%r8)
     movdqu  %xmm1, 16(%r8)
-#if COPY_MAX > 32
+#if COPY_MAX > 48
     movdqu  32(%rsi), %xmm2
     movdqu  48(%rsi), %xmm3
     movdqu  %xmm2, 32(%r8)
     movdqu  %xmm3, 48(%r8)
+#elif COPY_MAX > 32
+    /* One register, not two: the wide split carries 35 bytes inline since the
+     * repeat bit took a match bit, so the fourth sixteen was written for
+     * nothing -- on the body records spend 99% of their blocks in. */
+    movdqu  32(%rsi), %xmm2
+    movdqu  %xmm2, 32(%r8)
 #endif
 #if COPY_MAX > 64
     movdqu  64(%rsi), %xmm4
