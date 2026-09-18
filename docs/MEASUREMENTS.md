@@ -258,3 +258,65 @@ does not know where the next block starts until this one's lengths are decoded.
 
 That is also why "fewer and bigger blocks" worked twice at about 19% each. It
 is the only lever that touches the progress chain: it runs it fewer times.
+
+---
+
+## 2026-09-18 -- two interleaved chains
+
+M2 Max, portable throwaway (`examples/interleave.rs`, deleted after this entry).
+Same method as the streams entry: fixed spans, alternating, medians of nine,
+three runs.
+
+**The hypothesis.** Throughput is a monotone function of bytes per block --
+
+| shape | blocks | bytes/block | GiB/s |
+|---|---|---|---|
+| varied_64k | 3054 | 21.5 | 8.12 |
+| varied_4k | 186 | 22.0 | 8.10 |
+| varied_512 | 18 | 28.4 | 10.85 |
+| records_512 | 12 | 42.7 | 12.37 |
+| records_64k | 903 | 72.6 | 15.27 |
+| records_4k | 53 | 77.3 | 14.71 |
+
+-- monotone across two data shapes and three orders of magnitude, so a block
+costs about the same whatever its size. If that cost is the progress chain
+(`produced += lit; produced += mat`, which decides where the next token is) then
+it is latency and cannot be overlapped across blocks. Two independent chains
+could be overlapped. Split the value in half, give each half its own cursors and
+matches that never reach across the boundary, and step them alternately.
+
+### Result
+
+| shape | run 1 | run 2 | run 3 | size |
+|---|---|---|---|---|
+| records_512 | -11.9% | -10.6% | -11.5% | **+57.3%** |
+| varied_512 | +2.4% | +2.7% | +2.6% | +20.8% |
+| records_4k | +1.2% | +0.8% | +1.7% | +25.7% |
+| varied_4k | +3.1% | +2.6% | +2.2% | +5.1% |
+| records_64k | -3.4% | -4.1% | -3.3% | +4.4% |
+| varied_64k | -0.7% | +1.0% | -3.2% | +1.4% |
+
+Block counts barely moved (records_512 14 -> 13, varied_4k 243 -> 225), so the
+halves did not cost the matcher much. The size did: the second half starts with
+no history, and on a 512-byte value that is 57% more output.
+
+**What this refuted, and it is my reading of the bottleneck rather than only
+this idea.** Two independent chains in flight buy nothing. If the per-block cost
+were latency, this had to nearly halve it.
+
+**So the cost is work, not waiting.** "Not issue-bound at the margin" is what
+the earlier counter run showed, and I read that as latency-bound. It is not the
+same thing, and `unpack.S` already said which: *the copy loops are port-bound at
+five micro-ops per 32 bytes*. Two chains share those ports. So does a third
+stream. That is why both of today's structural ideas measured zero, and it is
+consistent with the one thing that did move -- the repeat bit removed a load per
+block and gained 1.0% on records_64k, the shape where nothing else got worse.
+
+**What is left, then.** Fewer micro-ops per output byte, by either route:
+
+- fewer blocks, which is packer work and the lever that paid twice at ~19%
+- fewer bytes read per block, which is format work: one-byte offsets where the
+  value's offsets all fit (100% of them on records_512, 31% on records_4k), the
+  repeat bit where it pays. Both of these are per-*value* decisions, so they
+  belong in the header where they cost the token no bits and the decoder no
+  cycles -- only a choice of which kernel runs.
