@@ -855,3 +855,71 @@ previous format. Throughput was traded for it on three parts of four. Whether
 that trade is right is a decision about the store, not about the decoder -- the
 sweep from L1 to RAM in the entry above shows the size paying for itself once
 the working set stops fitting, and none of these cells measure that.
+
+---
+
+## 2026-09-19 -- the input margin, and where the day landed
+
+`12760b2` (before any of this) against `581683c` (wide repeat bit, prefix
+header, 48-byte match move, worth-storing rule, and both margin fixes).
+`QUICK=1`, 3 s a cell, one run per revision on the rented parts; the M2 Max
+figures are medians of three from the local runs.
+
+### What the margin fix did, per part
+
+records_4k, before and after the fix:
+
+| | before | after |
+|---|---|---|
+| Axion | +12.9% | **+18.5%** |
+| EPYC | -5.2% | **+7.7%** |
+| Xeon | **-14.4%** | **+3.7%** |
+| M2 Max | -7.5% | ~-2.3% |
+
+The fix is one constant. `L(entry)` stopped the fast loop a fixed distance
+short of the input's end, and past it every block runs on the checked path at
+three to four times the price. That distance was sized for the even split --
+seventeen bytes on AArch64, **thirty-seven** on x86 -- and the wide split, which
+carries three literals instead of fourteen, paid it too. Five is enough.
+
+On x86 that was seven blocks of a records_4k value on the expensive path where
+one belongs. It had been there since the wide split existed.
+
+### Where that leaves the format against the competition
+
+Our own format, decoding, on the three rented parts:
+
+| | vs liblz4 | vs lz4_flex |
+|---|---|---|
+| Axion | +27.8% to **+58.1%** | +2.0% to +25.4% |
+| Xeon | +24.8% to **+65.8%** | +9.7% to +41.0% |
+| EPYC | +8.7% to +45.1% | +0.7% to +25.9% |
+
+Eighteen cells, eighteen wins against both libraries. And smaller at the same
+time: records_4k 487 B against liblz4's 658, records_64k 5524 against 7992 --
+26% and 31% under.
+
+### Reading foreign LZ4 blocks, which is the other half
+
+| | vs liblz4 | vs lz4_flex |
+|---|---|---|
+| records + varied | **14 of 18** | 11 of 18 |
+| noise | **1 of 9** | 6 of 9 |
+
+78% ahead of liblz4 on compressible data, and a real gap on `noise`: -30.1%,
+-35.8%, -37.1%, -32.6%. Those are all-literal blocks, where liblz4 has a path
+ours does not match -- lz4_flex loses there too, so it is liblz4 being good
+rather than us being broken. Unexplained and untouched.
+
+### What the day actually taught
+
+Eight ideas were tried. **Seven measured zero or worse**: three streams, two
+interleaved chains, one-byte offsets, the repeat bit in the even split, and
+three separate instruction-level optimisations of the loop head. The one that
+worked came from profiling and then *counting* -- how many blocks of a 487-byte
+value fall past a 17-byte margin at 5.1 bytes a block -- rather than from
+reasoning about what ought to be faster.
+
+Also worth keeping: a 0.5-second Criterion run lied four times today, twice by
+inventing a gain and twice by hiding one. Medians of three at one second or
+more, baseline measured in the same session, or the number does not count.
