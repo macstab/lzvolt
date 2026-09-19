@@ -923,3 +923,65 @@ reasoning about what ought to be faster.
 Also worth keeping: a 0.5-second Criterion run lied four times today, twice by
 inventing a gain and twice by hiding one. Medians of three at one second or
 more, baseline measured in the same session, or the number does not count.
+
+---
+
+## 2026-09-20 -- profiling the LZ4 body, which nothing had done
+
+Three attempts at the `noise` gap were aimed at the copy loop and measured
++5.5%/-0.7%, -3.6% and +1.6%. All three were reasoned from the source. The
+profiling example only ever drove `pack::unpack`, so the interop kernel had
+never been sampled. It takes `lz4_*` shapes now and feeds it a block liblz4
+wrote.
+
+### noise: the chain, not the copy
+
+```
+lz4_noise_64k   .Ll_lz4_lit_blk   83.1%    the copy, already the good branch
+                .Ll_litlen_byte   15.6%    <- the length chain
+lz4_noise_4k    .Ll_lz4_lit_blk   72.6%
+                .Ll_litlen_byte   11.8%
+```
+
+A 64 KiB literal run under LZ4's token spends **257 bytes** in the chain, read
+one at a time. The loop was eleven instructions a byte, one of which
+rematerialised MAX_UNPACKED every round. Hoisted, closing on its own test: nine.
+
+**same_bytes/noise_64k 39.85 -> 50.29 GiB/s, +26.2%**, against a control moving
+-5.3%. Everything else within 0.7%.
+
+### records and varied: two different bottlenecks
+
+```
+lz4_records_4k  .Ll_fast_near     47.1%   <- overlapping match copy
+                .Ll_fast          12.9%
+                .Ll_fast_lendone  10.9%
+                .Ll_fast_offset    9.9%
+
+lz4_varied_4k   .Ll_fast          33.9%
+                .Ll_fast_offset   33.1%
+                .Ll_fast_copy     11.1%
+```
+
+`fast_near` handles matches whose offset is shorter than their length. It does
+not appear in any profile of our own format all day -- LZ4 carries eighteen
+bytes of match against our wide split's thirty-five, so records-shaped data
+produces far more short overlapping matches under its token.
+
+And it is reached by a **call**: four `mov` to marshal, `bl`, `ret`, one `mov`
+back -- six instructions of scaffolding around roughly ten of work, on a path
+holding 47% of the decode. That is about 17% of the whole spent on the call
+itself, and it is the shape the no-mixed-calls rule exists to prevent.
+
+`L(repeat)` itself is well built: splat tables and `tbl` to lay down an
+overlapping pattern in one go. Inlining its short case into `fast_near` is the
+next step and is not done.
+
+### M2 Max, everything, medians of three
+
+Own format: **18 of 18** against both libraries, +0.6% to +79.4%.
+Foreign LZ4 blocks: 10 of 18 -- 7 of 9 against lz4_flex, 3 of 9 against liblz4.
+The gap is -1% to -4% on most cells and -20.7% on noise_64k.
+
+Reading a format someone else designed against the implementation that designed
+it is the harder half, and it is where the remaining work is.

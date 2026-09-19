@@ -70,6 +70,9 @@ fn main() {
         "lz4_noise_4k" => noise(4096),
         "lz4_noise_64k" => noise(65_536),
         "lz4_records_4k" => records(4096),
+        "lz4_records_64k" => records(65_536),
+        "lz4_varied_4k" => varied(4096),
+        "lz4_varied_512" => varied(512),
         _ => records(4096),
     };
     eprintln!("Profil: {shape}, {} B", data.len());
