@@ -332,11 +332,13 @@ L(entry):
      * Both clamp to zero for a value too small to hold one block, which then
      * runs entirely on the checked loop.
      */
-    // What a fast block reaches from the cursor: the token, the literal move,
-    // and the two offset bytes that sit past the run. Seventeen for the even
-    // split, seven for the wide one -- which used to pay the even split's
-    // margin and lose blocks to the checked path for it.
-    subs    x25, x20, #(1 + FAST_LITERAL + 2)   // input limit
+    // What a fast block reaches from the cursor: the token and the literal
+    // move. The offset needs no room of its own -- the fast path only runs
+    // when the literal length is below LIT_MAX, so the run ends at least two
+    // bytes inside the move and the offset sits in the same reach. Seventeen
+    // for the even split, five for the wide one, which used to pay the even
+    // split's margin and lose blocks to the checked path for it.
+    subs    x25, x20, #(1 + FAST_LITERAL)       // input limit
     csel    x25, x25, xzr, hs
     subs    x28, x22, #OUT_MARGIN           // output limit
     csel    x28, x28, xzr, hs
