@@ -211,7 +211,23 @@
 
 #define MIN_MATCH         4
 #define OVERRUN           32
-#define FAST_INPUT_SLACK  32
+
+/*
+ * Bytes the fast path stores for the literal run before it knows the length.
+ *
+ * Sixteen was right while both bodies could carry fourteen literals. The wide
+ * split carries three, so it stored a vector where a dword would do -- and paid
+ * for the reach twice, once here and once in FAST_IN below, which is where it
+ * hurts: past that margin every block runs on the checked path at three to four
+ * times the price. On AArch64 the same change was worth 5.6% on records_4k,
+ * where a packed value is 5.1 bytes to a block and the margin was costing 3.4
+ * of them. See docs/MEASUREMENTS.md.
+ */
+#if LIT_MAX <= 3
+#  define FAST_LITERAL 4
+#else
+#  define FAST_LITERAL 16
+#endif
 #define MAT_CAP           (MAT_MAX + MIN_MATCH)
 
 /*
@@ -242,8 +258,13 @@
 #  define OUT_MARGIN 16
 #endif
 
-/* Input the fast path may read past the cursor, at its widest literal run. */
-#define FAST_IN (1 + (LIT_MAX - 1) + 2 + FAST_INPUT_SLACK)
+/*
+ * Input the fast path may read past the cursor: the token and the literal
+ * store. The offset needs no room of its own -- this path only runs while the
+ * literal length is below LIT_MAX, so the run ends at least two bytes inside
+ * the store and the offset sits in the same reach.
+ */
+#define FAST_IN (1 + FAST_LITERAL)
 
 #define KEVA_NAME1(n) KEVA_SYM(n)
 #define KEVA_NAME(n) KEVA_NAME1(n)
@@ -474,8 +495,13 @@ L(fast_offdone):
      * Sixteen literal bytes are stored whether or not that many were meant;
      * the surplus is overwritten by the next block or falls in the slack the
      * caller trims. */
+#if FAST_LITERAL == 4
+    mov     (%rsi), %eax
+    mov     %eax, (%rdi)
+#else
     movdqu  (%rsi), %xmm0
     movdqu  %xmm0, (%rdi)
+#endif
 
 L(fast_litdone):
 #ifdef KEVA_REPEAT
