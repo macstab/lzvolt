@@ -148,6 +148,28 @@
 #endif
 
 /*
+ * Bytes the fast path moves for the literal run before it knows the length.
+ *
+ * Sixteen was right when both bodies could carry fourteen literals. The wide
+ * split carries three, so it was reading and writing a vector where a word
+ * would do -- and paying for it twice: once in the move, and once in the input
+ * margin below, which is what that reach costs the loop.
+ *
+ * The margin is the expensive half. `L(entry)` stops the fast loop that many
+ * bytes short of the input's end, and everything past it runs on the checked
+ * path at three to four times the price. On records_4k the packed value is 487
+ * bytes across 96 blocks -- 5.1 bytes each -- so a margin of seventeen puts 3.4
+ * blocks there, 3.5% of them, which the profile sees as 11.3% of the time. At
+ * records_64k's 3.5 bytes a block the same seventeen bytes are 0.3%, and the
+ * profile does not see the path at all.
+ */
+#if LIT_MAX <= 3
+#  define FAST_LITERAL 4
+#else
+#  define FAST_LITERAL 16
+#endif
+
+/*
  * Bytes the fixed match move writes, which is a property of the code below and
  * not of the format: one vector pair under the even split, three under the wide
  * one, because that is what covers a match the split can carry inline.
@@ -310,9 +332,11 @@ L(entry):
      * Both clamp to zero for a value too small to hold one block, which then
      * runs entirely on the checked loop.
      */
-    // Seventeen whatever the split: the block reads a token and then sixteen
-    // bytes of literals unconditionally, and the offset sits inside that reach.
-    subs    x25, x20, #17               // input limit
+    // What a fast block reaches from the cursor: the token, the literal move,
+    // and the two offset bytes that sit past the run. Seventeen for the even
+    // split, seven for the wide one -- which used to pay the even split's
+    // margin and lose blocks to the checked path for it.
+    subs    x25, x20, #(1 + FAST_LITERAL + 2)   // input limit
     csel    x25, x25, xzr, hs
     subs    x28, x22, #OUT_MARGIN           // output limit
     csel    x28, x28, xzr, hs
@@ -394,8 +418,13 @@ L(fast):
     // A short run carries at most fourteen literals, so one 16-byte move covers
     // it whatever the length. Trimming would cost a branch to save nothing: the
     // extra bytes are overwritten by the match that follows.
+#if FAST_LITERAL == 4
+    ldr     s0, [x19, x7]
+    str     s0, [x21, x24]
+#else
     ldr     q0, [x19, x7]
     str     q0, [x21, x24]
+#endif
 
 L(fast_offset):
 #ifdef KEVA_REPEAT
