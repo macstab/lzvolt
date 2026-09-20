@@ -294,7 +294,12 @@ KEVA_NAME(KEVA_ENTRY):
      * There was nothing to win either way. Nine registers plus x29 and x30 is
      * eleven values and 88 bytes, which is a 96-byte frame with or without it.
      */
-    stp     x29, x30, [sp, #-96]!
+    /*
+     * Ninety-six for the saved registers, sixty-four more for the padded tail.
+     * See L(pad_tail): the last bytes of the input are copied there so the
+     * fast loop can read its fixed reach past them without leaving the buffer.
+     */
+    stp     x29, x30, [sp, #-160]!
     stp     x19, x20, [sp, #16]
     stp     x21, x22, [sp, #32]
     stp     x23, x24, [sp, #48]
@@ -723,6 +728,22 @@ L(tail):
     b.hs    L(done)
     cmp     x23, x20
     b.hs    L(fail)
+    /*
+     * Which cursor stopped us decides what happens next.
+     *
+     * If it was the input, the rest of the value fits in a padded copy and the
+     * fast loop can finish it -- see L(pad_tail). If it was the output, or if
+     * the copy has already been made, there is nothing left to do but ask
+     * every question again, one block at a time.
+     *
+     * `x25 == x20` is the flag: L(pad_tail) sets the limit to the true end,
+     * which the entry code never does, because it always subtracts a margin.
+     */
+    cmp     x25, x20
+    b.eq    L(tail_block)
+    cmp     x23, x25
+    b.hs    L(pad_tail)
+L(tail_block):
     ldrb    w4, [x19, x23]              // token
     lsr     w5, w4, #LIT_SHIFT
 #if MAT_SHIFT
@@ -1005,9 +1026,74 @@ L(slow_near):
     mov     x24, x12
     b       L(fast)
 
+/*
+ * The last bytes of the input, where the fast loop may read past them.
+ *
+ * The fast path reads a fixed distance from the cursor -- a token and the
+ * literal move -- and stops that far short of the input's end rather than test
+ * per block. On a long value that margin is nothing; on a short one it is most
+ * of the last blocks. A 512-byte value of varied packs to about 250 bytes in
+ * 27 blocks, so seventeen bytes are nearly two of them, and the profile put
+ * 20.5% of that shape on the checked path for it.
+ *
+ * So the remainder is copied somewhere that has room after it. Sixty-four
+ * zeroed bytes in this frame, and `x19` is biased by the cursor so that every
+ * index in the loop keeps its meaning -- nothing else in the body needs to
+ * know. Once per value, at most seventeen bytes.
+ *
+ * What makes it safe is that padding cannot hide a truncated stream. Any block
+ * that reads a byte at or past the end leaves the cursor past the end, and a
+ * zero offset is refused where it is read; L(done) checks the cursor landed
+ * exactly on the end and hands anything else to the portable decoder, which
+ * produces the error.
+ */
+L(pad_tail):
+    add     x11, sp, #96
+    stp     xzr, xzr, [x11]
+    stp     xzr, xzr, [x11, #16]
+    stp     xzr, xzr, [x11, #32]
+    stp     xzr, xzr, [x11, #48]
+    /*
+     * Seventeen bytes at most, so the ladder rather than a loop: a byte at a
+     * time was measured at 6.5% of a 512-byte value, which is most of what the
+     * copy was meant to buy. Each test moves the width of one bit of the
+     * count, and only the bits that are set cost anything.
+     */
+    sub     x9, x20, x23                // what is left, nought to seventeen
+    add     x10, x19, x23
+    mov     x14, x11
+    tbz     x9, #4, L(pad_8)
+    ldr     q0, [x10], #16
+    str     q0, [x14], #16
+L(pad_8):
+    tbz     x9, #3, L(pad_4)
+    ldr     x12, [x10], #8
+    str     x12, [x14], #8
+L(pad_4):
+    tbz     x9, #2, L(pad_2)
+    ldr     w12, [x10], #4
+    str     w12, [x14], #4
+L(pad_2):
+    tbz     x9, #1, L(pad_1)
+    ldrh    w12, [x10], #2
+    strh    w12, [x14], #2
+L(pad_1):
+    tbz     x9, #0, L(pad_done)
+    ldrb    w12, [x10]
+    strb    w12, [x14]
+L(pad_done):
+    sub     x19, x11, x23               // indices keep their meaning
+    mov     x25, x20                    // and now the limit is the true end
+    b       L(fast)
+
 L(done):
     cmp     x24, x22
     b.ne    L(fail)
+    // Past the end means the stream claimed bytes it does not have, and the
+    // padded copy is where it would have found them. Only reachable after
+    // L(pad_tail); before it every read is bounded.
+    cmp     x23, x20
+    b.hi    L(fail)
     mov     w0, w22
     b       L(return)
 
@@ -1019,7 +1105,7 @@ L(return):
     ldp     x23, x24, [sp, #48]
     ldp     x21, x22, [sp, #32]
     ldp     x19, x20, [sp, #16]
-    ldp     x29, x30, [sp], #96
+    ldp     x29, x30, [sp], #160
     ret
 
 /*

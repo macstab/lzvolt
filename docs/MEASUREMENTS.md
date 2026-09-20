@@ -1291,3 +1291,62 @@ Damit ist die zehnte Idee an dieser Stelle gescheitert, und die dritte in
 Folge, die die Kette verlaengert hat, ohne dass es beim Schreiben auffiel. Die
 Regel ist inzwischen scharf genug, um sie vorher anzuwenden: **was `x23` fuer
 den naechsten Block berechnet, darf nichts Neues beruehren.**
+
+## 2026-09-20 — Der gepolsterte Rest: der Rand kostet nichts mehr
+
+Die erste Idee seit dem memcpy, die haelt, und sie kommt aus demselben Profil
+wie die drei davor. `lz4_varied_512` verbrachte 20.5% auf dem geprueften Pfad:
+
+    slow_lit_ready 8.0   slow_mat_ready 4.5   slow_lit_done 3.7
+    tail 2.9   slow 1.4
+
+Der Grund ist der Eingabe-Rand. Der schnelle Pfad liest eine feste Strecke ab
+dem Cursor -- ein Token und die Literalkopie, siebzehn Bytes -- und hoert so
+weit vor dem Ende auf, statt je Block zu pruefen. Ein 512-Byte-Wert von varied
+packt auf etwa 250 Bytes in 27 Bloecke, also sind siebzehn Bytes fast zwei
+davon, auf einem Pfad, der drei- bis viermal so teuer ist.
+
+### Was gebaut wurde
+
+Wenn der *Eingabe*-Cursor die Zone verlaesst -- und nur dann, der Ausgabe-Rand
+ist eine andere Frage -- werden die verbleibenden hoechstens siebzehn Bytes in
+vierundsechzig genullte Bytes im eigenen Rahmen kopiert, und `x19` wird um den
+Cursor verschoben, sodass jeder Index im Loop seine Bedeutung behaelt. Sonst
+weiss nichts im Body davon. Der Rand wird auf das echte Ende gesetzt, und der
+schnelle Pfad laeuft bis dorthin.
+
+Dass Polsterung keinen abgeschnittenen Strom verstecken kann, haelt drei
+Argumente aus: jeder Block, der ein Byte ab dem Ende liest, laesst den Cursor
+hinter dem Ende stehen; ein Offset von null wird dort abgelehnt, wo er gelesen
+wird; und `L(done)` prueft, dass der Cursor genau auf dem Ende steht, sonst
+uebernimmt der portable Decoder und liefert den Fehler.
+
+### Die Kopie selbst war erst die Haelfte des Gewinns
+
+Byteweise gemessen: geprueter Pfad faellt von 20.5% auf 11.6%, aber
+`.Ll_pad_byte` steht mit **6.5%** drin. Siebzehn Bytes einmal je Wert sind auf
+einem 512-Byte-Wert kein Nichts. Ersetzt durch eine Breitenleiter -- 16, 8, 4,
+2, 1, nur die gesetzten Bits kosten --, also etwa fuenfzehn Instruktionen
+statt hundert.
+
+### Gemessen, Mediane aus 3 gepaarten Runden, netto gegen die Kontrollen
+
+| eigenes Format | netto | | fremdes LZ4 | netto |
+|---|---|---|---|---|
+| records_192 | **+8.1%** | | varied_512 | **+3.3%** |
+| noise_64k | +4.0% | | records_4k | +1.4% |
+| records_4k | +2.6% | | varied_64k | +1.2% |
+| varied_512 | +2.2% | | noise_512 | -2.7% |
+| records_512 | +1.1% | | noise_64k | -3.3% |
+| varied_4k | -0.7% | | records_64k | -0.4% |
+
+`varied_512` im Fremdformat steht damit bei -0.2% gegen liblz4 statt -3.1%.
+
+Die beiden `noise`-Zeilen sind die einzigen, die sich wehren, und dort feuert
+die Polsterung ueberhaupt nicht: ein Literallauf ueber den ganzen Block
+verlaesst den schnellen Pfad beim ersten Token, lange bevor der Rand eine
+Rolle spielt. In denselben Laeufen lief liblz4 auf genau diesen zwei Zellen um
++2.6% und +2.7% nach oben, weshalb die Netto-Spalte negativ ist. Platzierung,
+nicht Mechanik -- der Kernel hat 96 auf 160 Byte Rahmen gewechselt.
+
+x86_64 hat denselben Rand und ist ungemessen.
