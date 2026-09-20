@@ -431,12 +431,35 @@ L(block):
      * because this one is on nobody's chain.
      */
     mov     (%r14), %edx                    /* offset and length byte, for later */
+    /*
+     * One compare, and it predicts on every shape.
+     *
+     * A token of exactly 0x0F says two things at once: no literals, and a
+     * saturated match. The census puts both together on two thirds of
+     * records_64k's blocks -- 88% carry no literals and 75% saturate -- and on
+     * almost none of records_512's, whose blocks carry one to three literals.
+     * So the branch is taken two thirds of the time on one shape and never on
+     * the other, and predicted on both.
+     *
+     * Testing the literal nibble alone was measured instead and cost
+     * records_512 nine percent: there it is a coin flip, and `perf annotate`
+     * found the cost spread across the loop rather than on any instruction.
+     */
 #endif
 
     /* ---- fast path -------------------------------------------------- */
 
     cmp     %rbp, %rdi
     ja      L(dst_edge)                     /* too near the end to read ahead */
+
+#ifndef KEVA_WIDE
+    /*
+     * After the output zone test, not before it: L(fast_zsat) writes, and the
+     * zone is what says it may.
+     */
+    cmp     $0x0F, %eax
+    je      L(fast_zsat)
+#endif
 
 #ifdef KEVA_REPEAT
     /*
@@ -461,41 +484,6 @@ L(block):
     lea     1(%r14), %rsi                   /* where the literals begin */
     cmp     $LIT_MAX, %r10d
     je      L(fast_litext)
-
-#ifndef KEVA_WIDE
-    /*
-     * No literals: the whole block is already in eax.
-     *
-     * Falls through on the common case rather than branching to it, which is
-     * what the predictor sees. Turning that around was measured on aarch64 and
-     * cost between 4 and 12 percent across four cells.
-     */
-    test    %r10d, %r10d
-    jnz     L(fast_lit)
-    mov     %rdi, %r8                       /* nothing written before the match */
-    shr     $8, %edx
-    movzwl  %dx, %ecx                       /* the offset, without a second load */
-    shr     $16, %edx                       /* and the extension, if there is one */
-    mov     %r8, %r10
-    sub     %rbx, %r10                      /* available */
-    lea     -1(%rcx), %rax
-    cmp     %r10, %rax
-    jae     L(fail)                          /* zero, or reaching before the output */
-    lea     MIN_MATCH(%r11), %r9
-    cmp     $MAT_MAX, %r11d
-    je      L(fast_zext)
-    add     $3, %r14                        /* token and offset, a constant step */
-    jmp     L(fast_matgo)
-L(fast_zext):
-    /* The extension byte came with the token. This is where the block's length
-     * stops waiting for a load of its own. */
-    add     $4, %r14
-    add     %rdx, %r9
-    cmp     $255, %edx
-    jne     L(fast_matgo)
-    jmp     L(fast_matchain)                 /* 270 bytes or more: the chain continues */
-L(fast_lit):
-#endif
 
 #ifdef KEVA_REPEAT
     /*
@@ -619,6 +607,34 @@ L(fast_matgo):
 #endif
     mov     %rax, %rdi
     jmp     L(block)
+
+#ifndef KEVA_WIDE
+/*
+ * A token of exactly 0x0F: no literals, a saturated match, and everything the
+ * block needs already in `edx` from the loop head.
+ *
+ * Nothing is read that was not already loaded. The offset sits at the two bytes
+ * past the token and the length's extension at the byte past those, so one
+ * dword covers all three -- where the ordinary path pays two dependent L1
+ * accesses, one to reach the offset and one behind it to reach the extension.
+ * The cursor steps by a constant four.
+ */
+L(fast_zsat):
+    mov     %rdi, %r8                       /* nothing written before the match */
+    shr     $8, %edx
+    movzwl  %dx, %ecx                       /* the offset */
+    shr     $16, %edx                       /* the extension byte */
+    mov     %r8, %r10
+    sub     %rbx, %r10                      /* available */
+    lea     -1(%rcx), %rax
+    cmp     %r10, %rax
+    jae     L(fail)                          /* zero, or reaching before the output */
+    lea     MIN_MATCH+MAT_MAX(%rdx), %r9    /* 4 + 15 + what the byte adds */
+    add     $4, %r14                        /* token, offset, extension */
+    cmp     $255, %edx
+    jne     L(fast_matgo)
+    jmp     L(fast_matchain)                 /* 274 bytes or more: the chain goes on */
+#endif
 
 L(fast_litext):
     /*
