@@ -985,3 +985,50 @@ The gap is -1% to -4% on most cells and -20.7% on noise_64k.
 
 Reading a format someone else designed against the implementation that designed
 it is the harder half, and it is where the remaining work is.
+
+## 2026-09-20 — memcpy im LZ4-Literalpfad: +34.4% auf noise_64k
+
+Die Frage war "wieso machen wir im Falle von noise keinen memcpy?" — und die
+Antwort auf den ersten Versuch von gestern: wir haben, aber an der falschen
+Stelle. Der Aufruf stand in `L(slow_lit_wide)`, und ein 64-KiB-Literallauf wird
+dort abgewiesen (`x16 + 32 > x20`, weil ein Lauf bis ans Eingabeende keine 32
+Bytes mehr hinter sich hat). Er landet in `L(slow_lit_exact)` und damit in
+`L(lz4_lit_blk)`. Der Aufruf ist nie gelaufen.
+
+Das Profil nach dem Ketten-Fix zeigt genau dort die Zeit, 5076 Samples:
+
+    .Ll_lz4_lit_blk    4377   86.2%
+    .Ll_litlen_byte     637   12.5%
+
+### Die Schwelle, gemessen statt geschätzt
+
+`same_bytes/keva/noise_*`, M2 Max, Criterion 2 s, Mediane aus drei, Basis im
+selben Lauf gemessen. Drei Schwellen nacheinander:
+
+| LIT_MEMCPY |  512 B |  4 KiB | 64 KiB |
+|------------|--------|--------|--------|
+| 512        | −10.4% |  −0.2% | +26.7% |
+| 4096       |  +0.3% |  −1.8% | +36.8% |
+| **8192**   |  −0.1% |  +0.8% | **+34.4%** |
+
+Ein Aufruf kostet etwa so viel, wie die Schleife auf 512 Bytes gewinnt, und bei
+4096 stehen beide gleich — aber nur, wenn 4096 noch *in* die Schleife fällt.
+Mit der Schwelle auf 4096 nimmt ein 4-KiB-Wert den Aufruf gerade eben und
+verliert 1.8%; darüber ist die Zeile sauber. Deshalb 8192 und nicht 4096.
+
+Absolut, gegen die Kontrollen im selben Lauf: noise_64k 42.5 -> 57.2 GiB/s,
+liblz4 57.4, lz4_flex 40.1. Aus −26.5% wird Parität.
+
+### Dass unser Format sich nicht bewegt, ist nicht gemessen, sondern gezeigt
+
+`objdump -d` über `unpack.o`, Symbol für Symbol vor und nach der Änderung: alle
+55 `.Le_*` (even) und alle 47 `.Lw_*` (wide) sind instruktionsgleich. Verändert
+hat sich `.Ll_slow_lit_exact` (2 -> 8) und neu ist `.Ll_lz4_lit_loop`. Ein
+Durchsatzvergleich hätte hier nur das Rauschen der Maschine gezeigt — in
+denselben Läufen bewegte sich lz4_flex auf `varied_512` um 9.3%.
+
+### Offen
+
+x86_64 hat für diesen Pfad schon `rep movsb` hinter `REP_MIN 1024`, aber nur
+auf der Xeon-Linie; EPYC hat ihn bewusst nicht, weil Zen ERMSB ohne FSRM hat.
+Ob dort ein `memcpy`-Aufruf dasselbe tut wie hier, ist ungemessen.

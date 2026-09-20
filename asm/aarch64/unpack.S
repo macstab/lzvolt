@@ -143,6 +143,7 @@
 #ifndef MAT_SHIFT
 #  define MAT_SHIFT  0
 #endif
+
 #ifndef MAT_BITS
 #  define MAT_BITS   4
 #endif
@@ -163,6 +164,22 @@
  * records_64k's 3.5 bytes a block the same seventeen bytes are 0.3%, and the
  * profile does not see the path at all.
  */
+/*
+ * The literal run above which the LZ4 body hands the copy to the platform.
+ *
+ * Measured on M2 Max, medians of three, the run length being the whole value
+ * because liblz4 writes one literal run over an incompressible block:
+ *
+ *      512 B    -10.4%      the call is not paid back
+ *     4096 B     -1.0%      about even
+ *    65536 B    +34.4%      the loop cannot skip the cache, memcpy can
+ *
+ * So the threshold sits above the second row, not on it. It applies to the
+ * LZ4 body alone; our own format's last run is short, because the value in
+ * front of it compressed.
+ */
+#define LIT_MEMCPY 8192
+
 #if LIT_MAX <= 3
 #  define FAST_LITERAL 4
 #else
@@ -814,6 +831,26 @@ L(slow_lit_exact):
      * value in front of it compressed, and the promise attached to that body is
      * that it does not change.
      */
+    /*
+     * Above a few hundred bytes, the platform's memcpy. The loop below moves
+     * thirty-two bytes in five instructions and cannot do much better; what it
+     * cannot do at all is skip the cache on the way, which is what a tuned
+     * memcpy does at this size. liblz4 calls one here and reads a 64 KiB
+     * incompressible block 26% faster than this loop.
+     *
+     * One call per run. x0, x1 and x2 already hold what it wants; memcpy keeps
+     * x19-x28, and x16 and x17 follow from x23, x24 and the length, so only the
+     * length and the repeat bit need the stack.
+     */
+    cmp     x2, #LIT_MEMCPY
+    b.lo    L(lz4_lit_loop)
+    stp     x13, x15, [sp, #-16]!
+    bl      KEVA_SYM(memcpy)
+    ldp     x13, x15, [sp], #16
+    add     x16, x23, x15
+    add     x17, x24, x15
+    b       L(slow_lit_done)
+L(lz4_lit_loop):
     cmp     x2, #32
     b.lo    L(lz4_lit_tail)
 L(lz4_lit_blk):
