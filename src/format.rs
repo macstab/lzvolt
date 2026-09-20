@@ -2545,6 +2545,102 @@ mod tests {
         );
     }
 
+    /// Blocks that carry no literals at all, which is most of them.
+    ///
+    /// The fast path takes the offset and the match length's extension byte
+    /// out of the same word as the token when the literal run is empty, so
+    /// none of it is exercised by a test whose blocks all carry literals --
+    /// and the one above sets its literal count from the offset, so it never
+    /// reaches zero. liblz4 writes these constantly (88% of a records value),
+    /// but the interop test needs the library linked and there is no x86-64
+    /// build of it on an Apple machine, so without this the path that changed
+    /// would be checked on one architecture only.
+    #[test]
+    fn the_kernel_reads_blocks_with_no_literals() {
+        let mut failed = Vec::new();
+        let (mut decided, mut refused) = (0usize, 0usize);
+
+        for offset in [1usize, 2, 7, 15, 16, 17, 31, 32, 33, 64, 255, 256, 1000] {
+            for mat in [4usize, 5, 14, 18, 19, 20, 31, 32, 33, 66, 200, 268, 269, 270, 271, 600] {
+                let seed: Vec<u8> = (0..offset.max(16) + 8)
+                    .map(|i| (i as u8).wrapping_mul(31).wrapping_add(11))
+                    .collect();
+                let tail: Vec<u8> = (0..12u8).map(|i| i ^ 0x3C).collect();
+
+                // The first block seeds the window and takes the shortest
+                // match there is; the three after it carry no literals at all,
+                // which is the path this exercises.
+                let mut block = Vec::new();
+                let mut want = Vec::new();
+                push_token(&mut block, seed.len(), 0);
+                block.extend_from_slice(&seed);
+                block.extend_from_slice(&(offset as u16).to_le_bytes());
+                want.extend_from_slice(&seed);
+                for _ in 0..4 {
+                    want.push(want[want.len() - offset]);
+                }
+
+                for _ in 0..3 {
+                    push_token(&mut block, 0, mat - 4);
+                    block.extend_from_slice(&(offset as u16).to_le_bytes());
+                    push_extension(&mut block, mat - 4);
+                    for _ in 0..mat {
+                        want.push(want[want.len() - offset]);
+                    }
+                }
+
+                // The stream ends in a literal run, as LZ4 requires.
+                push_token(&mut block, tail.len(), 0);
+                block.extend_from_slice(&tail);
+                want.extend_from_slice(&tail);
+
+                let n = want.len();
+                for &body in keva_asm::unpack::Lz4Body::all() {
+                    let mut out = vec![0u8; n + keva_asm::unpack::UNPACK_SLACK];
+                    if !keva_asm::unpack::unpack_lz4_into_slice_on(body, &block, &mut out, n) {
+                        refused += 1;
+                        continue; // a refusal is the caller's fallback
+                    }
+                    decided += 1;
+                    if out[..n] != want[..] {
+                        let at = (0..n).find(|&i| out[i] != want[i]).unwrap();
+                        failed.push((body, offset, mat, at));
+                    }
+                }
+            }
+        }
+
+        assert!(failed.is_empty(), "a block with no literals decoded wrong: {failed:?}");
+        // A refusal is a legitimate answer -- the caller falls back -- but it
+        // is also how a broken fast path hides: it mis-frames the stream, the
+        // next block fails a guard, and a test that only compares decoded
+        // bytes stays green. Every one of these blocks is well formed and the
+        // kernel decodes all of them today, so anything less is a regression.
+        assert_eq!(
+            refused, 0,
+            "the kernel refused {refused} of {} well-formed blocks",
+            decided + refused
+        );
+    }
+
+    /// The token itself, with the literal length's extension if it needs one.
+    fn push_token(block: &mut Vec<u8>, lit: usize, mat_nibble: usize) {
+        block.push(((lit.min(15) as u8) << 4) | mat_nibble.min(15) as u8);
+        push_extension(block, lit);
+    }
+
+    /// The bytes that follow a saturated nibble.
+    fn push_extension(block: &mut Vec<u8>, n: usize) {
+        if n >= 15 {
+            let mut rest = n - 15;
+            while rest >= 255 {
+                block.push(255);
+                rest -= 255;
+            }
+            block.push(rest as u8);
+        }
+    }
+
     /// A match that reaches back less far than it is long, at every offset.
     ///
     /// This is the one shape the all-literal test above cannot reach, and the

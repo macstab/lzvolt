@@ -1510,3 +1510,53 @@ varied_64k) und die Literalkette mit ihr steigt.
 
 Derselbe Handel wie am 18.9., diesmal vorher ausgerechnet statt hinterher
 gemessen. Das ist der Punkt, an dem ein Zensus eine Messung ersetzt.
+
+## 2026-09-20 — x86 bekommt den breiten Token-Load, und ein Test, der vorher nichts geprueft hat
+
+Der Packer laeuft auf x86, die Decoder haben von den vier Gewinnen des Tages
+keinen. Portiert ist zunaechst nur einer -- der breite Token-Load, auf aarch64
+zwischen +22% und +52% wert -- und zwar allein, weil jede Antwort auf x86 eine
+gemietete Maschine kostet: zwei Aenderungen in einer Runde waeren bei einem
+schlechten Ergebnis nicht auseinanderzuhalten.
+
+Die x86-Stelle ist dieselbe: `movzwl (%rsi,%r10,1), %ecx` laedt den Offset an
+einer Adresse, die aus dem Token kommt, also Token laden, schieben, Offset
+laden. `mov (%r14), %eax` statt `movzbl` bringt Token, Offset und
+Laengenbyte in einem.
+
+### Der Test, der grün war und nichts geprueft hat
+
+Geschwindigkeit braucht die Cloud, Korrektheit nicht -- beide Ziele bauen und
+testen hier. Nur: der vorhandene Ueberlapp-Test setzt seine Literalzahl aus dem
+Offset und erreicht damit nie null, also war der neue Pfad ungedeckt. Der neu
+geschriebene Test war es beim ersten Versuch ebenfalls:
+
+    DIAG entschieden=0 abgelehnt=208
+
+Null von 208 handgebauten Bloecken wurden ueberhaupt dekodiert -- der erste
+Token trug ein Match-Nibble, aber ich hatte keinen Offset dahintergeschrieben,
+und `continue` bei Ablehnung hat das verschluckt. Ein gruener Test, der nichts
+ausfuehrt.
+
+Zwei Dinge haben das repariert. Der Block ist jetzt gueltig aufgebaut (Seed-Lauf
+mit Match, dann drei Bloecke ohne Literale, dann ein Literalschwanz), und die
+Zusicherung ist `refused == 0` statt `decided > refused`: eine Ablehnung ist
+die legitime Antwort des Kernels, aber sie ist auch, wie ein kaputter
+Schnellpfad sich versteckt -- er verschiebt den Rahmen, der naechste Block
+faellt durch eine Wache, und ein Test, der nur Bytes vergleicht, bleibt gruen.
+
+### Gegengeprueft durch Mutation
+
+| Mutation | aarch64 | x86 |
+|---|---|---|
+| Cursor-Schritt 3 -> 2 | FAILED | FAILED |
+| Offset aus Bit 8 -> 9 | FAILED | -- |
+| Erweiterungsbyte Bit 24 -> 25 | -- | FAILED |
+
+Erst damit ist belegt, dass der Test den Pfad ausfuehrt. Ohne diese Probe haette
+ich einen ungetesteten Assemblerpfad auf eine Architektur geschoben, die ich
+nicht messen kann.
+
+Stand: 106 Tests auf aarch64, 102 auf x86, 5760 Soak-Faelle, clippy still.
+Ungemessen bleibt die Geschwindigkeit auf x86 -- dafuer braucht es eine Runde
+auf Xeon und EPYC.
