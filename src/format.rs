@@ -2597,8 +2597,8 @@ mod tests {
                 block.extend_from_slice(&tail);
 
                 let mut want = seed.clone();
-                for i in 0..run {
-                    want.push(want[want.len() - offset + if i == 0 { 0 } else { 0 }]);
+                for _ in 0..run {
+                    want.push(want[want.len() - offset]);
                 }
                 want.extend_from_slice(&tail);
                 let n = want.len();
