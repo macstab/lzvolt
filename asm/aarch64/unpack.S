@@ -414,8 +414,33 @@ L(fast):
     cmp     x24, x28
     b.hs    L(tail)
 
+#ifdef KEVA_LZ4
+    /*
+     * Four bytes where one was read, because three of them are free.
+     *
+     * A block with no literals puts its offset at the two bytes after the
+     * token and its match length's extension at the byte after those, so one
+     * word at the cursor carries all three. What that replaces is two further
+     * L1 accesses, and neither is cheap where it sits: the offset's address is
+     * `token -> shift -> add`, so it lands three cycles behind the token, and
+     * the extension byte lands three behind *that* -- on the chain the output
+     * cursor rides, which is what the next block waits for.
+     *
+     * The census says how often it applies. Literal runs are empty in 88% of
+     * records_64k's blocks, 56% of varied_4k's and a third of the rest, and of
+     * records_64k's 75% also saturate the match nibble -- so two thirds of its
+     * blocks take both the offset and the length from this one load, and none
+     * of them writes the sixteen literal bytes that are thrown away again.
+     *
+     * The load itself costs nothing: same address, same cache line, and the
+     * seventeen-byte reach the zone already guarantees.
+     */
+    ldr     w4, [x19, x23]              // token, and what follows it
+    ubfx    w5, w4, #LIT_SHIFT, #4      // literal nibble, now that w4 is wider
+#else
     ldrb    w4, [x19, x23]              // token
     lsr     w5, w4, #LIT_SHIFT                  // literal nibble
+#endif
 #if MAT_SHIFT
     ubfx    w26, w4, #MAT_SHIFT, #MAT_BITS          // match nibble, above the repeat bit
 #else
@@ -431,6 +456,37 @@ L(fast):
      * already answered. The long match is handled below instead, inside the
      * loop, which is what liblz4 does and why it carries three block bodies.
      */
+#ifdef KEVA_LZ4
+    /*
+     * No literals: the whole block is already in w4.
+     *
+     * Falls through on the common case rather than branching to it -- this is
+     * 88% of records_64k, and the ordering is what the predictor sees.
+     */
+    cbnz    w5, L(fast_lit)
+    mov     x16, x24                    // nothing written before the match
+    ubfx    w11, w4, #8, #16            // the offset, without a second load
+    cmp     w26, #MAT_MAX
+    b.eq    L(fast_zlong)
+    add     x23, x23, #3                // token and offset, a constant step
+    add     x14, x26, #4
+    add     x12, x16, x14
+    cbz     w11, L(fail)
+    cmp     x11, x16
+    b.hi    L(fail)
+    b       L(fast_copy)
+L(fast_zlong):
+    /* And the extension byte, from the same word. The chain it used to sit on
+     * ended at the output cursor, so this is where the block's length stops
+     * waiting for a load. */
+    ubfx    w8, w4, #24, #8
+    add     x23, x23, #4
+    mov     x14, #MAT_MAX
+    cmp     w8, #255
+    b.ne    L(fast_lendone)
+    b       L(fast_lenbyte)            // 270 bytes or more: the chain continues
+L(fast_lit):
+#endif
     /* ---- the common block -------------------------------------------- */
     add     x7, x23, #1                 // literals start here
     cmp     w5, #LIT_MAX

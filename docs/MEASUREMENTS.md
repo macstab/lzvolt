@@ -1350,3 +1350,70 @@ Rolle spielt. In denselben Laeufen lief liblz4 auf genau diesen zwei Zellen um
 nicht Mechanik -- der Kernel hat 96 auf 160 Byte Rahmen gewechselt.
 
 x86_64 hat denselben Rand und ist ungemessen.
+
+## 2026-09-20 — Vier Bytes, wo eines gelesen wurde
+
+Die Frage war, ob die knappen Zellen im Fremdformat noch zu holen sind. In
+Zyklen je Block gerechnet -- der einzigen Einheit, in der Formen vergleichbar
+sind -- war der Rueckstand winzig:
+
+| | B/Block | keva | liblz4 | flex | fehlend |
+|---|---|---|---|---|---|
+| records_4k | 36.9 | 9.80 | 9.73 | 11.22 | +0.07 |
+| records_64k | 32.5 | 9.60 | 9.47 | 9.03 | +0.56 |
+| varied_4k | 17.5 | 8.78 | 8.40 | 8.46 | +0.37 |
+| varied_512 | 18.9 | 7.21 | 7.19 | 7.98 | +0.02 |
+
+Zwei davon lagen unter dem Rauschboden, also gleichauf. Gesucht waren 0.37 und
+0.56 Zyklen.
+
+### Die Aenderung
+
+Der Loop las das Token mit `ldrb` -- ein Byte. Ein `ldr w4` an derselben
+Adresse kostet dasselbe und bringt, solange der Literallauf leer ist, auch den
+Offset (Bits 8..23) und das Laengenbyte des Matches (Bits 24..31). Was das
+ersetzt, sind zwei weitere abhaengige L1-Zugriffe: die Offsetadresse ist
+`Token -> shift -> add`, liegt also drei Zyklen hinter dem Token, und das
+Laengenbyte nochmal drei dahinter -- auf der Kette, die den Ausgabecursor
+speist, auf den der naechste Block wartet. Dazu entfaellt fuer diese Bloecke
+die unbedingte 16-Byte-Literalkopie, die ohnehin ueberschrieben wurde.
+
+Der Zensus sagt, wie oft: Literallauf leer in 88% von records_64k, 56% von
+varied_4k, einem Drittel des Rests. Bei records_64k saettigen davon 75% auch
+das Match-Nibble, also nimmt zwei Dritteln seiner Bloecke beides aus diesem
+einen Load.
+
+Der befuerchtete Haken -- ein Muenzwurf-Sprung auf "Literallauf leer" bei
+varied -- ist nicht eingetreten. Der haeufige Fall faellt durch statt zu
+springen, und 56/44 reicht dem Praediktor offenbar.
+
+### Gemessen, Mediane aus 3 gepaarten Runden, netto gegen die Kontrollen
+
+| fremdes LZ4 | alt | neu | netto | jetzt vs liblz4 |
+|---|---|---|---|---|
+| varied_64k | 5.54 | 7.59 | **+36.7%** | +52.7% |
+| varied_4k | 6.54 | 8.63 | **+31.5%** | +26.3% |
+| records_64k | 11.08 | 13.56 | **+22.2%** | +20.9% |
+| varied_512 | 8.62 | 9.16 | +5.7% | +6.0% |
+| records_4k | 12.32 | 12.83 | +3.8% | +2.9% |
+| noise_64k | 56.63 | 57.74 | +3.7% | +3.8% |
+| noise_4k | 64.35 | 64.35 | +0.3% | -0.3% |
+| noise_512 | 49.29 | 48.19 | -1.3% | +3.5% |
+| records_512 | 11.48 | 11.11 | -3.2% | +1.0% |
+
+**17 von 18 Zellen** im Fremdformat, gegen 10 vorher. Die eine Ausnahme ist
+noise_4k mit -0.3%, also Paritaet. Das eigene Format steht unveraendert bei 21
+von 22 -- die Aenderung liegt hinter `#ifdef KEVA_LZ4` und alle elf Zeilen
+bewegen sich zwischen -2.3% und +1.2% netto.
+
+Korrektheit: 105 Tests mit `liblz4`, die 5760 Faelle des Soaks, und alle neun
+Benchmark-Formen byte-fuer-byte gegen das, was liblz4 gepackt hat.
+
+### Was das ueber den Rest des Tages sagt
+
+Elf Ideen, neun davon null oder schlechter. Die drei, die getragen haben, haben
+dasselbe getan: **Arbeit entfernt, nicht Instruktionen.** memcpy nahm eine
+Schleife weg (+34%), die Polsterung nahm den geprueften Pfad weg (+8%), und
+diese hier nimmt zwei abhaengige Loads und einen Vektor-Store weg (+37%). Alles,
+was stattdessen die Kette umbauen oder Befehle sparen wollte, hat zwischen 0%
+und -31% gekostet.
