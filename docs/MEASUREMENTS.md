@@ -1476,3 +1476,37 @@ Position, also `ubfx` auf die Laenge, Schieben, Maskieren, und der Offset
 landet acht Zyklen hinter dem Token statt vier. Genau die vier Zyklen sind der
 ganze Gewinn. Die Verallgemeinerung wuerde das wegwerfen, was sie
 verallgemeinert.
+
+## 2026-09-20 — Das Repeat-Bit zurueck in den even-Split? Gezaehlt, nicht gebaut
+
+`records_512` war einmal 180 B und ist heute 195. Die fuenfzehn Bytes sind
+gegangen, als das Repeat-Bit aus dem even-Split in den wide-Split gezogen ist,
+weil es dort 22.9% Dekodierzeit kostete. Die Frage war, ob der Null-Literal-Pfad
+von heute das aufwiegt.
+
+Er kann es nicht, und das ist eine Mengenbetrachtung: der neue Pfad
+beschleunigt Bloecke mit Literallauf **null**, der Preis von 3/4/1 trifft
+Bloecke mit Literallauf **ab sieben**. Disjunkt.
+
+Der Zensus ueber unsere eigenen gepackten Werte (`examples/even_census.rs`):
+
+| | Bloecke | Kette heute | Kette dann | neu | Anteil | Repeats | Groesse |
+|---|---|---|---|---|---|---|---|
+| records_192 | 4 | 2 | 2 | 0 | 0% | 1 | -2 B (-1.5%) |
+| records_512 | 12 | 2 | 5 | 3 | 25% | 9 | **-15 B (-7.7%)** |
+| varied_512 | 19 | 6 | 12 | 6 | 32% | 11 | -16 B (-4.5%) |
+| varied_4k | 186 | 50 | 113 | 63 | 34% | 35 | -7 B (-0.3%) |
+| varied_64k | 3054 | 738 | 1701 | 963 | 32% | 171 | **+621 B (+1.9%)** |
+
+Die 195 -> 180 stimmen auf das Byte mit dem Zensus vom 18.9. ueberein, was die
+Zaehlung validiert.
+
+**Zwei Gruende, es nicht zu bauen.** Ein Drittel aller Bloecke wuerde neu aus
+der Schleife heraus in die Literalkette springen -- genau der Mechanismus, der
+-22.9% und -21.5% gemessen hat. Und die Groesse traegt es nicht: der Gewinn
+existiert nur bei 512 Bytes, faellt bei 4 KiB auf 0.3% und dreht sich bei
+64 KiB um, weil die Wiederholungsrate mit der Groesse faellt (5.6% bei
+varied_64k) und die Literalkette mit ihr steigt.
+
+Derselbe Handel wie am 18.9., diesmal vorher ausgerechnet statt hinterher
+gemessen. Das ist der Punkt, an dem ein Zensus eine Messung ersetzt.
