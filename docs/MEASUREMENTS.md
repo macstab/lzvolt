@@ -1231,3 +1231,63 @@ fuer Byte.
 Die Lehre ist nicht "mehr Tests". Es ist, dass eine `#ifdef`-Variante ein
 zweites Programm ist, und dass dieses zweite Programm hier nur an einem
 Benchmark haengt, der Durchsatz misst und keine Korrektheit.
+
+## 2026-09-20 — Das Laengenbyte gratis, und die zehnte Widerlegung
+
+Das Profil mit feineren Labels, `varied_4k`, 6728 Samples:
+
+    .Ll_fast        22.1%   die zwei Zonen-Vergleiche, also der Ruecksprung
+    .Ll_px_guard    20.3%   die fuenf Befehle direkt hinter b.eq L(fast_long)
+    .Ll_fast_offset 12.9%   ldrh Offset und Cursor
+    .Ll_px_token    12.3%   Token laden, schieben, Nibbles
+    .Ll_fast_copy   11.1%   der feste Move
+
+`px_guard` sind fuenf billige ALU-Befehle, 12% der Instruktionen und 20% der
+Zeit, und sie liegen im Landepunkt des Sprungs, den der Zensus mit 34%
+Richtungswechsel als unvorhersagbar ausgewiesen hat.
+
+`varied_512` zeigt daneben 20.5% auf dem geprueften Pfad (`slow_lit_ready` 8.0,
+`slow_mat_ready` 4.5, `slow_lit_done` 3.7, `tail` 2.9, `slow` 1.4) -- das ist
+der Eingabe-Rand von siebzehn Bytes auf einem Wert, der in rund 27 Bloecke
+zerfaellt. Unangetastet.
+
+### Die Idee
+
+Das Byte, das einen gesaettigten Match verlaengert, liegt zwei hinter dem
+Offset. Ein 32-Bit-Load an derselben Adresse traegt beide und kostet dasselbe
+wie der 16-Bit-Load, den er ersetzt -- kein zweiter Load, keine zweite Adresse,
+und genau darin unterscheidet er sich von dem Versuch, der im Quelltext mit
+-18% dokumentiert ist. Die Laenge wird dann mit `csel` gebildet und der Sprung
+auf "passt in den festen Move" ersetzt den auf "Nibble gesaettigt": 3% statt
+25%, und vorhersagbar.
+
+### Zweimal gemessen, zweimal dasselbe
+
+Beim ersten Mal fiel `b.hi L(fast_lenbig)` in sein eigenes Ziel, also lief
+jeder Block durch die Blockschleife -- varied -26%. Das Label aus dem Fallweg
+genommen und noch einmal, Basis drei Laeufe, neu zwei:
+
+| fremdes LZ4 | netto |
+|---|---|
+| varied_512 | **-30.8%** |
+| varied_64k | -22.3% |
+| varied_4k | -18.7% |
+| records_64k | -9.8% |
+| records_4k | -5.7% |
+| noise_512 | +2.2% |
+
+Der Grund steht im Diff: `cinc x23, x23, eq`. Vorher hing der Eingabecursor des
+naechsten Blocks nur an der Literalzahl -- `ldrb` -> `lsr` -> `add x8` ->
+`add x23, #2`. Jetzt haengt er zusaetzlich am Match-Nibble, an dessen Vergleich
+und am `cinc`, also zwei Zyklen mehr auf der einen Kette, an der diese Schleife
+nachweislich gebunden ist. Der eingesparte Mispredict ist 3.4 Zyklen auf einem
+Drittel der Bloecke, gut ein Zyklus im Mittel; zwei Zyklen auf allen Bloecken
+sind teurer.
+
+Eigenes Format unberuehrt, alle elf Zeilen zwischen -1.1% und +1.6% netto --
+die Aenderung steht hinter `#ifdef KEVA_LZ4`.
+
+Damit ist die zehnte Idee an dieser Stelle gescheitert, und die dritte in
+Folge, die die Kette verlaengert hat, ohne dass es beim Schreiben auffiel. Die
+Regel ist inzwischen scharf genug, um sie vorher anzuwenden: **was `x23` fuer
+den naechsten Block berechnet, darf nichts Neues beruehren.**
