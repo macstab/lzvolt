@@ -1148,3 +1148,39 @@ versucht, die Kette zu verkuerzen oder Instruktionen zu sparen. Was in diesem
 Kernel je gewirkt hat, war etwas anderes: mehr Bytes je Block (wide split,
 lazy matching, je ~19%) oder weniger Arbeit ueberhaupt (memcpy, +34%). Beim
 fremden Format ist die Blockgroesse nicht unsere Entscheidung.
+
+## 2026-09-20 — Der kurze gesaettigte Match: gebaut, gemessen, null
+
+Vorgerechnet war es null und gemessen ist es null, aber gerechnet hatte ich mit
+Instruktionen, und die sind in diesem Loop nicht die Waehrung -- also gebaut.
+
+Das Nibble saettigt bei neunzehn Bytes, der feste Move schreibt zweiunddreissig.
+Jeder Match dazwischen lief durch Laengenbyte, Waechterkette und Blockschleife,
+um dieselben zweiunddreissig Bytes geschrieben zu bekommen, die `L(fast_copy)`
+in einem Speicherpaar erledigt. Auf varied ist das ein Fuenftel aller Bloecke.
+Zwei Instruktionen dazu (`cmp x14,#COPY_MAX` / `b.ls L(fast_copy)`), etwa fuenf
+gespart, nur unter KEVA_LZ4 -- der wide-Split schreibt achtundvierzig, und die
+Marge, die `L(fast_litlong)` prueft, sind zweiunddreissig.
+
+Mediane aus drei gegen eine Basis aus sechs Laeufen mit unveraendertem Code:
+
+| fremdes LZ4 | netto | | eigenes Format | netto |
+|---|---|---|---|---|
+| varied_4k | +0.6% | | records_4k | -0.4% |
+| varied_512 | -0.8% | | records_64k | +0.4% |
+| records_4k | -0.8% | | varied_512 | -3.2% |
+| records_64k | -1.3% | | noise_512 | +3.1% |
+
+Zurueckgenommen. Die neunte Idee an dieser Stelle, und die erste, deren
+Ergebnis vorher ausgerechnet war -- fuenf Instruktionen auf einem Fuenftel der
+Bloecke sind 0.5% der Instruktionen, und eine gesparte Instruktion kauft hier
+keinen Zyklus. Das steht seit dem `ccmp`-Versuch im Kopf von unpack.S und gilt
+weiter.
+
+### Was der Lauf nebenbei geeicht hat
+
+`own_format/varied_512` misst -3.2%, obwohl die Aenderung hinter `#ifdef
+KEVA_LZ4` steht und unsere Bodies sie nicht sehen. Ein Median aus drei traegt
+auf dieser Maschine also rund 3% Rauschen, und alles darunter ist keine
+Messung. Die Kontrollen in denselben Laeufen lagen bei +-0.5%, weshalb die
+Netto-Spalte und nicht die Delta-Spalte zaehlt.
