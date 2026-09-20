@@ -414,7 +414,7 @@ L(fast):
     cmp     x24, x28
     b.hs    L(tail)
 
-#ifdef KEVA_LZ4
+#ifndef KEVA_WIDE
     /*
      * Four bytes where one was read, because three of them are free.
      *
@@ -434,6 +434,11 @@ L(fast):
      *
      * The load itself costs nothing: same address, same cache line, and the
      * seventeen-byte reach the zone already guarantees.
+     *
+     * Both bodies that divide the token four and four, ours and LZ4's. The
+     * wide split puts its literal count in two bits and a repeat flag in the
+     * lowest, so its offset is not always where this would look for it, and it
+     * already avoids that load another way.
      */
     ldr     w4, [x19, x23]              // token, and what follows it
     ubfx    w5, w4, #LIT_SHIFT, #4      // literal nibble, now that w4 is wider
@@ -456,12 +461,21 @@ L(fast):
      * already answered. The long match is handled below instead, inside the
      * loop, which is what liblz4 does and why it carries three block bodies.
      */
-#ifdef KEVA_LZ4
+#ifndef KEVA_WIDE
     /*
      * No literals: the whole block is already in w4.
      *
-     * Falls through on the common case rather than branching to it -- this is
-     * 88% of records_64k, and the ordering is what the predictor sees.
+     * Falls through rather than being branched to, and that ordering is worth
+     * more than it looks. Empty literal runs are 88% of records_64k's blocks
+     * in LZ4's format and 56% of varied's, so the fall-through is the common
+     * case for both -- but records in our own format carries one to three
+     * literals in 56% of its blocks and none in 32%, and there the ordering is
+     * backwards.
+     *
+     * Turning it around was built and measured: records_192 recovered from
+     * -3.0% to -2.1% and the foreign side collapsed, records_64k -7.9%,
+     * varied_512 -11.8%, noise_512 -11.6%. One arrangement cannot serve both
+     * distributions, and this is the one the numbers pick.
      */
     cbnz    w5, L(fast_lit)
     mov     x16, x24                    // nothing written before the match

@@ -1417,3 +1417,62 @@ Schleife weg (+34%), die Polsterung nahm den geprueften Pfad weg (+8%), und
 diese hier nimmt zwei abhaengige Loads und einen Vektor-Store weg (+37%). Alles,
 was stattdessen die Kette umbauen oder Befehle sparen wollte, hat zwischen 0%
 und -31% gekostet.
+
+## 2026-09-20 — Derselbe Trick im even-Split
+
+Nach dem LZ4-Body las unser eigenes Format `varied_4k` mit 8.28 GiB/s, waehrend
+derselbe Kernel einen *fremden* LZ4-Block derselben Daten mit 8.63 las. Der
+Grund war nur die Wache: `varied` landet bei uns im even-Split, der dieselbe
+Token-Aufteilung hat wie LZ4 und den Trick nicht bekommen hatte. `#ifdef
+KEVA_LZ4` wurde zu `#ifndef KEVA_WIDE`.
+
+Mediane aus drei gepaarten Runden, netto gegen die Kontrollen:
+
+| eigenes Format | alt | neu | netto | jetzt vs liblz4 |
+|---|---|---|---|---|
+| varied_64k | 8.10 | 9.56 | **+18.3%** | +92.8% |
+| varied_4k | 8.28 | 9.64 | **+16.4%** | +41.6% |
+| noise_4k | 71.53 | 72.22 | +1.1% | +10.9% |
+| records_32 | 6.12 | 6.15 | +0.6% | +87.0% |
+| records_64k | 15.64 | 15.61 | -0.1% | +39.1% |
+| varied_512 | 11.17 | 11.21 | -0.2% | +29.8% |
+| records_4k | 15.96 | 15.89 | -0.3% | +28.0% |
+| records_512 | 13.30 | 13.09 | **-1.5%** | +18.6% |
+| records_192 | 9.62 | 9.32 | **-3.0%** | +43.7% |
+
+22 von 22 Zellen bleiben gewonnen.
+
+### Die zwei Minus sind echt, und sie haben einen Grund
+
+Ueber je fuenf gepaarte Laeufe bestaetigt, Kontrolle flach bei +0.2%:
+records_192 -3.0%, records_512 -1.5%.
+
+Der Zensus sagt warum. Der schnelle Pfad faellt in den Sonderfall hinein statt
+zu ihm zu springen, weil ein leerer Literallauf 88% von records_64k in LZ4s
+Format ausmacht und 56% von varied. In *unserem* Format traegt records aber in
+56% seiner Bloecke einen bis drei Literale und nur in 32% keinen -- dort ist
+die Reihenfolge verkehrt herum.
+
+### Umgedreht gebaut, und es ist schlimmer
+
+Den Sonderfall aus dem Fallweg genommen und per Sprung erreicht:
+
+| | netto |
+|---|---|
+| eigenes records_192 | -3.0% -> -2.1% |
+| fremdes records_64k | **-7.9%** |
+| fremdes varied_512 | **-11.8%** |
+| fremdes noise_512 | **-11.6%** |
+
+Eine Anordnung kann nicht beiden Verteilungen dienen. Die Zahlen waehlen die,
+die steht.
+
+### Und der Grund, warum es nicht feiner geht
+
+Naheliegend waere, den Sonderfall auf Literallaeufe bis drei auszuweiten --
+das deckt 88% von records und 76% von varied, beide als Durchfall. Er ist
+durchgerechnet und nicht gebaut: der Offset saesse dann an einer variablen
+Position, also `ubfx` auf die Laenge, Schieben, Maskieren, und der Offset
+landet acht Zyklen hinter dem Token statt vier. Genau die vier Zyklen sind der
+ganze Gewinn. Die Verallgemeinerung wuerde das wegwerfen, was sie
+verallgemeinert.
