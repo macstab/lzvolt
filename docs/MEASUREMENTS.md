@@ -1560,3 +1560,45 @@ nicht messen kann.
 Stand: 106 Tests auf aarch64, 102 auf x86, 5760 Soak-Faelle, clippy still.
 Ungemessen bleibt die Geschwindigkeit auf x86 -- dafuer braucht es eine Runde
 auf Xeon und EPYC.
+
+## 2026-09-20 — liblz4 fuer x86 selbst gebaut, und was es sofort gefunden hat
+
+Der Soak mit 5760 von liblz4 gepackten Werten lief nur auf aarch64, weil
+Homebrew hier kein x86-liblz4 hat. Der x86-Kernel war damit durch etwa
+zweihundert handgebaute Bloecke gedeckt und durch nichts sonst. lz4 hat keine
+Abhaengigkeiten und baut in vier Sekunden:
+
+    clang -arch x86_64 -O2 -c lz4.c lz4hc.c lz4frame.c xxhash.c
+    ar rcs liblz4.a *.o
+
+Unter Rosetta gemessen waere sinnlos; ausgefuehrt ist es exakt derselbe
+Assembler, und Korrektheit ist genau das, was Rosetta nicht veraendert.
+
+Erster Lauf gegen den frisch portierten x86-Kernel:
+
+    5760 Faelle, 9 falsch
+
+Alle neun **REFUSED**, keiner WRONG -- der Kernel lehnt ab, der portable
+Decoder uebernimmt, die Ausgabe stimmt. Deshalb blieb jeder Test gruen. Gegen
+`HEAD~1` gemessen: 0 falsch. Also von mir eingebaut, in derselben Stunde.
+
+### Halbiert statt geraten
+
+Die Abkuerzung fuer literallose Bloecke deaktiviert, den breiten Load behalten:
+**immer noch neun**. Damit war es nicht die Abkuerzung, sondern der Load selbst.
+
+`L(dst_edge)` ist der eine Ausgang aus dem Schleifenkopf, der das Token in
+`%eax` *weiterreicht*, statt es neu zu laden -- `L(src_edge)` und
+`L(fast_litend)` machen beide ihr eigenes `movzbl`, und im Quelltext steht
+sogar, warum. Mit einem Dword-Load trug dieser Pfad drei Bytes des naechsten
+Blocks in `L(slow)`, das sie als Literalzahl schob.
+
+Ein `movzbl %al, %eax` auf einem Pfad, der einmal je Wert laeuft: 0 von 5760.
+
+### Was das ueber den Tag sagt
+
+Zwei Fehler heute, beide derselben Art: ein `#ifdef`-Zweig ist ein zweites
+Programm, und beide Male hat das zweite Programm eine Annahme gebrochen, die
+im ersten stillschweigend galt. Der Absturz heute frueh (Tabellen vor dem
+`ret`) und dieser hier. Beide gefunden, nicht weil ein Test sie vorhersah,
+sondern weil eine *unabhaengige* Referenz Byte fuer Byte verglichen hat.

@@ -1036,6 +1036,24 @@ L(src_edge):
 L(dst_edge):
     cmp     %r12, %rdi
     jae     L(done)
+#ifndef KEVA_WIDE
+    /*
+     * The token, narrowed again.
+     *
+     * The loop head reads a dword so that a block with no literals gets its
+     * offset and length byte for free, and this is the one exit that carries
+     * `eax` onward rather than reloading it -- L(src_edge) and L(fast_litend)
+     * both do their own `movzbl`. Without this the checked path shifts three
+     * bytes of the next block as though they were the literal count, and
+     * mis-frames the rest of the value.
+     *
+     * Nine of 5760 liblz4-packed values took the portable decoder because of
+     * it, and every test in this crate stayed green: a mis-framed stream fails
+     * a guard, the kernel declines, and the caller falls back to an answer
+     * that is still correct.
+     */
+    movzbl  %al, %eax
+#endif
     jmp     L(slow)
 
 /*
