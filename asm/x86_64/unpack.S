@@ -413,24 +413,24 @@ L(block):
      */
     cmp     %r15, %r14
     ja      L(src_edge)                     /* too near the end of the stream */
+    movzbl  (%r14), %eax                    /* token */
 #ifndef KEVA_WIDE
     /*
-     * Four bytes where one was read, because three of them are free.
+     * And the three bytes after it, in a register that nothing waits on.
      *
-     * A block with no literals puts its offset at the two bytes after the
-     * token and its match length's extension at the byte after those, so one
-     * dword at the cursor carries all three. What that replaces is two further
-     * L1 accesses, and neither is cheap where it sits: the offset's address is
-     * the token shifted, so it lands a load behind it, and the extension byte
-     * lands a load behind that -- on the chain the output cursor rides.
+     * A block with no literals puts its offset at the two bytes past the token
+     * and its match length's extension at the byte past those, so one dword at
+     * the same address carries all three and saves two dependent L1 accesses:
+     * the offset's address is the token shifted, and the extension byte's is a
+     * load behind that.
      *
-     * Empty literal runs are 88% of records_64k's blocks in LZ4's format, 56%
-     * of varied's and a third of the rest. On aarch64 this measured between
-     * +22% and +52% on foreign blocks and +16% to +18% on our own varied.
+     * Loading the dword *instead* of the byte was measured on a Xeon and cost
+     * varied_512 sixteen percent: it forced the literal nibble to be masked
+     * again, and `perf annotate` put 3.49% of the kernel on that one `and`.
+     * Two loads from one cache line are cheaper than one load and a mask,
+     * because this one is on nobody's chain.
      */
-    mov     (%r14), %eax                    /* token, and what follows it */
-#else
-    movzbl  (%r14), %eax                    /* token */
+    mov     (%r14), %edx                    /* offset and length byte, for later */
 #endif
 
     /* ---- fast path -------------------------------------------------- */
@@ -453,9 +453,6 @@ L(block):
 #endif
     mov     %eax, %r10d
     shr     $LIT_SHIFT, %r10d               /* short literal */
-#ifndef KEVA_WIDE
-    and     $0xF, %r10d                     /* the dword carries more than the token */
-#endif
     mov     %eax, %r11d
 #if MAT_SHIFT
     shr     $MAT_SHIFT, %r11d
@@ -476,14 +473,13 @@ L(block):
     test    %r10d, %r10d
     jnz     L(fast_lit)
     mov     %rdi, %r8                       /* nothing written before the match */
-    mov     %eax, %edx
     shr     $8, %edx
     movzwl  %dx, %ecx                       /* the offset, without a second load */
-    shr     $24, %eax                       /* and the extension, if there is one */
-    mov     %r8, %rdx
-    sub     %rbx, %rdx                      /* available */
-    lea     -1(%rcx), %r10
-    cmp     %rdx, %r10
+    shr     $16, %edx                       /* and the extension, if there is one */
+    mov     %r8, %r10
+    sub     %rbx, %r10                      /* available */
+    lea     -1(%rcx), %rax
+    cmp     %r10, %rax
     jae     L(fail)                          /* zero, or reaching before the output */
     lea     MIN_MATCH(%r11), %r9
     cmp     $MAT_MAX, %r11d
@@ -494,8 +490,8 @@ L(fast_zext):
     /* The extension byte came with the token. This is where the block's length
      * stops waiting for a load of its own. */
     add     $4, %r14
-    add     %rax, %r9
-    cmp     $255, %eax
+    add     %rdx, %r9
+    cmp     $255, %edx
     jne     L(fast_matgo)
     jmp     L(fast_matchain)                 /* 270 bytes or more: the chain continues */
 L(fast_lit):
@@ -1036,24 +1032,6 @@ L(src_edge):
 L(dst_edge):
     cmp     %r12, %rdi
     jae     L(done)
-#ifndef KEVA_WIDE
-    /*
-     * The token, narrowed again.
-     *
-     * The loop head reads a dword so that a block with no literals gets its
-     * offset and length byte for free, and this is the one exit that carries
-     * `eax` onward rather than reloading it -- L(src_edge) and L(fast_litend)
-     * both do their own `movzbl`. Without this the checked path shifts three
-     * bytes of the next block as though they were the literal count, and
-     * mis-frames the rest of the value.
-     *
-     * Nine of 5760 liblz4-packed values took the portable decoder because of
-     * it, and every test in this crate stayed green: a mis-framed stream fails
-     * a guard, the kernel declines, and the caller falls back to an answer
-     * that is still correct.
-     */
-    movzbl  %al, %eax
-#endif
     jmp     L(slow)
 
 /*
