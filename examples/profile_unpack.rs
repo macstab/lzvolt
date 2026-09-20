@@ -73,6 +73,14 @@ fn main() {
         "lz4_records_64k" => records(65_536),
         "lz4_varied_4k" => varied(4096),
         "lz4_varied_512" => varied(512),
+        // The two cells a Xeon loses by 29% on foreign blocks, which is the
+        // whole reason this example exists on x86.
+        "lz4_noise_512" => noise(512),
+        "lz4_records_512" => records(512),
+        "lz4_varied_64k" => varied(65_536),
+        "varied_512" => varied(512),
+        "records_512" => records(512),
+        "records_192" => records(192),
         _ => records(4096),
     };
     eprintln!("Profil: {shape}, {} B", data.len());
