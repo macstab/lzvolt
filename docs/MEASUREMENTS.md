@@ -1091,3 +1091,60 @@ Eigenes Format 22 von 22 Zellen. Fremdes LZ4 unveraendert 10 von 18; der
 groesste Rueckstand ist jetzt varied_4k mit -4.4% gegen liblz4.
 
 x86_64 hat dieselbe Schleife und ist ungemessen.
+
+## 2026-09-20 — varied im Fremdformat: der Zensus, und eine widerlegte Idee
+
+Der Auftrag war der Flow von varied_4k und varied_512 im fremden LZ4-Format,
+wo wir -4.4% und -2.6% gegen liblz4 liegen. Ein Zensus ueber den LZ4-Block
+zaehlt, was der Decoder je Block gefragt wird -- und daneben, wie oft die
+Antwort sich gegenueber dem Block davor aendert, denn das ist, was der
+Praediktor sieht:
+
+| | varied_512 | varied_4k | records_4k | records_64k |
+|---|---|---|---|---|
+| Bytes je Block | 18.9 | 17.5 | 36.9 | 32.5 |
+| Literale / Match | 2.6 / 15.3 | 2.0 / 15.5 | 2.2 / 34.7 | 0.2 / 32.3 |
+| Matchnibble gesaettigt | 11.1% | 24.8% | 76.6% | 75.0% |
+| davon Wechsel | 22.2% | 34.2% | 38.7% | 49.2% |
+| Matchlaengen 4-14 / 15-31 | 73% / 27% | 49% / 47% | 25% / 47% | 25% / 47% |
+| Literallaengen = 0 | 33% | 56% | 32% | 88% |
+
+Zwei Dinge, die records nicht hat. varied traegt **17.5 Bytes je Block**, halb
+so viel wie records, und seine Matchlaengen liegen **auf der Schwelle**: die
+Saettigung beginnt bei 19 Bytes, und 49% liegen darunter, 47% darueber. Der
+Sprung `cmp w26,#15 / b.eq fast_long` wechselt bei jedem dritten Block die
+Richtung und ist damit nicht vorhersagbar.
+
+### Die Rechnung, die den Rest erklaert
+
+Der Loop-Kopf sagt, die Schleife laeuft bei 8.7 Zyklen je Block. 17.5 Bytes
+durch 8.7 Zyklen bei 3.5 GHz sind **6.5 GiB/s**, und varied_4k misst 6.48.
+Die Form ist also vollstaendig durch die Token-Kette gebunden, nicht durch
+Arbeit -- liblz4 liegt bei denselben Bloecken auf etwa 8.3 Zyklen.
+
+### Und die Idee, die daraus folgte und nicht stimmt
+
+Die Kette ist `ldrb` (4) -> `lsr` (1) -> `add x8` (1) -> `add x23, #2` (1).
+AArch64 kann Schieben und Addieren in einem Befehl, also `add x8, x7, x4,
+lsr #LIT_SHIFT` statt `lsr` + `add` -- auf dem Papier ein Zyklus von sieben,
+gut 11%.
+
+Gemessen, zwei Laeufe, gegen die Kontrollen:
+
+| | fremdes LZ4 | eigenes Format |
+|---|---|---|
+| records_4k | -5.9% | -6.0% |
+| records_64k | -5.6% | -6.5% |
+| varied_4k | -4.1% | -5.2% |
+| varied_64k | -9.7% | -6.1% |
+
+Die geschobene Addition ist auf M2 nicht ein Zyklus, sondern zwei, und der
+`lsr` musste ohnehin stehenbleiben -- der Vergleich und der Ausgabecursor
+wollen die Zahl. Also eine Instruktion mehr und kein Zyklus weniger.
+Zurueckgenommen.
+
+Damit ist die achte Idee an derselben Stelle gescheitert, und alle acht haben
+versucht, die Kette zu verkuerzen oder Instruktionen zu sparen. Was in diesem
+Kernel je gewirkt hat, war etwas anderes: mehr Bytes je Block (wide split,
+lazy matching, je ~19%) oder weniger Arbeit ueberhaupt (memcpy, +34%). Beim
+fremden Format ist die Blockgroesse nicht unsere Entscheidung.
