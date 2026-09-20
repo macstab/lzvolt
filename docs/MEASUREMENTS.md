@@ -1184,3 +1184,50 @@ KEVA_LZ4` steht und unsere Bodies sie nicht sehen. Ein Median aus drei traegt
 auf dieser Maschine also rund 3% Rauschen, und alles darunter ist keine
 Messung. Die Kontrollen in denselben Laeufen lagen bei +-0.5%, weshalb die
 Netto-Spalte und nicht die Delta-Spalte zaehlt.
+
+## 2026-09-20 — Der Decoder fuehrte seine eigenen Tabellen aus
+
+Kein Messergebnis, ein Fehler, und gefunden beim Absichern einer Messung.
+
+Das Epilog der Wiederhol-Routine stand hinter dem `#endif`, das die
+Shuffle-Masken beendet:
+
+```asm
+L(rep_ret):
+#ifdef KEVA_LZ4
+    ... 512 Bytes Masken ...
+#endif
+    ldp     x29, x30, [sp], #32
+    ret
+```
+
+In jedem Body ohne die Tabellen erreicht `L(rep_ret)` das `ret` direkt. Im
+LZ4-Body liegen fuenfhundertzwoelf Bytes Daten dazwischen, und jeder Ruecksprung
+aus der Doppelungsleiter hat sie als Code ausgefuehrt. `EXC_BAD_INSTRUCTION` in
+`.Ll_splat_first`, also mitten in der ersten Maske.
+
+Ausgeloest von jedem fremden LZ4-Block mit einem Match, das weiter zurueckreicht
+als es lang ist, bei Offset sechzehn oder mehr -- unter sechzehn faengt der
+Shuffle-Pfad davor ab. Ein 63-Byte-Wert mit Periode 23 reicht:
+
+    declared=63  block=38 bytes  ->  SIGILL
+
+Warum niemand es gesehen hat: die Tabellen stehen hinter `#ifdef KEVA_LZ4`, und
+alle Tests dekodieren unser eigenes Format. Die Benchmark-Shapes treffen die
+Bedingung nicht -- `records`, `varied` und `noise` haben in liblz4s Ausgabe
+keinen ueberlappenden Match bei Offset >= 16. Hundert gruene Tests und achtzehn
+gruene Benchmarkzellen, und der Decoder stuerzte auf der ersten Datei ab, die
+sich anders wiederholt.
+
+Der x86-Body hatte es nie: dort steht `L(splat_ret): ret` vor den Tabellen. Der
+aarch64-Port hat beim Uebernehmen das `ret` verloren.
+
+Dazu zwei Tests. `the_kernel_reads_a_match_that_overlaps_itself` baut Bloecke
+von Hand -- Offsets 1 bis 40, Laengen bis 300 -- und laeuft damit auf jedem Body
+und ohne liblz4; ohne den Fix endet er mit SIGILL. Und `examples/lz4_soak.rs`
+schickt 5760 von liblz4 gepackte Faelle durch den Kernel und vergleicht Byte
+fuer Byte.
+
+Die Lehre ist nicht "mehr Tests". Es ist, dass eine `#ifdef`-Variante ein
+zweites Programm ist, und dass dieses zweite Programm hier nur an einem
+Benchmark haengt, der Durchsatz misst und keine Korrektheit.

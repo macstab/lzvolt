@@ -2545,6 +2545,82 @@ mod tests {
         );
     }
 
+    /// A match that reaches back less far than it is long, at every offset.
+    ///
+    /// This is the one shape the all-literal test above cannot reach, and the
+    /// aarch64 LZ4 body executed its own shuffle tables on it: `L(rep_ret)`
+    /// sat in front of five hundred and twelve bytes of mask, and the return
+    /// that should have stood between them was emitted after the `#endif` that
+    /// ends them. Only the body that carries the tables was affected, so every
+    /// test here stayed green while a foreign block with an overlapping match
+    /// at offset sixteen or more killed the process.
+    ///
+    /// Built by hand rather than asked of liblz4, so it runs on every body and
+    /// on machines with no library to link.
+    #[test]
+    fn the_kernel_reads_a_match_that_overlaps_itself() {
+        let mut failed = Vec::new();
+
+        // Both sides of the vector: under sixteen goes through the shuffle,
+        // sixteen and over through the doubling ladder that was returning into
+        // the tables.
+        for offset in 1usize..=40 {
+            for extra in [0usize, 1, 7, 13, 60, 200, 300] {
+                let run = offset + extra + 4;
+
+                // token: `offset` literals to seed the window, then the match
+                let lit = offset;
+                let (lit_tok, mat) = (lit.min(15), run - 4);
+                let mut block = vec![((lit_tok as u8) << 4) | (mat.min(15) as u8)];
+                if lit_tok == 15 {
+                    let mut rest = lit - 15;
+                    while rest >= 255 {
+                        block.push(255);
+                        rest -= 255;
+                    }
+                    block.push(rest as u8);
+                }
+                let seed: Vec<u8> = (0..lit).map(|i| (i as u8).wrapping_add(7)).collect();
+                block.extend_from_slice(&seed);
+                block.extend_from_slice(&(offset as u16).to_le_bytes());
+                if mat >= 15 {
+                    let mut rest = mat - 15;
+                    while rest >= 255 {
+                        block.push(255);
+                        rest -= 255;
+                    }
+                    block.push(rest as u8);
+                }
+                // LZ4 needs five literals after the last match; give it more.
+                let tail: Vec<u8> = (0..12u8).map(|i| i ^ 0x5A).collect();
+                block.push((tail.len() as u8) << 4);
+                block.extend_from_slice(&tail);
+
+                let mut want = seed.clone();
+                for i in 0..run {
+                    want.push(want[want.len() - offset + if i == 0 { 0 } else { 0 }]);
+                }
+                want.extend_from_slice(&tail);
+                let n = want.len();
+
+                for &body in keva_asm::unpack::Lz4Body::all() {
+                    let mut out = vec![0u8; n + keva_asm::unpack::UNPACK_SLACK];
+                    if !keva_asm::unpack::unpack_lz4_into_slice_on(body, &block, &mut out, n) {
+                        continue; // a refusal is the caller's fallback, not a fault
+                    }
+                    if out[..n] != want[..] {
+                        failed.push((body, offset, run));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            failed.is_empty(),
+            "an overlapping match decoded wrong: {failed:?}"
+        );
+    }
+
     /// The *kernel* must read what liblz4 wrote, not merely the store.
     ///
     /// [`our_decoder_reads_what_liblz4_wrote`] goes through `unpack_into`,

@@ -1164,8 +1164,20 @@ L(rep_step):
     b.lo    L(rep_step)
 
 L(rep_ret):
+    ldp     x29, x30, [sp], #32
+    ret
 
-
+/*
+ * The tables go after the return, not before it.
+ *
+ * They used to sit between `L(rep_ret)` and the epilogue, which is harmless in
+ * a body that does not emit them and fatal in the one that does: every return
+ * from the doubling ladder walked into five hundred and twelve bytes of
+ * shuffle mask and executed it. Only the LZ4 body carries them, so the tests
+ * -- which decode our own format -- stayed green while a foreign block with an
+ * overlapping match at offset sixteen or more killed the process. The x86 body
+ * never had this: its `L(splat_ret)` is written in front of its tables.
+ */
 #ifdef KEVA_LZ4
 /*
  * Shuffle masks for a repeat closer than a vector, indexed by offset * 16.
@@ -1216,8 +1228,6 @@ L(splat_next):
     .byte     2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13,  0,  1,  2,  3    // d = 14
     .byte     1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14,  0,  1    // d = 15
 #endif
-    ldp     x29, x30, [sp], #32
-    ret
 
 #if !defined(__APPLE__)
     .size KEVA_NAME(KEVA_ENTRY), . - KEVA_NAME(KEVA_ENTRY)
