@@ -1032,3 +1032,62 @@ denselben Läufen bewegte sich lz4_flex auf `varied_512` um 9.3%.
 x86_64 hat für diesen Pfad schon `rep movsb` hinter `REP_MIN 1024`, aber nur
 auf der Xeon-Linie; EPYC hat ihn bewusst nicht, weil Zen ERMSB ohne FSRM hat.
 Ob dort ein `memcpy`-Aufruf dasselbe tut wie hier, ist ungemessen.
+
+## 2026-09-20 — Der lange Match: vier Instruktionen statt acht, aber nicht ueberall
+
+Das Profil nach dem memcpy-Commit zeigt, dass alle drei verlierenden
+Fremdformat-Zellen vollstaendig in der schnellen Schleife sitzen -- kein
+langsamer Pfad mehr, und `rep_checked`, das bei `lz4_records_4k` einmal 47.1%
+war, taucht gar nicht mehr auf:
+
+    lz4_varied_4k     fast 33.4%  fast_offset 32.9%  fast_copy 10.4%
+    lz4_records_64k   fast 24.8%  fast_lendone 23.2%  fast_offset 22.1%
+                      fast_longout 8.9%  fast_longblk 8.2%
+    lz4_records_4k    fast 25.8%  fast_lendone 21.1%  fast_offset 19.3%
+
+`fast_longblk` und `fast_longout` zusammen sind 17.1% bzw. 14.2%, und die
+Schleife trug dieselbe Buchfuehrung, die bei `litcp_block` schon einmal
+herausflog: Zaehler, Vergleich, zwei Zeigeradditionen und ein unbedingter
+Ruecksprung um zwei Moves herum. Post-Index und `subs` machen aus acht vier.
+
+### Zwei Aenderungen, ein Messfehler
+
+Zuerst beide Blockschleifen umgebaut, die Match- und die Literal-Variante.
+Mediane aus drei, Basis im selben Session-Block:
+
+| eigenes Format | beide | nur Match |
+|---|---|---|
+| records_4k  | +5.2% | +5.6% |
+| records_512 | +4.5% | +5.0% |
+| records_64k | +5.0% | +4.0% |
+| records_192 | **-3.7%** | +1.1% |
+
+Die Literal-Haelfte war der Schaden und ist zurueckgenommen. Warum sie schadet,
+ist nicht gemessen; dass sie schadet, dreimal.
+
+### Und eine Schleife in zwei Formen
+
+Die Match-Haelfte allein gewann unser Format und verlor das fremde:
+
+    own_format/keva/records_64k   14.82 -> 15.47   +4.4%   Kontrollen +1.0%
+    same_bytes/keva/records_64k   11.11 -> 10.76   -3.2%   Kontrollen +1.2%
+
+Also beide Formen behalten, `#ifdef KEVA_LZ4` dazwischen. Der Grund ist
+Platzierung, nicht Arbeit: die Adressen, die Bytes und die Iterationszahl sind
+identisch, aber der LZ4-Body schickt 99% seiner records-Bloecke hier durch und
+unserer ein Fuenftel, und sechzehn Bytes Code weniger vor einer so heissen
+Schleife sind nicht gratis. Zwei Formen fuer 7.7% gemessene Differenz.
+
+### Stand danach, Mediane aus drei, netto gegen die Kontrollen
+
+| eigenes Format | delta | netto |  | fremdes LZ4 | delta | netto |
+|---|---|---|---|---|---|---|
+| records_4k  | +6.8% | +6.5% | | records_4k  | +0.5% | +0.7% |
+| records_512 | +5.3% | +6.6% | | records_512 | +0.1% | +0.6% |
+| records_64k | +4.2% | +4.2% | | records_64k | +0.3% | +0.5% |
+| noise_64k   | +0.9% | +3.2% | | noise_512   | -1.7% | -1.8% |
+
+Eigenes Format 22 von 22 Zellen. Fremdes LZ4 unveraendert 10 von 18; der
+groesste Rueckstand ist jetzt varied_4k mit -4.4% gegen liblz4.
+
+x86_64 hat dieselbe Schleife und ist ungemessen.
