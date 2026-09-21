@@ -1056,6 +1056,35 @@ L(dst_edge):
  * See the note at the test that sends blocks here.
  */
 L(fast_litend):
+#ifdef KEVA_LZ4
+    /*
+     * The run reaches the end of the input, which is what the last literal run
+     * of a value does -- and that is not a reason to ask anything twice.
+     *
+     * Falling through to L(slow) reloads the token, extracts the nibble again
+     * and walks the same length chain a second time. On a value that is one
+     * block, which 512 bytes of incompressible data is exactly, those are two
+     * more dependent L1 loads with no second block to overlap them against, on
+     * a decode that measures about thirty-six cycles in total against liblz4's
+     * twenty-five.
+     *
+     * Everything the copy wants is already here: `rsi` past the length bytes,
+     * `rdi` at the output, `r10` the length. Missing are the two bounds the
+     * fast path had not reached yet, and `r14`, which L(lit_done) advances by
+     * the run -- so it has to point at the run and not at the token.
+     */
+    lea     (%rsi,%r10,1), %rax
+    cmp     %r13, %rax                      /* the run ends inside the input */
+    ja      L(fast_litend_slow)
+    lea     (%rdi,%r10,1), %r9              /* and inside the output */
+    cmp     %r12, %r9
+    ja      L(fast_litend_slow)
+    test    %r10, %r10                      /* L(lit_last) is not written for nought */
+    je      L(fast_litend_slow)
+    mov     %rsi, %r14
+    jmp     L(lit_last)
+L(fast_litend_slow):
+#endif
     movzbl  (%r14), %eax
     jmp     L(slow)
 
