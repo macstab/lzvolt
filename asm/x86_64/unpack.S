@@ -1208,52 +1208,7 @@ L(lit_last):
      * the remainder at zero and the microcode start-up is paid in full to copy
      * no bytes. It was the hottest instruction in the kernel, at 18.65%.
      */
-#ifdef KEVA_YMM
-    /*
-     * 256-bit registers, and only where the run is long enough to pay for
-     * them.
-     *
-     * `perf annotate` on a Xeon 8481C, decoding a 512-byte incompressible
-     * value, put 78.9% of the whole kernel on two instructions -- the second
-     * `vmovdqu` load and the second `vmovdqu` store of this loop -- while the
-     * first pair of the same iteration drew 0.00%. Eight iterations is the
-     * whole copy at that size, and the cell measured 31% behind liblz4 while
-     * the 4 KiB and 64 KiB cells, running the same loop for 64 and 1024
-     * iterations, measured 4% ahead.
-     *
-     * A cost that shows up in eight iterations and vanishes in sixty-four is a
-     * start-up, not a throughput. Below the threshold the sixteen-byte loop
-     * does the work with no 256-bit state to wake, and above it the wider one
-     * amortises whatever it costs.
-     */
-#  define YMM_MIN 1024
-    cmp     $YMM_MIN, %rcx
-    jb      L(lit_narrow)
-
-    mov     %rcx, %rax
-    and     $-64, %rax
-    add     %rax, %rsi
-    add     %rax, %rdi
-    sub     %rax, %rcx
-    neg     %rax
-L(lit_l64):
-    vmovdqu (%rsi,%rax,1), %ymm0
-    vmovdqu 32(%rsi,%rax,1), %ymm1
-    vmovdqu %ymm0, (%rdi,%rax,1)
-    vmovdqu %ymm1, 32(%rdi,%rax,1)
-    add     $64, %rax
-    jne     L(lit_l64)
-    /*
-     * Back to legacy width before anything else runs. Everything around this
-     * loop is SSE, and mixing 256-bit VEX with legacy SSE in one function costs
-     * a transition on every Intel part that has both.
-     */
-    vzeroupper
-    jmp     L(lit_b16)
-
-L(lit_narrow):
-#endif
-    cmp     $32, %rcx
+    cmp     $LIT_BLK, %rcx
     jb      L(lit_b16)
 
     /*
@@ -1278,18 +1233,34 @@ L(lit_narrow):
      * and nine micro-ops become five.
      */
     mov     %rcx, %rax
-    and     $-32, %rax                      /* whole blocks of it */
+    and     $-LIT_BLK, %rax                 /* whole blocks of it */
     add     %rax, %rsi
     add     %rax, %rdi
     sub     %rax, %rcx                      /* and what the ladder gets */
     neg     %rax
 L(lit_l32):
+#ifdef KEVA_YMM
+    vmovdqu (%rsi,%rax,1), %ymm0
+    vmovdqu 32(%rsi,%rax,1), %ymm1
+    vmovdqu %ymm0, (%rdi,%rax,1)
+    vmovdqu %ymm1, 32(%rdi,%rax,1)
+#else
     movdqu  (%rsi,%rax,1), %xmm0
     movdqu  16(%rsi,%rax,1), %xmm1
     movdqu  %xmm0, (%rdi,%rax,1)
     movdqu  %xmm1, 16(%rdi,%rax,1)
-    add     $32, %rax
+#endif
+    add     $LIT_BLK, %rax
     jne     L(lit_l32)
+#ifdef KEVA_YMM
+    /*
+     * Back to legacy width before anything else runs. Everything around this
+     * loop is SSE, and mixing 256-bit VEX with legacy SSE in one function costs
+     * a transition on every Intel part that has both. One instruction, once per
+     * value, against a stall on every `movdqu` after it.
+     */
+    vzeroupper
+#endif
     jmp     L(lit_b16)
 #endif
 

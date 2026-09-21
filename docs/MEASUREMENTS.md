@@ -1602,3 +1602,48 @@ Programm, und beide Male hat das zweite Programm eine Annahme gebrochen, die
 im ersten stillschweigend galt. Der Absturz heute frueh (Tabellen vor dem
 `ret`) und dieser hier. Beide gefunden, nicht weil ein Test sie vorhersah,
 sondern weil eine *unabhaengige* Referenz Byte fuer Byte verglichen hat.
+
+## 2026-09-21 — Die AVX-Schwelle: gebaut, gemessen, widerlegt
+
+`noise_512` im Fremdformat liegt auf Xeon 30% hinter liblz4. Das Profil schien
+den Grund zu nennen -- `perf annotate` legte 78.9% des Kernels auf zwei
+Instruktionen der 64-Byte-Literalschleife, den *zweiten* `vmovdqu`-Load und den
+*zweiten* Store, waehrend das erste Paar derselben Iteration 0.00% zog. Dazu
+passte die Groessenreihe: noise_64k +4.4% (1024 Durchlaeufe), noise_4k +4.1%
+(64), noise_512 -31% (8). Ein Aufwand, der bei acht Durchlaeufen dominiert und
+bei vierundsechzig verschwindet, liest sich wie eine Anlaufkosten.
+
+Also eine Schwelle: Laeufe unter einem Kilobyte durch die 16-Byte-Schleife,
+laengere durch die 256-Bit-Schleife. Gemessen in beiden Reihenfolgen, weil die
+512-Byte-Zellen ueber den Abend um dreissig Punkte geschwankt haben:
+
+| noise_512, GiB/s | Position 1 | Position 2 |
+|---|---|---|
+| ohne Schwelle | 35.23 | 35.20 |
+| mit Schwelle | 24.31 | **23.75** |
+
+Positionsunabhaengig und eindeutig: die breite Schleife ist auch bei acht
+Durchlaeufen um 32% besser. Zurueckgenommen.
+
+`records_512` zeigte in einer Position -10.2% und in der anderen +16.4% --
+dieselbe Revision. Die Zelle ist ohne beide Reihenfolgen nicht lesbar, was der
+Skriptkopf seit Tagen sagt und was hier zum zweiten Mal fast zu einem falschen
+Urteil gefuehrt haette.
+
+### Was bleibt
+
+Bei 512 Bytes sind es rund 36 Zyklen gegen liblz4s 25, und die Kopie selbst ist
+davon nur etwa zehn. Der Rest sind Kosten, die einmal je Wert anfallen: zwoelf
+Push/Pop, der Zonenaufbau, und vor allem die Literallaengen-Kette -- 512 Bytes
+brauchen zwei Erweiterungsbytes, zwei abhaengige L1-Zugriffe hintereinander, auf
+einem Wert, der aus genau einem Block besteht und deshalb nichts hat, womit er
+diese Latenz ueberlappen koennte.
+
+### Und eine Testluecke, die schwerer wiegt
+
+Der AVX-Store wurde absichtlich verfaelscht -- der Soak blieb gruen.
+`Lz4Body::all()` gibt auf einer CPU ohne AVX2 nur `[Baseline, Ssse3]` zurueck,
+und unter Rosetta gibt es kein AVX2. Die Xeon- und EPYC-Bodies laufen auf diesem
+Rechner also **nie**, weder im Soak noch in den Tests. Auf der gemieteten
+Maschine nachgeholt: dieselbe Mutation laesst dort den Soak und zwei Tests
+fallen. Diese beiden Bodies sind ausschliesslich in der Cloud pruefbar.
