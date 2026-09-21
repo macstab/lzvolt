@@ -1697,3 +1697,30 @@ zehn. Was bleibt, sind Rahmen und Zonenaufbau, also Kosten, die ein Wert aus
 einem einzigen Block nicht auf mehrere Bloecke verteilen kann.
 
 aarch64 hat dieselbe Doppelung und ist ungemessen.
+
+### Korrektur zum Eintrag darueber: records_512 zeigt nichts
+
+Die +24.7% auf records_512 sind kein Ergebnis. Ueber alle Laeufe dieses Tages:
+
+    8746808 (alt)  8.06  8.50  6.78  6.60
+    023e1c5 (neu)  8.06  8.39
+
+Beide Revisionen liegen im selben Band von 6.6 bis 8.5 GiB/s, eine Spanne von
+29%. Dass in dem einen Lauf die alte Revision unten und die neue oben lag, ist
+die Zelle und nicht die Aenderung. Der Eintrag darueber liest +24.7%, und das
+ist falsch.
+
+Belastbar aus demselben Lauf ist nur, was sich ueber mehrere Messungen
+wiederholt:
+
+    noise_512   alt  35.23  35.20  35.14     neu  40.47  40.90   +15.6%
+    noise_64k   alt  34.16                   neu  35.17  35.59    +3.6%
+    noise_4k    alt  67.77  67.77            neu  70.61  67.77    +2.1%
+
+noise_512 ist damit von -31% auf -20% gegen liblz4, und das haelt. Die anderen
+sechs Zellen bewegen sich nicht.
+
+Dies ist das dritte Mal heute, dass eine 512-Byte-Zelle beinahe ein falsches
+Urteil gekauft hat. Fuer diese Groesse gilt: mindestens zwei Messungen je
+Revision, und wenn die Baender sich ueberlappen, ist das Ergebnis "nichts" und
+nicht der Mittelwert.
