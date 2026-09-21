@@ -1647,3 +1647,53 @@ und unter Rosetta gibt es kein AVX2. Die Xeon- und EPYC-Bodies laufen auf diesem
 Rechner also **nie**, weder im Soak noch in den Tests. Auf der gemieteten
 Maschine nachgeholt: dieselbe Mutation laesst dort den Soak und zwei Tests
 fallen. Diese beiden Bodies sind ausschliesslich in der Cloud pruefbar.
+
+## 2026-09-21 — Der letzte Literallauf, ohne zweimal zu fragen
+
+Gefunden durch Lesen, nicht durch Messen. `L(fast_litext)` liest die
+Literallaengen-Kette, stellt dann fest, dass der Lauf bis ans Eingabeende reicht
+-- `lea 2(%rsi,%r10,1) / cmp %r13 / ja L(fast_litend)` -- und springt nach
+`L(slow)`, wo das Token **neu geladen**, die Nibbles **neu extrahiert** und
+**dieselbe Kette ein zweites Mal** gelaufen wird.
+
+Bei einem Wert, der aus genau einem Block besteht, liegt das vollstaendig auf
+dem kritischen Pfad. 512 Bytes inkompressibler Daten sind genau das: Token,
+zwei Erweiterungsbytes, 512 Literale. Vier abhaengige L1-Zugriffe, wo zwei
+genuegen.
+
+Am Abbruchpunkt ist alles schon da: `rsi` hinter den Laengenbytes, `rdi` am
+Ausgang, `r10` die Laenge. Es fehlten die zwei Schranken, die der schnelle Pfad
+noch nicht geprueft hatte, und `r14` muss auf den Lauf statt aufs Token zeigen,
+weil `L(lit_done)` es um die Lauflaenge weiterschiebt. Acht Instruktionen statt
+etwa fuenfunddreissig und drei abhaengigen Loads.
+
+### Gemessen, Xeon 8481C, vier Positionen in beiden Reihenfolgen
+
+Position 1 ist verworfen: dieselbe Revision las dort `noise_512` mit 15.29 und
+in Position 3 mit 35.14 GiB/s. Der Kaltstart trifft, was zuerst gemessen wird,
+und der Skriptkopf sagt das seit Tagen.
+
+| | alt | neu | delta | vs liblz4 vorher -> jetzt |
+|---|---|---|---|---|
+| records_512 | 6.60 | 8.22 | **+24.7%** | -9.9% -> **+17.8%** |
+| noise_512 | 35.14 | 40.68 | **+15.8%** | -31.0% -> **-20.1%** |
+| noise_64k | 34.16 | 35.38 | +3.6% | -0.4% -> +3.0% |
+| noise_4k | 67.77 | 69.19 | +2.1% | -0.0% -> +2.0% |
+| records_64k | 11.50 | 11.50 | -0.0% | +31.5% |
+| varied_64k | 4.65 | 4.66 | +0.2% | +14.5% |
+| varied_512 | 6.06 | 6.11 | +0.8% | -0.6% |
+| records_4k | 11.23 | 11.20 | -0.3% | +21.0% |
+| varied_4k | 5.57 | 5.53 | -0.8% | +10.2% |
+
+Sieben von neun vor liblz4. Die Aenderung kostet nirgends mehr als ein Prozent
+und ist auf genau den Formen gross, die aus wenigen langen Literallaeufen
+bestehen.
+
+### Was an noise_512 bleibt
+
+40.68 GiB/s sind 31 Zyklen fuer 512 Bytes, liblz4 braucht 25. Sechs Zyklen, und
+die Kopie selbst ist davon keine -- acht Durchlaeufe zu je 64 Byte sind etwa
+zehn. Was bleibt, sind Rahmen und Zonenaufbau, also Kosten, die ein Wert aus
+einem einzigen Block nicht auf mehrere Bloecke verteilen kann.
+
+aarch64 hat dieselbe Doppelung und ist ungemessen.
