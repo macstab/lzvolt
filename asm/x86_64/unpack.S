@@ -1195,6 +1195,42 @@ L(lit_wide):
  */
 L(lit_last):
     mov     %r10, %rcx
+#ifdef KEVA_LZ4
+    /*
+     * The platform's memcpy, which is what liblz4 calls here.
+     *
+     * A 512-byte incompressible value is one block: token, two length bytes,
+     * 512 literals. Everything is on one dependency chain, and the copy that
+     * ends it measured 31 cycles against liblz4's 25 on a Xeon 8481C. The
+     * difference is not the loop below -- eight iterations of sixty-four bytes
+     * is about ten cycles -- it is that liblz4 hands this run to memcpy, which
+     * on glibc dispatches into a tuned AVX entry with a jump table for exactly
+     * these sizes.
+     *
+     * The same call is worth +34% on aarch64 for 64 KiB runs, where it was
+     * measured against a threshold rather than guessed. Here the threshold is
+     * lower because the loop is not what wins: 128 bytes is four iterations,
+     * below which a call cannot pay for itself.
+     *
+     * Once per value. The registers it destroys are `r9` and `r10`, which the
+     * tail wants; `r14` and `r12` are callee-saved and survive. The stack moves
+     * by twenty-four rather than sixteen so the call lands on a 16-byte
+     * boundary -- six pushes leave it eight short.
+     */
+#  define MEMCPY_MIN 128
+    cmp     $MEMCPY_MIN, %rcx
+    jb      L(lit_noncall)
+    sub     $24, %rsp
+    mov     %r9, (%rsp)
+    mov     %r10, 8(%rsp)
+    mov     %rcx, %rdx                      /* memcpy(rdi = dst, rsi = src, rdx = n) */
+    call    KEVA_SYM(memcpy)
+    mov     (%rsp), %r9
+    mov     8(%rsp), %r10
+    add     $24, %rsp
+    jmp     L(lit_done)
+L(lit_noncall):
+#endif
 #ifdef KEVA_XEON
     /*
      * ...and on a part with Fast Short REP MOV the string instruction is still
