@@ -17,7 +17,18 @@ fn main() {
                 let block = lz4_block(&data);
                 let mut out = vec![0u8; data.len() + 64];
                 let n = out.len();
-                let ok = keva_asm::unpack::unpack_lz4_into_slice(&block, &mut out, data.len());
+                // Every body, not the one this machine happens to select.
+                // A kernel built for a part line is a second program, and the
+                // machine running the test is never all of them: on an Apple
+                // host the x86 dispatch picks the baseline body, so the Xeon
+                // and EPYC ones -- which is where the AVX literal loop lives --
+                // went unexercised until a deliberate corruption in that loop
+                // failed to turn this red.
+                let ok = keva_asm::unpack::Lz4Body::all()
+                    .iter()
+                    .all(|&body| {
+                        keva_asm::unpack::unpack_lz4_into_slice_on(body, &block, &mut out, data.len())
+                    });
                 cases += 1;
                 if !ok {
                     // A refusal is allowed -- the caller falls back -- but it
