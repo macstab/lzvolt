@@ -320,6 +320,11 @@ KEVA_NAME(KEVA_ENTRY):
     push    %r13
     push    %r14
     push    %r15
+    /*
+     * Sixty-four zeroed bytes for the tail of the input as well. See
+     * L(src_edge): the last bytes of a value are copied there so the fast loop
+     * can read its fixed reach past them without leaving the buffer.
+     */
 #ifdef KEVA_REPEAT
     /*
      * Sixteen bytes for the repeat code: the offset the last block wrote, and
@@ -330,8 +335,12 @@ KEVA_NAME(KEVA_ENTRY):
      *   (%rsp)   the token byte of the block being read
      *   8(%rsp)  the offset to reuse where its low bit is set
      */
-    sub     $16, %rsp
+    sub     $80, %rsp
     movq    $0, 8(%rsp)
+#  define PAD_OFF 16
+#else
+    sub     $64, %rsp
+#  define PAD_OFF 0
 #endif
 
     mov     %rdi, %r14                      /* src cursor, before rdi is reused */
@@ -1038,6 +1047,87 @@ L(src_edge):
     jae     L(done)
     cmp     %r13, %r14
     jae     L(fail)
+
+    /*
+     * The last bytes of the input, where the fast loop may read past them.
+     *
+     * The fast path reads a fixed distance from the cursor -- a token and the
+     * literal move -- and stops that far short of the end rather than test per
+     * block. On a long value that margin is nothing; on a short one it is most
+     * of the last blocks. records_192 packs to 134 bytes, so seventeen of them
+     * are 13% of the stream on a path three to four times dearer, and the same
+     * change on aarch64 measured +8.1% on exactly that shape.
+     *
+     * So the remainder is copied somewhere with room after it: sixty-four
+     * zeroed bytes in this frame. `r14` then walks the copy, `r13` ends it and
+     * `r15` becomes that same end -- no margin, because there is nothing left
+     * to read past. Nothing else in the body knows: the match copies read the
+     * output, not the input.
+     *
+     * Padding cannot hide a truncated stream. Any block reading a byte at or
+     * past the end leaves the cursor past it, a zero offset is refused where it
+     * is read, and L(done) checks the cursor landed exactly on the end.
+     *
+     * `r15 == r13` says this has already happened, and the second visit falls
+     * through to the checked path as before.
+     */
+    cmp     %r13, %r15
+    je      L(src_slow)
+
+    mov     %r13, %rdx
+    sub     %r14, %rdx                      /* what is left, one to FAST_IN */
+    lea     PAD_OFF(%rsp), %rcx
+    pxor    %xmm0, %xmm0
+    movdqu  %xmm0, (%rcx)
+    movdqu  %xmm0, 16(%rcx)
+    movdqu  %xmm0, 32(%rcx)
+    movdqu  %xmm0, 48(%rcx)
+    mov     %rcx, %r9
+    mov     %r14, %rsi
+    /*
+     * A ladder rather than a loop: seventeen bytes at most, and only the bits
+     * that are set cost anything. A byte at a time measured 6.5% of a
+     * 512-byte value on aarch64, which was most of what the copy was to buy.
+     */
+    test    $16, %dl
+    je      L(src_pad8)
+    movdqu  (%rsi), %xmm0
+    movdqu  %xmm0, (%r9)
+    add     $16, %rsi
+    add     $16, %r9
+L(src_pad8):
+    test    $8, %dl
+    je      L(src_pad4)
+    mov     (%rsi), %rax
+    mov     %rax, (%r9)
+    add     $8, %rsi
+    add     $8, %r9
+L(src_pad4):
+    test    $4, %dl
+    je      L(src_pad2)
+    mov     (%rsi), %eax
+    mov     %eax, (%r9)
+    add     $4, %rsi
+    add     $4, %r9
+L(src_pad2):
+    test    $2, %dl
+    je      L(src_pad1)
+    movzwl  (%rsi), %eax
+    mov     %ax, (%r9)
+    add     $2, %rsi
+    add     $2, %r9
+L(src_pad1):
+    test    $1, %dl
+    je      L(src_pad_done)
+    movzbl  (%rsi), %eax
+    mov     %al, (%r9)
+L(src_pad_done):
+    mov     %rcx, %r14                      /* the cursor walks the copy */
+    lea     (%rcx,%rdx,1), %r13             /* which ends here */
+    mov     %r13, %r15                      /* and the zone reaches all of it */
+    jmp     L(block)
+
+L(src_slow):
     /* The checked path is entered with the token already in `eax`, which the
      * loop head used to load for everyone. It cannot load it any more -- that
      * is the branch this removed -- so the one entry that skipped the load does
@@ -1493,6 +1583,10 @@ L(mat_done):
 L(done):
     cmp     %r12, %rdi
     jne     L(fail)
+    /* Past the end means the stream claimed bytes it does not have, and the
+     * padded copy is where it would have looked for them. */
+    cmp     %r13, %r14
+    ja      L(fail)
     mov     %r12, %rax
     sub     %rbx, %rax
     jmp     L(ret)
@@ -1502,7 +1596,9 @@ L(fail):
 
 L(ret):
 #ifdef KEVA_REPEAT
-    add     $16, %rsp
+    add     $80, %rsp
+#else
+    add     $64, %rsp
 #endif
     pop     %r15
     pop     %r14
