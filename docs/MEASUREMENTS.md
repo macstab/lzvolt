@@ -1724,3 +1724,74 @@ Dies ist das dritte Mal heute, dass eine 512-Byte-Zelle beinahe ein falsches
 Urteil gekauft hat. Fuer diese Groesse gilt: mindestens zwei Messungen je
 Revision, und wenn die Baender sich ueberlappen, ist das Ergebnis "nichts" und
 nicht der Mittelwert.
+
+## 2026-09-22 — Die Polsterung auf x86: widerlegt, und eine falsche Praemisse dazu
+
+Die Frage war, wieso der Xeon-Kernel viele Zyklen braucht. Er braucht keine.
+Zyklen je Block, aus Durchsatz und Blockzahl gerechnet:
+
+| | Bloecke | Xeon | M2 |
+|---|---|---|---|
+| records_64k | 1567 | **8.9** | 8.7 |
+| records_4k | 96 | **9.2** | 8.7 |
+| records_512 | 12 | 11.8 | 10.4 |
+| records_192 | 4 | 36.9 | 16.2 |
+
+Bei 1567 Bloecken liegt x86 zwei Prozent neben Apple Silicon, bei identischem
+Quelltext. Die Schleife ist nicht das Problem.
+
+Der Ausreisser bei records_192 war eine einzelne Messung, und das Modell ging
+nicht auf: 148 Zyklen fuer vier Bloecke gegen 141 fuer zwoelf ist weniger Zeit
+fuer dreimal so viel Arbeit. Eine feste Grundlast plus Arbeit je Block kann das
+nicht erzeugen. Vier Positionen spaeter liest records_192 3.26 und 3.22 GiB/s --
+stabil, und der Ausreisser war die Messung.
+
+### Gebaut und zurueckgenommen
+
+Die Polsterung des Eingaberests, auf aarch64 +8.1% auf genau dieser Form, nach
+x86 portiert. Vier Positionen, warm gegen warm:
+
+| | alt | neu | delta |
+|---|---|---|---|
+| same_bytes records_512 | 8.00 | 7.35 | **-8.1%** |
+| own_format records_512 | 9.32 | 8.65 | **-7.2%** |
+| same_bytes noise_512 | 45.99 | 43.18 | -6.1% |
+| own_format varied_4k | 7.00 | 6.75 | -3.6% |
+| same_bytes noise_64k | 35.39 | 34.25 | -3.2% |
+| own_format records_192 | 3.26 | 3.22 | -1.2% |
+
+Die Zelle, fuer die sie gebaut wurde, bewegt sich nicht, und records_512
+verliert acht Prozent. Zurueckgenommen.
+
+**Ein Verdacht, der nicht aufgeklaert ist.** own_format records_32 las 1.40 und
+1.18 GiB/s -- sauber getrennt nach Revision -- obwohl diese Zelle den Kernel
+ueberhaupt nicht anfasst: bei 32 Bytes weigert sich der Packer, der Wert wird
+roh gespeichert, und der Benchmark macht dort ein `copy_from_slice`. Eine
+Aenderung am Assembler kann diese Zahl nicht bewegen. Sie bewegt sich trotzdem,
+also verschiebt die geaenderte Objektgroesse etwas im Binary. Damit ist ein Teil
+der -7% und -8% oben moeglicherweise Platzierung und nicht Mechanik -- fuer das
+Urteil egal, weil die Aenderung so oder so nichts eintraegt, aber es heisst,
+dass Deltas dieser Groesse hier nicht allein der Logik zuzuschreiben sind.
+
+### Wo die beiden Kernel inzwischen auseinanderlaufen
+
+Gleich: zwei Token-Aufteilungen als getrennte Bodies, eigener LZ4-Body,
+Zonenschleife plus geprueft, Shuffle-Tabellen fuer kurze Ueberlappungen,
+COPY_MAX-Leiter, memcpy fuer den letzten Literallauf.
+
+Verschieden, jedes Mal gemessen:
+
+| | aarch64 | x86_64 |
+|---|---|---|
+| Weiche fuer literallose Bloecke | `cbnz w5`, nur das Literal-Nibble | `cmp $0x0F`, das ganze Token |
+| memcpy-Schwelle | ab 8192 B | ab 128 B |
+| Matchschleife | zwei Formen | eine |
+| Teilelinien | keine | Xeon, EPYC, SSSE3 |
+| Eingaberest gepolstert | ja (+8.1%) | nein (-8.1%) |
+
+Die ersten beiden widersprechen sich offen. Der Test aufs Literal-Nibble war auf
+ARM ein Gewinn und hat auf Xeon records_512 neun Prozent gekostet, weil er dort
+ein Muenzwurf ist. Und memcpy war auf ARM bei 512 Bytes 10.4% schlechter als die
+eigene Schleife, auf Xeon 14.2% besser -- Apples memcpy verliert dort, glibcs
+gewinnt. Vier Ideen wurden heute von einer Plattform auf die andere portiert,
+und zwei davon haben das Vorzeichen gewechselt.
