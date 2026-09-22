@@ -1795,3 +1795,54 @@ ein Muenzwurf ist. Und memcpy war auf ARM bei 512 Bytes 10.4% schlechter als die
 eigene Schleife, auf Xeon 14.2% besser -- Apples memcpy verliert dort, glibcs
 gewinnt. Vier Ideen wurden heute von einer Plattform auf die andere portiert,
 und zwei davon haben das Vorzeichen gewechselt.
+
+## 2026-09-22 — Vier Zellen, die nie einen Decoder gemessen haben
+
+Die Frage war, wieso records_32 im eigenen Format auf Xeon 50% hinten liegt,
+wo unser Decoder dort gar nicht laufen kann. Er lief auch nicht.
+
+Bei 32 Bytes lehnt der Packer ab -- `worth_storing` verlangt acht gesparte
+Bytes und 12.5%, LZ4 holt aus 32 Byte JSON zwei -- und der Wert wird roh
+gespeichert. Der Benchmark hat dafuer
+
+    mine[..data.len()].copy_from_slice(&data);
+
+gemessen und das "den Lesepfad" genannt. Der Store tut das nicht:
+
+    if flags.compressed { pack::unpack(...); Cow::Owned(out) }
+    else                { Cow::Borrowed(bytes) }
+
+Ein roh gespeicherter Wert wird **ausgeliehen, nicht kopiert** -- ein
+Arena-Slice, null Bytes. Die Zelle hat also eine Kopie gegen einen echten
+Decode gestellt, die in Wirklichkeit nicht stattfindet.
+
+Dass die Zahl absurd war, stand in ihr selbst: 1.40 GiB/s fuer 32 Bytes sind
+57 Zyklen, und dieselbe Zeile misst auf M2 17.5. Identischer Rust, Vorzeichen
+gedreht -- +87% dort, -50% hier.
+
+**Und es betrifft nicht nur die schlechte Zelle.** Der Packer lehnt vier Formen
+ab: records_32, noise_512, noise_4k, noise_64k. Alle vier haben in `own_format`
+ein memcpy gemessen, und **drei davon haben wir gross "gewonnen"**: +76.6%,
++34.2%, +3.5% auf Xeon. Von den bisher gemeldeten 22 Zellen waren acht keine
+Decoder-Vergleiche.
+
+Der Benchmark ueberspringt diese Formen jetzt und sagt es:
+
+    own_format records_32: packer refused, stored raw -- no decode to time
+
+Sie bleiben in `pack/sizes` und `compress3`, wo "roh gespeichert" das Ergebnis
+ist und kein Artefakt.
+
+### Eigenes Format danach, M2 Max, Mediane aus drei
+
+| | keva | liblz4 | flex | vs liblz4 | vs flex |
+|---|---|---|---|---|---|
+| varied_64k | 9.72 | 5.08 | 7.83 | **+91.3%** | +24.1% |
+| records_192 | 9.78 | 6.34 | 7.70 | +54.3% | +27.0% |
+| records_64k | 15.87 | 11.23 | 11.60 | +41.4% | +36.8% |
+| varied_4k | 9.71 | 6.87 | 7.08 | +41.3% | +37.1% |
+| records_4k | 16.02 | 12.52 | 11.11 | +28.0% | +44.3% |
+| varied_512 | 10.31 | 8.75 | 9.11 | +17.8% | +13.1% |
+| records_512 | 13.01 | 11.12 | 10.76 | +17.0% | +21.0% |
+
+14 von 14, und jede davon ist ein Decode gegen einen Decode.

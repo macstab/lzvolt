@@ -526,16 +526,34 @@ fn own_format(c: &mut Criterion) {
         assert!(n > 0);
         theirs.truncate(n as usize);
 
+        // A value the packer refused has no decode to measure, and timing one
+        // is worse than measuring nothing.
+        //
+        // This used to copy the bytes and call that the read path. The store
+        // does not: `Table::get` hands a raw-stored value back as
+        // `Cow::Borrowed`, a slice of the arena, and `get_into` returns the
+        // same slice. Reading such a value costs a lookup and no bytes at all.
+        //
+        // So the cell was timing a `copy_from_slice` against a competitor's
+        // real decode -- which said nothing about either. It read -50% against
+        // lz4_flex on records_32 and +76% on noise_512, both meaningless, and
+        // three of the four shapes it covers are ones we appeared to win.
+        //
+        // The shapes are records_32, noise_512, noise_4k and noise_64k: too
+        // small to pay for packing, or incompressible. They are still reported
+        // under `pack/sizes` and `compress3`, where storing them raw is the
+        // result rather than an artefact.
+        if !packed {
+            eprintln!(
+                "  own_format {label}: packer refused, stored raw -- \
+                 no decode to time (the store returns the arena slice)"
+            );
+            continue;
+        }
+
         let mut mine = vec![0u8; data.len() + 64];
         let mut yours = vec![0u8; data.len() + 64];
         let decode = |body: &[u8], mine: &mut [u8]| match switch {
-            // A value the packer refused is stored as it arrived, so reading it
-            // is a copy of its bytes and no more. Measuring anything else here
-            // would be measuring a path this store never takes.
-            _ if !packed => {
-                mine[..data.len()].copy_from_slice(&data);
-                true
-            }
             None => keva_asm::unpack::unpack_into_slice(body, mine, data.len(), split),
             Some((in_at, out_at)) => {
                 keva_asm::unpack::unpack_section(&body[..in_at], mine, out_at, 0, split)
