@@ -733,9 +733,48 @@ L(fast_litblock):
     jmp     L(fast_litdone)
 
 L(fast_litslow):
-    /* The tail of a stream: one byte at a time, because a block would read
-     * past what is ours. */
+    /*
+     * The tail of a stream, in widths rather than bytes.
+     *
+     * A thirty-two byte block would read past what is ours, which is why this
+     * branch exists -- but a ladder never does. Sixteen are moved while
+     * sixteen remain, and a run that ends at or before the input's end cannot
+     * leave it while sixteen are left; then one pair of overlapping eight-byte
+     * moves covers eight to fifteen, writing the middle twice and nothing
+     * outside.
+     *
+     * It was a byte at a time, and on a 192-byte value that is most of the
+     * decode: `perf annotate` on a Xeon 8481C put 26.4% of the kernel on the
+     * `movzbl` alone and 55% on the five instructions of the loop. The shape
+     * packs to 134 bytes in four blocks, so every run ending past byte 102
+     * comes here -- half the value. records_512 packs to 195 in twelve blocks
+     * and only the last one does, which is why the two measured 32 and 10
+     * cycles a block for the same code.
+     *
+     * r14 is the only scratch here and is recomputed at the rejoin; r11 holds
+     * the token's match field and must survive.
+     */
     mov     %r10, %rax
+    cmp     $16, %rax
+    jb      L(fast_lit_tail)
+L(fast_lit16):
+    movdqu  (%r9), %xmm0
+    movdqu  %xmm0, (%rdx)
+    add     $16, %r9
+    add     $16, %rdx
+    sub     $16, %rax
+    cmp     $16, %rax
+    jae     L(fast_lit16)
+L(fast_lit_tail):
+    test    %rax, %rax
+    je      L(fast_litdone)
+    cmp     $8, %rax
+    jb      L(fast_litbyte)
+    mov     (%r9), %r14
+    mov     %r14, (%rdx)
+    mov     -8(%r9,%rax,1), %r14
+    mov     %r14, -8(%rdx,%rax,1)
+    jmp     L(fast_litdone)
 L(fast_litbyte):
     /* Through r14, which is the only scratch left here and is recomputed at
      * the rejoin anyway. Not r11: that is holding the token's match field, and
