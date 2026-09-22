@@ -1846,3 +1846,65 @@ ist und kein Artefakt.
 | records_512 | 13.01 | 11.12 | 10.76 | +17.0% | +21.0% |
 
 14 von 14, und jede davon ist ein Decode gegen einen Decode.
+
+## 2026-09-22 — Der letzte Literallauf byteweise: +119.5% auf records_192
+
+Die Zelle hatte ich zweimal als unzuverlaessige Messung abgetan. Sie war stabil
+und hatte recht.
+
+Ein Kostenmodell aus records_512 und records_4k, je Plattform gefittet:
+
+| | Zyklen je Block | fest je Aufruf | records_192 vorhergesagt | gemessen |
+|---|---|---|---|---|
+| Xeon | 8.9 | 31 | 67 | **148** (2.22x) |
+| M2 | 8.4 | 28 | 61 | 64 (1.05x) |
+
+Dieselbe Form passt auf ARM ins Modell und kostet auf x86 das Doppelte. Das
+Profil zeigt in einer Zeile, warum:
+
+    26.39%  movzbl (%r9),%r14d
+    10.87%  inc    %r9
+     6.34%  inc    %rdx
+     6.08%  dec    %rax
+     5.95%  mov    %r14b,(%rdx)
+
+55% des Kernels in einer Byte-fuer-Byte-Kopie. Erreicht wird sie, sobald ein
+Literallauf weniger als zweiunddreissig Bytes Luft bis zum Eingabeende hat --
+denn ein Block dieser Breite wuerde darueber hinauslesen. Eine Leiter tut das
+nicht, und eine steht seit jeher ein paar hundert Zeilen weiter in derselben
+Datei.
+
+records_192 packt auf 134 Bytes in vier Bloecken, also kommt jeder Lauf, der
+hinter Byte 102 endet, dort an: die halbe Datei. records_512 packt auf 195 in
+zwoelf, und nur der letzte tut es. Daher 32 gegen 10 Zyklen je Block.
+
+### Gemessen, Xeon, vier Positionen
+
+| unser Format | alt | neu | delta |
+|---|---|---|---|
+| records_192 | 3.27 | 7.17 | **+119.5%** |
+| varied_512 | 7.48 | 8.16 | +9.1% |
+| records_512 | 9.22 | 9.45 | +2.5% |
+| varied_4k | 7.01 | 7.17 | +2.3% |
+| records_4k | 11.64 | 11.79 | +1.3% |
+| records_64k | 11.93 | 11.83 | -0.8% |
+
+| Standard LZ4 | alt | neu | delta |
+|---|---|---|---|
+| varied_512 | 6.03 | 6.31 | +4.6% |
+| records_4k | 11.03 | 11.12 | +0.8% |
+| noise_512 | 45.93 | 44.94 | **-2.2%** |
+
+7.17 gegen 7.17 in beiden neuen Positionen. records_192 geht damit von -23.0%
+auf **+69.1%** gegen liblz4.
+
+Stand auf Xeon danach: unser Format **14 von 14**, Standard LZ4 **16 von 18**.
+
+### Was der Fund ueber den Tag sagt
+
+Die Zelle wurde zweimal falsch eingeordnet, beide Male von mir, beide Male mit
+einem Argument statt einer Messung: erst "512-Byte-Zellen schwanken", dann "der
+Benchmark misst den Messaufbau". Was sie aufgeklaert hat, war ein Kostenmodell
+aus zwei anderen Zellen -- 148 Zyklen fuer vier Bloecke gegen 138 fuer zwoelf
+ist arithmetisch unmoeglich, und das war schon sichtbar, bevor irgendeine
+Maschine lief.
