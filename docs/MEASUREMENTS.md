@@ -2117,3 +2117,116 @@ Abdeckung dafuer fehlt, und sie fehlt fuer jeden Pfad in dieser Datei, nicht nur
 fuer diesen. Ein Test, der den gepackten Block ans Ende einer Seite legt und die
 naechste nicht abbildet, wuerde jeden Uebergriff sofort mit SIGSEGV melden. Das
 ist die naechste Luecke, die zugeht.
+
+## E1, E2a und A1 auf gemieteter Hardware
+
+Drei Maschinen gleichzeitig, jede fuer diesen Lauf erzeugt und danach geloescht:
+zwei c3d-standard-4, weil das Skript fuer diese Teile eine Positionsstrafe von
+11% auf den 512-Byte-Zellen dokumentiert und ein Paar deshalb in beiden
+Reihenfolgen laufen muss, und ein c4a-standard-4 fuer A1. Drei Laeufe je
+Revision, Mediane.
+
+    A_amd_fwd   e227cfa  dann  91f5505
+    A_amd_rev   91f5505  dann  e227cfa
+    A_arm       280d5c7  dann  91f5505
+
+### A1 auf Axion: nichts
+
+| Zelle | vor A1 | nach A1 | Delta | liblz4 Delta |
+|---|---|---|---|---|
+| noise_512 | 30.69 | 30.37 | -1.0% | -0.2% |
+| noise_4k | 44.03 | 43.40 | **-1.4%** | -0.3% |
+| noise_64k | 69.20 | 69.42 | +0.3% | +1.5% |
+| records_512 | 10.23 | 10.16 | -0.7% | -0.1% |
+| varied_512 | 7.17 | 7.16 | -0.1% | +0.6% |
+| records_4k | 12.58 | 12.46 | -1.0% | -0.1% |
+| varied_4k | 7.35 | 7.32 | -0.4% | +0.0% |
+| records_64k | 14.22 | 14.28 | +0.4% | +0.2% |
+| varied_64k | 6.50 | 6.46 | -0.6% | +0.5% |
+
+Kontrollen innerhalb 1.5%, die meisten unter 0.6%. **Der M2 Max gewinnt 7.9% an
+derselben Schleife, Neoverse V2 nichts.** Die Theorie -- ein ueberfluessiges
+`cmp` je Runde -- war fuer den M2 richtig und fuer V2 falsch.
+
+Und sie war aus dem falschen Grund falsch. V2 schreibt 32 B/Zyklus; bei 44
+GiB/s auf 4096 Bytes stehen wir bei rund 15.7 B/Zyklus, also der Haelfte davon,
+und liblz4 bei 24. Weder store-gebunden noch issue-gebunden -- zwei von fuenf
+Instruktionen zu streichen hat null bewegt. Was bleibt, ist die
+**post-indizierte Adressierung**: jedes `stp q0, q1, [x0], #32` haengt am
+Zeiger-Writeback der vorigen Runde, und die Runden koennen deshalb nicht
+uebereinander laufen. glibc adressiert aarch64 stattdessen mit Offsets von
+einer Basis und einem `add` je Runde -- was der x86-Body in `L(lit_l32)` seit
+laengerem tut, mit einem negativen Index, der gegen null zaehlt. Das ist die
+naechste Hypothese, und sie hat einen Mechanismus statt einer Instruktionszahl.
+
+A1 bleibt: +7.9% auf einer Maschine, -1.4% auf der anderen bei -0.3% Kontrolle.
+
+### E1 auf EPYC: noise_4k geht auf Paritaet
+
+Positionsgleich gelesen und zusaetzlich auf liblz4 normiert, was die Maschine
+herauskuerzt:
+
+| noise_4k | keva | liblz4 | Verhaeltnis |
+|---|---|---|---|
+| Position 1, vor E1 | 59.50 | 64.20 | 0.927 |
+| Position 1, nach E1 | 64.01 | 65.48 | **0.978** |
+| Position 2, vor E1 | 61.02 | 65.06 | 0.938 |
+| Position 2, nach E1 | 65.63 | 64.20 | **1.022** |
+
+Beide Positionen stimmen in Richtung und Groesse ueberein: **von rund 7% hinter
+liblz4 auf Paritaet.** Das ist die groesste Luecke, die dieser Lauf schliesst,
+und sie kam daher, eine Schleife *zu benutzen*, die auf dieser Teilelinie
+laengst existierte und von einer auf Xeon gemessenen Schwelle uebersprungen
+wurde.
+
+### E1 bei noise_512: nicht lesbar
+
+| noise_512 | keva | liblz4 | Verhaeltnis |
+|---|---|---|---|
+| Position 1, vor E1 | 31.69 | 42.01 | 0.754 |
+| Position 1, nach E1 | 34.10 | 44.79 | 0.761 |
+| Position 2, vor E1 | 31.71 | 42.05 | 0.754 |
+| Position 2, nach E1 | 28.15 | 39.87 | 0.706 |
+
+Position 1 sagt nichts, Position 2 sagt -4.8 Prozentpunkte. Genau diese Zelle
+ist die, fuer die das Skript die 11%-Positionsstrafe dokumentiert, und die
+liblz4-Kontrolle bewegt sich zwischen den beiden Maschinen selbst um 12%. Die
+Zelle ist aus diesem Lauf nicht zu beantworten und braucht einen eigenen, in
+beiden Reihenfolgen und ueber mehrere Runden.
+
+noise_64k steht bei 0.995 bzw. 0.998 und ruehrt sich nicht -- richtig, denn
+65536 liegt weiter ueber der neuen Schwelle und geht nach wie vor an memcpy.
+Betroffen sind genau 512 und 4096, und genau dort steht auch die Bewegung.
+
+### E2a, das gefaltete `lea`: null
+
+| Fremdformat, Position 1 | vor | nach | Delta |
+|---|---|---|---|
+| records_512 | 9.27 | 9.28 | +0.1% |
+| records_4k | 12.82 | 12.85 | +0.2% |
+| records_64k | 13.15 | 13.05 | -0.8% |
+
+Die 4.5% aus dem Profil sind nicht in Durchsatz uebergegangen. Das reiht sich
+ein: eine Abhaengigkeitskette um eine Instruktion zu kuerzen kauft in diesem
+Kernel nichts, solange die Schleife nicht issue-gebunden ist -- dasselbe hat der
+verschobene Register-Add, das `tbnz` auf den Token und die
+zusammengezogene Offsetpruefung schon gesagt. Die Aenderung bleibt, weil sie
+streng weniger Instruktionen ist und nichts kostet, aber sie ist **kein
+Gewinn**, und die Begruendung, mit der sie gebaut wurde, ist widerlegt.
+
+### Und was sie nicht getan hat: das eigene Format bewegen
+
+E2a sitzt unter `KEVA_SSSE3` und veraendert damit auch `unpack_epyc.o` und
+`unpack_xeon.o`. Positionsgleich gemessen:
+
+| Eigenes Format, Position 1 | vor | nach | Delta | liblz4 Delta |
+|---|---|---|---|---|
+| records_512 | 10.68 | 10.68 | 0.0% | +0.9% |
+| varied_512 | 9.06 | 9.12 | +0.7% | +0.7% |
+| records_4k | 12.59 | 12.41 | -1.4% | +3.0% |
+| varied_4k | 8.58 | 8.59 | +0.1% | +0.8% |
+| records_64k | 12.06 | 12.17 | +0.9% | -0.2% |
+| varied_64k | 8.40 | 8.34 | -0.7% | -0.4% |
+
+Alles innerhalb 1.4% gegen Kontrollen, die sich um bis zu 3.0% bewegen. Das
+eigene Format steht.
