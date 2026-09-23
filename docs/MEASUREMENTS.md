@@ -1938,3 +1938,104 @@ gefragt, ob der Prozess lebt, statt wann die Logdatei zuletzt geschrieben
 wurde. Der Neuanlauf hat deshalb drei Bremsen -- eine Notabschaltung nach
 vierzig Minuten im Skript selbst, `timeout 300` je Messzelle, und einen
 Waechter auf den Zeitstempel der Logdatei.
+
+## Alle sechzehn Entpackformen im Profil, auf EPYC und auf Axion
+
+`perf record` je Form, Symbol aus `perf report` gelesen statt geraten, dazu die
+zehn heissesten Instruktionen aus `perf annotate`. EPYC 9B14 (c3d-standard-4,
+europe-west4-a), Axion / Neoverse V2 (c4a-standard-4, europe-west4-c). Beide
+Maschinen je fuer diesen einen Lauf erzeugt und danach geloescht.
+
+Der erste Anlauf auf Axion hat gar nichts geliefert: c4a nimmt `pd-balanced`
+nicht und braucht `hyperdisk-balanced`, und das Image muss `debian-12-arm64`
+sein. Das Bench-Skript weiss beides, das Profilskript wusste es nicht.
+
+### Axion, eigenes Format
+
+| Form | Kernel | heisseste Instruktion | Anteil | was sie ist |
+|---|---|---|---|---|
+| records_192 | 89.0% | `str q0, [x21, x24]` | 20.6% | die unbedingte 16-B-Literalkopie |
+| records_512 | 96.5% | `stp q0, q1, [x13], #32` | 14.0% | die Match-Kopie |
+| varied_512 | 94.6% | `stp q0, q1, [x13]` | **39.0%** | die Match-Kopie |
+| records_4k | 77.2% wide | `stp q0, q1, [x13]` | 20.2% | die Match-Kopie |
+| varied_4k | 99.4% | `stp q0, q1, [x13]` | **36.5%** | die Match-Kopie |
+| records_64k | 97.9% wide | `stp q0, q1, [x13]` | 27.4% | die Match-Kopie |
+| varied_64k | 99.0% | `stp q0, q1, [x13]` | **38.7%** | die Match-Kopie |
+
+### Axion, Fremdformat
+
+| Form | Kernel | heisseste Instruktion | Anteil | was sie ist |
+|---|---|---|---|---|
+| lz4_records_512 | 98.3% | `stp q0, q1, [x13]` | 20.4% | Match-Kopie |
+| lz4_varied_512 | 98.5% | `stp q0, q1, [x13]` | **43.1%** | Match-Kopie |
+| lz4_records_4k | 98.3% | `stp q0, q1, [x13]` | 26.2% | Match-Kopie |
+| lz4_varied_4k | 99.8% | `stp q0, q1, [x13]` | **43.8%** | Match-Kopie |
+| lz4_records_64k | 98.6% | `stp q0, q1, [x13]` | 17.5% | Match-Kopie |
+| lz4_varied_64k | 99.6% | `stp q0, q1, [x13]` | **45.7%** | Match-Kopie |
+| lz4_noise_512 | 91.8% | `stp q0, q1, [x0], #32` | 45.6% | **die eigene 32-B-Literalschleife** |
+| lz4_noise_4k | 98.5% | `stp q0, q1, [x0], #32` | 57.7% | **die eigene 32-B-Literalschleife** |
+| lz4_noise_64k | 14.9% | `0x9d3f8` u.a., 60% zusammen | | **glibc memcpy** |
+
+### EPYC, eigenes Format
+
+| Form | Kernel | heisseste Instruktion | Anteil | was sie ist |
+|---|---|---|---|---|
+| records_192 | 77.9% | `shl $0x4,%ecx` | **23.4%** | Index in die Splat-Tabelle |
+| records_512 | 86.7% | `movdqu %xmm0,(%r8)` | 14.5% | Literalkopie; `shl $4` 11.8% |
+| varied_512 | 89.5% | `movdqu 0x10(%rsi),%xmm1` | 15.0% | Literalkopie |
+| records_4k | 82.3% wide | `add $0x20,%rsi` | 10.8% | Match-Kopie |
+| varied_4k | 98.6% | `movdqu %xmm1,0x10(%r8)` | 18.2% | Literalkopie |
+| records_64k | 97.8% wide | `add $0x20,%rsi` | 7.6% | Match-Kopie |
+| varied_64k | 98.2% | `movdqu 0x10(%rsi),%xmm1` | 16.5% | Literalkopie |
+
+### EPYC, Fremdformat
+
+| Form | Kernel | heisseste Instruktion | Anteil | was sie ist |
+|---|---|---|---|---|
+| lz4_records_512 | 96.2% | `shl $0x4,%ecx` | **25.4%** | Index in die Splat-Tabelle |
+| lz4_varied_512 | 98.2% | `movdqu 0x10(%rsi),%xmm1` | 9.7% | Literalkopie; `shl $4` 8.5% |
+| lz4_records_4k | 98.0% | `movdqu 0x10(%rsi),%xmm1` | 9.9% | Literalkopie |
+| lz4_varied_4k | 99.3% | `movdqu %xmm1,0x10(%r8)` | 19.5% | Literalkopie |
+| lz4_records_64k | 98.4% | `movdqu 0x10(%rsi),%xmm1` | 29.2% | Literalkopie |
+| lz4_varied_64k | 98.9% | `movdqu 0x10(%rsi),%xmm1` | 27.2% | Literalkopie |
+| lz4_noise_512 | 33.3% | `pop %rbp` 18.5%, `push %rbp` 11.1% | | **Prolog und Epilog** |
+| lz4_noise_4k | 2.0% | `0x16db20` | **98.1%** | **glibc memcpy** |
+| lz4_noise_64k | 8.1% | `0x16db75` | **89.4%** | **glibc memcpy** |
+
+### Was das Profil beweist
+
+Der unbenannte Posten taucht auf beiden Maschinen genau dort auf, wo die
+jeweilige memcpy-Schwelle faellt -- auf EPYC ab 4k (`MEMCPY_MIN 128`), auf Axion
+erst bei 64k (`LIT_MEMCPY 8192`). Das identifiziert ihn: es ist glibc memcpy,
+dem nur die Symbole fehlen. Die beiden Maschinen bestaetigen sich gegenseitig.
+
+Damit sind alle `noise`-Zellen auf beiden Maschinen dieselbe Entscheidung, und
+sie faellt in **entgegengesetzte Richtungen**:
+
+- **Axion, noise_4k -33.1% und noise_512 -16.7%:** wir kopieren dort mit der
+  eigenen 32-Byte-Schleife, weil `LIT_MEMCPY 8192` noch nicht greift. Die
+  Schleife kostet `ldp`, `stp`, `subs`, `cmp`, `cbz` je 32 Bytes; glibc auf
+  Neoverse V2 laeuft 64 Bytes je Durchgang ohne Vergleichskette. Bei 64k, wo
+  memcpy greift, ist der Rueckstand weg. Die Schwelle 8192 ist auf dem M2 Max
+  gemessen und fuer Neoverse V2 zu hoch.
+- **EPYC, noise_4k -7.9%:** dort ist bereits glibc memcpy zu 98% drin, und
+  glibc verliert gegen die Wildcopy in liblz4, die ueberlaufen darf und keinen
+  exakten Rest behandelt. **noise_512 -22.4%** ist gar keine Kopie: Prolog und
+  Epilog sind 30% der Kernelzeit, dazu der memcpy-Aufruf. Bei 512 Bytes ist der
+  feste Aufwand die Messung. `MEMCPY_MIN 128` ist auf Xeon gemessen und fuer
+  Zen 4 zu niedrig.
+
+Das trifft sich guenstig: x86 hat eine eigene Teilelinie je Kern, `MEMCPY_MIN`
+laesst sich fuer EPYC anheben, ohne Xeon anzufassen. **aarch64 hat keine
+Teilelinien** -- ein Body je Split, geteilt zwischen M2 Max und Neoverse V2. Eine
+niedrigere `LIT_MEMCPY` trifft beide. Der erste Schritt ist deshalb eine
+Schwellenreihe lokal auf dem M2 Max, die nichts kostet: ist der M2 zwischen 512
+und 8192 gleichgueltig, faellt die Schwelle global und Axion bekommt seine 33%
+umsonst. Braucht der M2 die 8192, dann kostet es eine Teilelinie auf aarch64.
+
+Der zweite Posten, den nur EPYC hat: `shl $0x4,%ecx` mit 23.4% bei records_192
+und 25.4% bei lz4_records_512, dazu das `lea` auf die Tabelle. Das ist der
+Splat fuer Matches mit Offset unter 16 -- ein von der Offsetgroesse abhaengiger
+Ladevorgang aus einer 512-Byte-Tabelle, der ein `pshufb` fuettert. Auf Zen 4 ist
+das eine Abhaengigkeitskette von rund sechs Zyklen dort, wo records fast jeder
+Block ist. Axion hat an derselben Stelle nichts Vergleichbares.
