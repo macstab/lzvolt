@@ -1259,31 +1259,6 @@ L(lit_last):
 #  define MEMCPY_MIN 128
     cmp     $MEMCPY_MIN, %rcx
     jb      L(lit_noncall)
-    /*
-     * Where the run finishes the value, nothing needs preserving.
-     *
-     * The general case below parks `r9` and `r10` on the stack because the
-     * rejoin wants them, which is two stores, two loads and a stack adjustment
-     * of twenty-four. But when the run ends exactly on the declared length --
-     * which every incompressible value does, being one block -- the rejoin is
-     * L(done) and all it asks is that the output cursor is the end and the
-     * input cursor did not pass its own. `r14` is callee-saved and can be
-     * advanced before the call; `rdi` is known to be `r12` after it.
-     *
-     * Eight bytes rather than twenty-four, because the call wants the stack on
-     * a sixteen-byte boundary and six pushes leave it eight short.
-     */
-    lea     (%rdi,%rcx,1), %rax
-    cmp     %r12, %rax
-    jne     L(lit_call_general)
-    lea     (%r14,%rcx,1), %r14             /* past the run, and it survives */
-    mov     %rcx, %rdx
-    sub     $8, %rsp
-    call    KEVA_SYM(memcpy)
-    add     $8, %rsp
-    mov     %r12, %rdi
-    jmp     L(done)
-L(lit_call_general):
     sub     $24, %rsp
     mov     %r9, (%rsp)
     mov     %r10, 8(%rsp)
