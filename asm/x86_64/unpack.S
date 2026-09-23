@@ -881,12 +881,18 @@ L(near):
     cmp     $16, %rcx
     jae     L(near_wide)
 
+    /*
+     * One base for both tables. They are laid out back to back, so the second
+     * is the first plus a constant the assembler works out, and the `lea` that
+     * recomputed it is gone -- it was a RIP-relative address, identical on
+     * every block, sitting at the head of the chain that produces the second
+     * mask. On EPYC that `lea` carried 4.5% of records_192.
+     */
     movdqu  (%rsi), %xmm0                   /* the live bytes, and some noise */
     shl     $4, %ecx                        /* offset -> mask index */
     lea     L(splat_first)(%rip), %rdx
     pshufb  (%rdx,%rcx,1), %xmm0
-    lea     L(splat_next)(%rip), %rdx
-    movdqa  (%rdx,%rcx,1), %xmm1
+    movdqa  L(splat_next)-L(splat_first)(%rdx,%rcx,1), %xmm1
     mov     %r8, %rdx
 L(near_pattern):
     movdqu  %xmm0, (%rdx)
@@ -1256,7 +1262,27 @@ L(lit_last):
      * by twenty-four rather than sixteen so the call lands on a 16-byte
      * boundary -- six pushes leave it eight short.
      */
-#  define MEMCPY_MIN 128
+/*
+ * Where the threshold sits is a property of the part, not of the format.
+ *
+ * 128 was measured on a Xeon 8481C, whose glibc entry beats this loop from four
+ * iterations up. Zen 4 says the opposite, and the profile says why: at 4 KiB of
+ * incompressible input 98.1% of the kernel's time is inside glibc's memcpy, and
+ * liblz4 -- which copies the same bytes with an inline loop that is allowed to
+ * overrun -- is 7.9% faster. At 512 bytes 30% of the time is `push %rbp` and
+ * `pop %rbp`: two prologues for one copy, ours and memcpy's.
+ *
+ * Zen 4's L1 sustains 32 B/cycle of stores, and the loop below already reaches
+ * that with two 32-byte `vmovdqu` an iteration. glibc cannot copy faster; it can
+ * only arrive later, through a size dispatch and a call. So on this part line
+ * the loop keeps the work until the run is long enough that the cache-bypassing
+ * a tuned memcpy does starts to matter, which is where AArch64 put it too.
+ */
+#  if defined(KEVA_EPYC)
+#    define MEMCPY_MIN 8192
+#  else
+#    define MEMCPY_MIN 128
+#  endif
     cmp     $MEMCPY_MIN, %rcx
     jb      L(lit_noncall)
     sub     $24, %rsp
