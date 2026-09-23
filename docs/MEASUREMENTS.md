@@ -1908,3 +1908,33 @@ Benchmark misst den Messaufbau". Was sie aufgeklaert hat, war ein Kostenmodell
 aus zwei anderen Zellen -- 148 Zyklen fuer vier Bloecke gegen 138 fuer zwoelf
 ist arithmetisch unmoeglich, und das war schon sichtbar, bevor irgendeine
 Maschine lief.
+
+## 2026-09-23 — Der Schnellausgang im memcpy-Zweig: widerlegt
+
+Wo der Literallauf den Wert abschliesst, braucht der Ruecksprung keine
+geretteten Register: acht statt vierundzwanzig Byte Stack, vier
+Speicherzugriffe weniger. Gemessen auf Xeon, vier Positionen, `noise`:
+
+| | P1 alt | P2 neu | P3 alt | P4 neu | alt -> neu |
+|---|---|---|---|---|---|
+| noise_512 | 45.28 | 43.42 | 45.17 | 43.27 | **-4.2%** |
+| noise_4k | 66.88 | 66.38 | 66.81 | 66.41 | -0.7% |
+| noise_64k | 36.59 | 34.04 | 34.87 | 34.12 | -3.6% |
+
+Sauber nach Revision getrennt. Das `lea`/`cmp`/`jne` vor jedem Aufruf kostet
+mehr als die zwei Stores und zwei Loads, die es spart, und der zusaetzliche
+Verzweigungspunkt zieht den Code auseinander. Zurueckgenommen.
+
+Damit bleibt noise_512 auf Xeon bei -11.9% gegen liblz4, und der Rueckstand ist
+weiterhin mit 3.4 Zyklen auf 28.7 beziffert. Auf M2 gewinnen wir dieselbe Zelle
+mit 34.3 gegen 34.7 Zyklen -- der Unterschied ist, dass glibcs memcpy auf x86
+27% schneller wird als auf ARM und unsere Fassung nur 16%.
+
+### Zum Ablauf, weil er Geld gekostet hat
+
+Der vorherige Anlauf dieser Messung ist um 00:25 haengen geblieben und wurde um
+09:49 gefunden: neun Stunden Instanzzeit. Jeder Statuscheck dazwischen hat
+gefragt, ob der Prozess lebt, statt wann die Logdatei zuletzt geschrieben
+wurde. Der Neuanlauf hat deshalb drei Bremsen -- eine Notabschaltung nach
+vierzig Minuten im Skript selbst, `timeout 300` je Messzelle, und einen
+Waechter auf den Zeitstempel der Logdatei.
