@@ -2039,3 +2039,81 @@ Splat fuer Matches mit Offset unter 16 -- ein von der Offsetgroesse abhaengiger
 Ladevorgang aus einer 512-Byte-Tabelle, der ein `pshufb` fuettert. Auf Zen 4 ist
 das eine Abhaengigkeitskette von rund sechs Zyklen dort, wo records fast jeder
 Block ist. Axion hat an derselben Stelle nichts Vergleichbares.
+
+## A1: die Literalschleife der LZ4-Linie auf 64 Byte, mit vorgespanntem Zaehler
+
+Das Profil auf Axion hat an einem incompressiblen 4-KiB-Block 77% der Zeit in
+fuenf Instruktionen gefunden, und zwei davon fragten dasselbe:
+
+    L(lz4_lit_blk):
+        ldp     q0, q1, [x1], #32       5.4%
+        stp     q0, q1, [x0], #32      57.7%
+        subs    x2, x2, #32            11.5%
+        cmp     x2, #32                 8.5%
+        b.hs    L(lz4_lit_blk)
+
+`subs` zieht ab und setzt Flaggen, `cmp` stellt danach dieselbe Frage an das
+Ergebnis. Zieht man die Rundenbreite einmal beim Eintritt ab, ist der `subs` am
+Fuss die Pruefung: der Borrow bedeutet genau "weniger als eine Runde uebrig".
+Das `adds` am Ausgang stellt den echten Rest wieder her und ist zugleich der
+Nulltest, den vorher ein `cbz` machte. Mit 64 statt 32 Byte je Runde werden aus
+fuenf Instruktionen je 32 Byte drei.
+
+### M2 Max, vier Runden, abwechselnd gemessen
+
+| Zelle | alt | neu | Delta | alle Laeufe (GiB/s) |
+|---|---|---|---|---|
+| keva/noise_512 | 46.54 | 49.78 | **+7.0%** | alt 46.7 46.4 25.6 48.3 / neu 49.7 49.9 50.4 49.7 |
+| keva/noise_4k | 64.15 | 69.20 | **+7.9%** | alt 65.4 63.6 63.1 64.8 / neu 69.1 68.5 69.3 69.5 |
+| keva/noise_64k | 55.54 | 55.69 | +0.3% | alt 55.2 57.7 53.6 55.9 / neu 57.6 56.6 54.3 54.8 |
+| liblz4/noise_512 | 46.70 | 45.77 | -2.0% | alt 47.2 47.5 26.4 46.2 / neu 45.7 45.9 46.4 45.6 |
+| liblz4/noise_4k | 64.10 | 63.79 | -0.5% | alt 64.7 64.6 63.6 63.6 / neu 62.0 64.7 64.1 63.5 |
+| liblz4/noise_64k | 56.03 | 56.11 | +0.2% | alt 55.1 56.5 55.5 58.7 / neu 55.5 57.4 56.7 54.7 |
+
+Runde 3 hat beide Seiten gleichzeitig getroffen (25.6 und 26.4) -- eine
+Stoerung der Maschine, kein Effekt der Revision. Ohne sie steht noise_512 bei
++6.4% gegen einen Kontrollabfall von 2.0%, also real aber schwaecher als der
+Median sagt. noise_4k ist eindeutig: die Verteilungen ueberlappen nicht.
+
+**noise_64k bei +0.3% ist die Gegenprobe.** Dort greift `LIT_MEMCPY 8192`, die
+Schleife wird gar nicht betreten, und die Zelle bewegt sich nicht. Der Gewinn
+liegt genau dort, wo die Theorie ihn hinlegt.
+
+### Dass das eigene Format sich nicht bewegen kann
+
+Die Schleife steht unter `#ifdef KEVA_LZ4`. Beide Revisionen mit `clang -c`
+assembliert und die Objekte verglichen:
+
+| Body | |
+|---|---|
+| `unpack.o` (even) | **identisch**, 3320 B |
+| `unpack_wide.o` | **identisch**, 3400 B |
+| `unpack_lz4.o` | geaendert, 4248 B |
+
+### Was der Mutationstest gefunden hat
+
+Vier Verfaelschungen gegen den Soak, jede einzeln:
+
+| Mutation | Soak |
+|---|---|
+| zweites `ldp`/`stp` weg -- halbe Kopie je Runde | **rot** |
+| `adds x2, x2, #48` statt `#64` -- Rest um 16 zu klein | **rot** |
+| Eintrittsbias `#32` statt `#64` | gruen |
+| `b.hs` -> `b.hi` | gruen |
+
+`b.hi` ist kein Fehler: bei genau 64 Rest faellt die Schleife heraus und
+`L(exact)` kopiert die 64 exakt. Richtige Ausgabe, nur langsamer.
+
+Der Eintrittsbias ist einer. Mit `#32` betritt die Schleife ihren Rumpf schon
+bei vierzig verbleibenden Bytes und kopiert dann vierundsechzig -- **bis zu 63
+Bytes ueber den Eingabepuffer hinaus gelesen**. Die Ausgabe bleibt trotzdem
+korrekt, weil die Extrabytes in den Ueberlaufschlupf fallen, den der Aufrufer
+ohnehin abschneidet. Der Soak prueft, was herauskommt, und kann das deshalb
+nicht sehen.
+
+Die abgelieferte Fassung ist auf dieser Grenze sauber -- eine Runde laeuft nur
+mit vierundsechzig Bytes in der Hand und liest vierundsechzig. Aber die
+Abdeckung dafuer fehlt, und sie fehlt fuer jeden Pfad in dieser Datei, nicht nur
+fuer diesen. Ein Test, der den gepackten Block ans Ende einer Seite legt und die
+naechste nicht abbildet, wuerde jeden Uebergriff sofort mit SIGSEGV melden. Das
+ist die naechste Luecke, die zugeht.
