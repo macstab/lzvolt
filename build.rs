@@ -17,6 +17,7 @@ fn main() {
             "asm/aarch64/unpack.S",
             "asm/aarch64/unpack_wide.S",
             "asm/aarch64/unpack_lz4.S",
+            "asm/aarch64/unpack_lz4_neoverse.S",
         ],
         "x86_64" => &[
             "asm/x86_64/ctrl_match.S",

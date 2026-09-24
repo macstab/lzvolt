@@ -90,8 +90,13 @@
 #endif
 
 #if defined(KEVA_LZ4)
-#  define KEVA_PFX   l
-#  define KEVA_ENTRY keva_unpack_lz4
+#  if defined(KEVA_NEOVERSE)
+#    define KEVA_PFX   ln
+#    define KEVA_ENTRY keva_unpack_lz4_neoverse
+#  else
+#    define KEVA_PFX   l
+#    define KEVA_ENTRY keva_unpack_lz4
+#  endif
 #  define LIT_SHIFT  4
 #  define LIT_MAX    15
 #  define MAT_MAX    15
@@ -1005,6 +1010,53 @@ L(slow_lit_exact):
      * this path exists rather than the wide one above.
      */
 L(lz4_lit_loop):
+#ifdef KEVA_NEOVERSE
+    /*
+     * Bring the destination to a 32-byte boundary before the bulk loop.
+     *
+     * Neoverse V2 retires two 16-byte stores a cycle, so sixty-four bytes a
+     * round should cost two cycles and reach 32 B/cycle. Measured it reaches
+     * 18.9 -- 83% of an incompressible 4 KiB block sits in this loop, and
+     * 4096 bytes at 44 GiB/s is 261 cycles, of which 217 are here. Three and a
+     * half cycles a round, not two.
+     *
+     * The missing cycle and a half is not issue: taking two of five
+     * instructions out of the round (the redundant `cmp`) moved nothing at all
+     * on this part, while it moved 7.9% on an M2. It is the line boundary. A
+     * malloc'd buffer is sixteen-byte aligned, so consecutive 32-byte accesses
+     * land at line offsets 16, 48, 16, 48 -- and every one at 48 crosses into
+     * the next 64-byte line and splits into two accesses. Half the stores, one
+     * extra port cycle each, two stores a round: one and a half cycles. That is
+     * the whole of the gap, and it is why glibc's memcpy -- which aligns before
+     * it streams -- reads the same block 52% faster.
+     *
+     * The destination and not the source, because stores are the scarcer side:
+     * two store pipes against three load pipes. Both cannot be aligned unless
+     * they happen to agree modulo thirty-two, and they do not.
+     *
+     * Thirty-two bytes are copied unaligned once, then the cursor jumps to the
+     * next boundary and some of those bytes are written again. Copying a byte
+     * twice is free; splitting every second store for the length of the run is
+     * not. Only above 128 bytes, below which the head is more than the run.
+     *
+     * It sits after the entry label and not before it: the memcpy test above
+     * branches *to* that label, so anything in front of it is reached only by
+     * falling out of the call, which never happens. Written there first, it
+     * assembled, linked, ran, and did nothing at all -- three deliberate
+     * corruptions of it left the soak green, which is what said so.
+     */
+    cmp     x2, #128
+    b.lo    L(lz4_lit_go)
+    ldp     q0, q1, [x1]
+    stp     q0, q1, [x0]
+    add     x6, x0, #32
+    bic     x6, x6, #31                 // the next boundary at or after x0 + 32
+    sub     x6, x6, x0                  // so one to thirty-two bytes, never none
+    add     x0, x0, x6
+    add     x1, x1, x6
+    sub     x2, x2, x6                  // at least 96 left, so the loop still runs
+L(lz4_lit_go):
+#endif
     subs    x2, x2, #64
     b.lo    L(lz4_lit_tail)
 L(lz4_lit_blk):

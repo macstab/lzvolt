@@ -1338,6 +1338,39 @@ L(lit_noncall):
      * the remainder at zero and the microcode start-up is paid in full to copy
      * no bytes. It was the hottest instruction in the kernel, at 18.65%.
      */
+#if defined(KEVA_EPYC) && defined(KEVA_LZ4)
+    /*
+     * Bring the destination to a 32-byte boundary before the bulk loop.
+     *
+     * Same argument as the AArch64 body's, and the same arithmetic. A malloc'd
+     * buffer is sixteen-byte aligned, so consecutive 32-byte stores land at
+     * line offsets 16, 48, 16, 48, and every one at 48 crosses into the next
+     * 64-byte line. Zen 4 splits such an access, and the loop below issues two
+     * of them a round.
+     *
+     * This is why raising MEMCPY_MIN reached parity with liblz4 at 4 KiB and no
+     * further: glibc aligns before it streams and liblz4's wildcopy does not,
+     * so parity was the wildcopy's number, not the ceiling.
+     *
+     * The destination, because Zen 4 sustains 32 B/cycle of stores against
+     * 64 B/cycle of loads -- the store side is the one worth not splitting.
+     * Thirty-two bytes are copied unaligned once and some are written again
+     * after the jump; that is free, and the split is not. Only above 128 bytes,
+     * and before the whole-block test below, so the guard that keeps the loop
+     * from running on a short remainder still holds afterwards.
+     */
+    cmp     $128, %rcx
+    jb      L(lit_noalign)
+    vmovdqu (%rsi), %ymm0
+    vmovdqu %ymm0, (%rdi)
+    lea     32(%rdi), %rax
+    and     $-32, %rax
+    sub     %rdi, %rax                      /* one to thirty-two bytes */
+    add     %rax, %rdi
+    add     %rax, %rsi
+    sub     %rax, %rcx                      /* at least 96 left */
+L(lit_noalign):
+#endif
     cmp     $LIT_BLK, %rcx
     jb      L(lit_b16)
 

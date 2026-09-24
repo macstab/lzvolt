@@ -86,6 +86,18 @@ pub struct Features {
     pub avx512f: bool,
     pub neon: bool,
     pub sve: bool,
+    /// Arm's Neoverse V2, which is Google's Axion and Graviton4 and Grace.
+    ///
+    /// The AArch64 side had no part line at all until this: one body per split,
+    /// shared between an M2 Max and a server core. That held while every
+    /// measurement agreed, and it stopped holding when one did not -- the same
+    /// change to the literal loop is worth +7.9% on the M2 and -1.4% here.
+    ///
+    /// Matched exactly, by MIDR part number, and nothing else. A Neoverse N2 is
+    /// a different core with a different store width and has not been measured,
+    /// so it gets the generic body, which assumes nothing. Same rule the x86
+    /// side already follows for a brand string it does not recognise.
+    pub neoverse_v2: bool,
 }
 
 impl Features {
@@ -199,9 +211,45 @@ fn detect() -> Features {
         // entirely. Left false until the first SVE kernel lands, so we never
         // claim a capability no kernel actually uses.
         f.sve = false;
+        f.neoverse_v2 = midr_says_neoverse_v2();
     }
 
     f
+}
+
+/// Whether core zero is a Neoverse V2, read from its MIDR.
+///
+/// AArch64 has no CPUID. The identification register is privileged, so Linux
+/// exports it per core under sysfs; there is no such file on macOS, and an
+/// Apple part therefore answers no and runs the generic body -- which is what
+/// every measurement on it was taken with.
+///
+/// Core zero and not a survey of all of them. On a server the cores are alike;
+/// on a phone they are not, and a phone is not a deployment target here. If that
+/// ever changes, the answer to a heterogeneous machine is the generic body, and
+/// reading one core that happens to be big would be the wrong way to get it.
+#[cfg(target_arch = "aarch64")]
+fn midr_says_neoverse_v2() -> bool {
+    const PATH: &str = "/sys/devices/system/cpu/cpu0/regs/identification/midr_el1";
+    let Ok(text) = std::fs::read_to_string(PATH) else {
+        return false;
+    };
+    let Ok(midr) = u64::from_str_radix(text.trim().trim_start_matches("0x"), 16) else {
+        return false;
+    };
+    midr_is_neoverse_v2(midr)
+}
+
+/// The bit fields of MIDR_EL1, split out so they can be tested without one.
+///
+/// Implementer in bits 31..24 and part number in 15..4. Arm is 0x41 and
+/// Neoverse V2 is 0xd4f. Apple is 0x61, which is why an M-series part cannot
+/// match even if the file somehow existed.
+#[cfg(target_arch = "aarch64")]
+fn midr_is_neoverse_v2(midr: u64) -> bool {
+    let implementer = (midr >> 24) & 0xff;
+    let part = (midr >> 4) & 0xfff;
+    implementer == 0x41 && part == 0xd4f
 }
 
 #[cfg(test)]

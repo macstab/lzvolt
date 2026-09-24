@@ -159,6 +159,23 @@ extern "C" {
     ) -> u32;
 }
 
+// The AArch64 part line, declared only where it exists.
+//
+// Neoverse V2's copy loop aligns its destination before it streams and the
+// generic one does not, because the same change measures opposite signs on this
+// architecture's two parts. See `asm/aarch64/unpack_lz4_neoverse.S`.
+#[cfg(all(keva_asm, target_arch = "aarch64"))]
+extern "C" {
+    fn keva_unpack_lz4_neoverse(
+        src: *const u8,
+        src_len: usize,
+        dst: *mut u8,
+        dst_cap: usize,
+        declared: usize,
+        start: usize,
+    ) -> u32;
+}
+
 /// Run the kernel for `split`.
 ///
 /// # Safety
@@ -227,6 +244,8 @@ pub enum Lz4Body {
     Ssse3,
     Xeon,
     Epyc,
+    /// AArch64's Neoverse V2. The first part line on this architecture.
+    NeoverseV2,
 }
 
 impl Lz4Body {
@@ -250,7 +269,16 @@ impl Lz4Body {
                 &[Lz4Body::Baseline, Lz4Body::Ssse3]
             }
         }
-        #[cfg(not(all(keva_asm, target_arch = "x86_64")))]
+        // On AArch64 both bodies run anywhere: the part line changes the shape
+        // of a loop, not the instructions available, so the soak reaches the
+        // Neoverse body from an Apple host. That matters -- the x86 line bodies
+        // went unexercised on this machine for as long as `all()` withheld them,
+        // and a kernel nobody runs is a kernel nobody tests.
+        #[cfg(all(keva_asm, target_arch = "aarch64"))]
+        {
+            &[Lz4Body::Baseline, Lz4Body::NeoverseV2]
+        }
+        #[cfg(not(all(keva_asm, any(target_arch = "x86_64", target_arch = "aarch64"))))]
         {
             &[Lz4Body::Baseline]
         }
@@ -282,7 +310,14 @@ fn detect_lz4_body() -> Lz4Body {
         }
         Lz4Body::Ssse3
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
+    {
+        if crate::cpu::features().neoverse_v2 {
+            return Lz4Body::NeoverseV2;
+        }
+        Lz4Body::Baseline
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
         Lz4Body::Baseline
     }
@@ -313,9 +348,13 @@ unsafe fn run_lz4(
         Lz4Body::Xeon => return keva_unpack_lz4_xeon(src, src_len, dst, dst_cap, declared, start),
         Lz4Body::Epyc => return keva_unpack_lz4_epyc(src, src_len, dst, dst_cap, declared, start),
         Lz4Body::Ssse3 => return keva_unpack_lz4_ssse3(src, src_len, dst, dst_cap, declared, start),
-        Lz4Body::Baseline => {}
+        Lz4Body::Baseline | Lz4Body::NeoverseV2 => {}
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(target_arch = "aarch64")]
+    if body == Lz4Body::NeoverseV2 {
+        return keva_unpack_lz4_neoverse(src, src_len, dst, dst_cap, declared, start);
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let _ = body;
 
     keva_unpack_lz4(src, src_len, dst, dst_cap, declared, start)
