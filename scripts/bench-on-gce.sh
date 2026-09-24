@@ -75,12 +75,24 @@ KEEP="${KEEP:-0}"
 # when the loop is over: a kept machine is a bill.
 REUSE="${REUSE:-0}"
 [ "$REUSE" = 1 ] && KEEP=1
-RUNS="${RUNS:-3}"
+RUNS="${RUNS:-1}"
+# Short by default, long only when asked.
+#
+# The default used to be three runs of every cell with the full test matrix,
+# which is forty minutes a revision and eighty for a pair. That is the run that
+# produces a published number, and it is not the run that answers "did this
+# help" -- which is what nearly every invocation actually wants. Paying eighty
+# minutes to find out a direction is the wrong trade, and it was made over and
+# over because it was the default rather than a choice.
+#
+# So QUICK and RUNS=1 are the default now. A pair of revisions costs a few
+# minutes. For the number that goes in the log, ask for it: QUICK=0 RUNS=3.
+#
 # Direction-finding rather than publication. QUICK=1 runs one check instead of
 # four and four benchmark cells instead of eighteen, which turns twelve minutes
 # a revision into about two. The long form is for the numbers that get quoted;
 # using it to decide whether a change helps is most of an evening.
-QUICK="${QUICK:-0}"
+QUICK="${QUICK:-1}"
 # Two seconds is enough to see a five-percent move on most cells. records_512 is
 # not most cells: it has returned 6.02 and 7.53 for the same code in one
 # evening, so a verdict there needs TIME=5 and a revision in front of it to
