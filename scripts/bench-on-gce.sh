@@ -12,11 +12,15 @@
 #   QUICK=1 REVS="..." scripts/bench-on-gce.sh intel   # direction only, ~2 min/rev
 #   KEVA_FILTER='own_format' ...                       # narrow what is measured
 #
-# REVS measures several revisions on the *same* machine in one visit. Renting a
-# machine takes twenty minutes of installing before it measures anything, so
-# paying that once for four variants rather than four times is most of what
-# makes an optimisation loop bearable -- and it removes the machine as a
-# variable between them, which matters more.
+# REVS measures several revisions on the *same* machine in one visit. That
+# removes the machine as a variable between them, which is the reason worth
+# having.
+#
+# It is not worth having for setup time. This file used to claim twenty minutes
+# of installing before a machine measures anything; that was never measured and
+# it is wrong. Timed per phase on 2026-09-24, c3d-standard-4: apt update 2s,
+# apt install 39s, rustup 7s, the whole cargo build 115s -- two minutes forty
+# from creation to measuring. Do not repeat the twenty-minute figure.
 #
 # It introduces one of its own, and on AMD it is large. Measured with two
 # byte-identical revisions -- verified identical in the text section, not
@@ -62,9 +66,9 @@ cd "$(dirname "$0")/.."
 BRANCH="${BRANCH:-packer}"
 REVS="${REVS:-}"
 KEEP="${KEEP:-0}"
-# A machine costs twenty minutes before it measures anything: apt, rustup, the
-# first build. That is the whole of the wait in a development loop, and it
-# should be paid once rather than per question.
+# A machine is ready in under three minutes (see above). KEEP and REUSE exist
+# for debugging a machine, not for saving a setup that costs less than one
+# benchmark cell.
 #
 #   KEEP=1  leaves the machine running when the run ends
 #   REUSE=1 attaches to a machine that is already running instead of creating
