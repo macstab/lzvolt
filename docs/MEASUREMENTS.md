@@ -2230,3 +2230,80 @@ E2a sitzt unter `KEVA_SSSE3` und veraendert damit auch `unpack_epyc.o` und
 
 Alles innerhalb 1.4% gegen Kontrollen, die sich um bis zu 3.0% bewegen. Das
 eigene Format steht.
+
+## Der Ausrichtungskopf, und wohin er gehoert
+
+Zwei c3d in umgekehrter Reihenfolge, drei Laeufe je Revision, dazu ein c4a.
+
+### Die Zerlegung, die den Rest dieses Abschnitts erklaert
+
+Zwei Groessen auf derselben Maschine trennen Festkosten von Durchsatz, ohne
+dass man den Takt kennen muss: `t = F + n/B`, geloest ueber 512 und 4096 Bytes.
+
+| | Festkosten | Kopierstrom |
+|---|---|---|
+| EPYC keva, ohne Kopf | 8.84 ns | 86.4 GB/s |
+| EPYC keva, mit Kopf | 12.45 ns | **99.2 GB/s** |
+| EPYC liblz4 | **4.51 ns** | 74.6 GB/s |
+| Axion keva | **5.36 ns** | 50.6 GB/s |
+| Axion liblz4 | 6.75 ns | **81.4 GB/s** |
+
+**Die zwei Teile haben entgegengesetzte Probleme.** Auf EPYC ist unser Strom 16%
+besser und der Eintritt doppelt so teuer; auf Axion ist der Eintritt 20%
+billiger und der Strom 38% schlechter. Das ist der Grund, warum dieselbe
+Aenderung auf diesen Maschinen seit Wochen andere Vorzeichen misst, und es ist
+kein Rauschen, sondern zwei verschiedene Wetten auf die Wertgroesse.
+
+Daraus folgt der Umschlagpunkt gegen liblz4 auf EPYC: **2365 Bytes**. Darunter
+gewinnt liblz4 konstruktionsbedingt, weil es die Grenzpruefungen in der Schleife
+laesst, die wir einmal beim Eintritt ausrechnen. Das Modell trifft beide
+Messpunkte auf ein Zehntel Prozent -- -23.0% bei 512 gegen gemessene -23.4%,
++5.6% bei 4096 gegen gemessene +5.7%.
+
+### Die Schwelle des Kopfes
+
+Der Kopf kostet 3.6 ns Festkosten und hebt den Strom um 15%, zahlt sich also
+erst ab **2417 Bytes** zurueck:
+
+| Lauflaenge | ohne Kopf | mit Kopf | |
+|---|---|---|---|
+| 512 B | 14.77 ns | 17.61 ns | -16.2% |
+| 1024 B | 20.69 ns | 22.77 ns | -9.1% |
+| 2048 B | 32.54 ns | 33.10 ns | -1.7% |
+| 2560 B | 38.47 ns | 38.26 ns | +0.6% |
+| 4096 B | 56.25 ns | 53.74 ns | +4.7% |
+
+128 war geraten und hat jeden 512-Byte-Wert 16% gekostet. 3072 statt 2417, weil
+`noise_64k` sich in beiden Positionen um 3% bewegt hat, obwohl der Kopf dort
+nicht laufen kann -- ein Teil der 3.6 ns ist Code-Platzierung, also ist der
+Umschlagpunkt eine Untergrenze.
+
+### Gemessen, Schwelle 128 gegen 3072
+
+| | alt | neu | roh | Kontrolle | zu liblz4 |
+|---|---|---|---|---|---|
+| noise_512, Pos 1 | 27.79 | 32.79 | **+18.0%** | +5.7% | 0.687 -> **0.767** |
+| noise_512, Pos 2 | 27.56 | 32.77 | **+18.9%** | +10.5% | 0.710 -> **0.764** |
+| noise_4k, Pos 1 | 72.86 | 72.06 | -1.1% | +0.0% | 1.118 -> 1.105 |
+| noise_4k, Pos 2 | 70.69 | 68.71 | -2.8% | +3.4% | 1.130 -> 1.062 |
+| noise_64k | 42.07 | 41.83 | -0.6% | +0.2% | unveraendert |
+
+Die liblz4-Kontrolle wandert bei noise_512 selbst um 5-10%, deshalb zaehlt die
+letzte Spalte. 0.69 auf 0.766 in beiden Positionen, und das ist der Stand vor
+dem Kopf (0.771 / 0.783): die Schwelle holt zurueck, was er dort gekostet hat,
+und laesst ihn bei 4 KiB laufen, wo er gewinnt.
+
+**EPYC steht damit bei -23.4% / +10.5% / +2.3% gegen liblz4 auf den drei
+noise-Zellen -- und die -23.4% sind exakt der Modellwert. Dort ist an der Kopie
+nichts mehr zu holen; der naechste Zentimeter kommt aus der Eintrittsgebuehr.**
+
+### Auf Neoverse V2 widerlegt
+
+Derselbe Kopf, auf dem Teil, aus dessen Zahlen die Theorie hergeleitet war:
+noise_4k **-3.3%**, noise_512 **-7.1%**, Kontrollen innerhalb 0.5%, alles
+uebrige innerhalb 1.1%. Zurueckgenommen. Die beiden AArch64-Bodies
+disassemblieren seither 556 Instruktionen Zeile fuer Zeile identisch.
+
+Die Zerlegung sagt auch, warum die Theorie dort falsch war: Axion streamt mit
+50.6 GB/s gegen glibcs 81.4, waehrend die Festkosten unter liblz4s liegen. Das
+Problem ist die Kopie selbst und nicht ihre Ausrichtung.
