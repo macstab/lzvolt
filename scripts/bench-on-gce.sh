@@ -456,20 +456,25 @@ one () {
     # nothing to show, because the remote process went down with the session.
     #
     # Now the runner is launched with nohup and the local side asks every thirty
-    # seconds whether the report exists. A reset costs one poll. The report file
-    # is the marker rather than an exit code, because that is the same file the
-    # download below looks for: if it is there the run produced something, and if
-    # it is not there was nothing to fetch either way.
+    # seconds whether the run is done. A reset costs one poll.
+    #
+    # The marker is written by the wrapper after the runner returns, and not by
+    # the runner itself. The first cut polled for `report-$sha.txt`, which the
+    # runner creates when it *starts*: the poll was satisfied after thirty
+    # seconds, both revisions were launched on top of each other, and the machine
+    # was deleted out from under them. Three more machines, no measurement, and
+    # the log said "0 failures" the whole way.
     for sha in $SHORT; do
         echo "== running $sha (apt and rustc are paid once, on the first)"
+        inner="bash ~/run.sh $RUNS $sha $QUICK $TIME $WARM '$KEVA_FILTER' > ~/log-$sha.txt 2>&1; echo done > ~/done-$sha"
         "${GC[@]}" compute ssh "$vm" --zone="$zone" --quiet \
-            --command="rm -f ~/report-$sha.txt ~/log-$sha.txt; nohup bash ~/run.sh $RUNS $sha $QUICK $TIME $WARM '$KEVA_FILTER' > ~/log-$sha.txt 2>&1 < /dev/null & echo launched" \
+            --command="rm -f ~/done-$sha ~/log-$sha.txt; nohup bash -c \"$inner\" >/dev/null 2>&1 </dev/null & echo launched" \
             || echo "== $sha did not launch"
         ok=""
         for _ in $(seq 1 160); do
             sleep 30
             if "${GC[@]}" compute ssh "$vm" --zone="$zone" --quiet \
-                --command="test -f ~/report-$sha.txt" >/dev/null 2>&1; then ok=1; break; fi
+                --command="test -f ~/done-$sha" >/dev/null 2>&1; then ok=1; break; fi
         done
         "${GC[@]}" compute ssh "$vm" --zone="$zone" --quiet \
             --command="cat ~/log-$sha.txt" 2>/dev/null || true
