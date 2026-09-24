@@ -1010,22 +1010,51 @@ L(slow_lit_exact):
      * this path exists rather than the wide one above.
      */
 /*
- * The Neoverse body's aligned head, taken back out.
+ * The Neoverse body's aligned head, on the side the counters point at.
  *
- * It brought the destination to a 32-byte boundary before streaming, on the
- * arithmetic that a malloc'd buffer is sixteen-byte aligned and so every second
- * 32-byte store crosses a 64-byte line -- one and a half cycles a round, which
- * is exactly the gap between the 18.9 B/cycle measured here and the 32 the
- * store pipes allow.
+ * The first attempt aligned the *destination* and measured -3.3% at 4 KiB and
+ * -7.1% at 512 bytes. The PMU says why, and it is not that alignment does not
+ * matter here -- it is that the destination was already aligned and there was
+ * nothing to win. Two fifteen-second runs on a c4a with the PMU enabled, the
+ * same workload in both (44.79 against 44.78 billion cycles), one where this
+ * loop copies and one where glibc's memcpy does:
  *
- * On Zen 4 that arithmetic held and the head lifted the copy by 15%. On
- * Neoverse V2, whose numbers the theory was derived from, it measured -3.3% at
- * 4 KiB and -7.1% at 512 bytes against controls inside 0.5%. So the split is
- * not what costs here, and what does is still open: the decomposition says this
- * part streams at 50.6 GB/s where glibc reaches 81.4, while our fixed cost is
- * *lower* than liblz4's -- the opposite of the x86 side in both halves.
+ *                            our loop        glibc
+ *   UNALIGNED_LD_SPEC     44.70 billion    0.08 billion
+ *   UNALIGNED_ST_SPEC      0.0000018       34.41 billion
+ *   instructions/cycle         2.48            3.99
+ *   backend cycles idle       51.29%          42.70%
+ *
+ * The two rows are complements. There are two choices and the two copiers made
+ * opposite ones: a literal run's destination begins at the output cursor, which
+ * for an incompressible value is the start of the buffer and therefore aligned,
+ * so our stores are aligned and every load is not. glibc aligns the source
+ * instead and eats unaligned stores -- and reads the same bytes 60% faster.
+ *
+ * So this head brings the *source* to a 32-byte boundary. Thirty-two bytes are
+ * copied unaligned once, the cursors jump to the boundary, and some of those
+ * bytes are written a second time, which is free. Stores become the unaligned
+ * side, which is the trade glibc makes and wins.
+ *
+ * Only above 128 bytes. The head is eight instructions and one wasted vector
+ * pair; at 50.6 GB/s against glibc's 81.4 a 512-byte run stands to save about
+ * four nanoseconds and the head costs one, so the threshold sits far below the
+ * 3072 the x86 side needs -- there the head bought 15% and here it is 60%.
  */
 L(lz4_lit_loop):
+#ifdef KEVA_NEOVERSE
+    cmp     x2, #128
+    b.lo    L(lz4_lit_go)
+    ldp     q0, q1, [x1]
+    stp     q0, q1, [x0]
+    add     x6, x1, #32
+    bic     x6, x6, #31                 // the source's next 32-byte boundary
+    sub     x6, x6, x1                  // one to thirty-two bytes, never none
+    add     x0, x0, x6
+    add     x1, x1, x6
+    sub     x2, x2, x6                  // at least 96 left, so the loop still runs
+L(lz4_lit_go):
+#endif
     subs    x2, x2, #64
     b.lo    L(lz4_lit_tail)
 L(lz4_lit_blk):
