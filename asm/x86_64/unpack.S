@@ -1355,11 +1355,23 @@ L(lit_noncall):
      * The destination, because Zen 4 sustains 32 B/cycle of stores against
      * 64 B/cycle of loads -- the store side is the one worth not splitting.
      * Thirty-two bytes are copied unaligned once and some are written again
-     * after the jump; that is free, and the split is not. Only above 128 bytes,
-     * and before the whole-block test below, so the guard that keeps the loop
-     * from running on a short remainder still holds afterwards.
+     * after the jump; that is free, and the split is not. It runs before the
+     * whole-block test below, so the guard that keeps the loop from running on
+     * a short remainder still holds afterwards.
+     *
+     * The threshold is where the head pays itself back, and it is not small.
+     * Measured on an EPYC 9B14, two machines in opposite order, three runs
+     * each, the head costs 3.6 ns of fixed cost and lifts the copy from 86.4 to
+     * 99.2 GB/s. Solving those against each other puts the break-even at 2417
+     * bytes, and the two measured sizes agree with the model to a tenth of a
+     * percent: -16.2% at 512 bytes, +4.7% at 4096.
+     *
+     * 128 was a guess and it cost 16% on every 512-byte value. 3072 rather than
+     * 2417 because part of that 3.6 ns is code placement rather than the head --
+     * noise_64k moved 3% in both positions, and the head cannot run there at all
+     * -- so the fixed cost is an upper bound and the break-even a lower one.
      */
-    cmp     $128, %rcx
+    cmp     $3072, %rcx
     jb      L(lit_noalign)
     vmovdqu (%rsi), %ymm0
     vmovdqu %ymm0, (%rdi)

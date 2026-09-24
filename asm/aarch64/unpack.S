@@ -1009,54 +1009,23 @@ L(slow_lit_exact):
      * sixty-four, so nothing past the run is read -- which is the whole reason
      * this path exists rather than the wide one above.
      */
+/*
+ * The Neoverse body's aligned head, taken back out.
+ *
+ * It brought the destination to a 32-byte boundary before streaming, on the
+ * arithmetic that a malloc'd buffer is sixteen-byte aligned and so every second
+ * 32-byte store crosses a 64-byte line -- one and a half cycles a round, which
+ * is exactly the gap between the 18.9 B/cycle measured here and the 32 the
+ * store pipes allow.
+ *
+ * On Zen 4 that arithmetic held and the head lifted the copy by 15%. On
+ * Neoverse V2, whose numbers the theory was derived from, it measured -3.3% at
+ * 4 KiB and -7.1% at 512 bytes against controls inside 0.5%. So the split is
+ * not what costs here, and what does is still open: the decomposition says this
+ * part streams at 50.6 GB/s where glibc reaches 81.4, while our fixed cost is
+ * *lower* than liblz4's -- the opposite of the x86 side in both halves.
+ */
 L(lz4_lit_loop):
-#ifdef KEVA_NEOVERSE
-    /*
-     * Bring the destination to a 32-byte boundary before the bulk loop.
-     *
-     * Neoverse V2 retires two 16-byte stores a cycle, so sixty-four bytes a
-     * round should cost two cycles and reach 32 B/cycle. Measured it reaches
-     * 18.9 -- 83% of an incompressible 4 KiB block sits in this loop, and
-     * 4096 bytes at 44 GiB/s is 261 cycles, of which 217 are here. Three and a
-     * half cycles a round, not two.
-     *
-     * The missing cycle and a half is not issue: taking two of five
-     * instructions out of the round (the redundant `cmp`) moved nothing at all
-     * on this part, while it moved 7.9% on an M2. It is the line boundary. A
-     * malloc'd buffer is sixteen-byte aligned, so consecutive 32-byte accesses
-     * land at line offsets 16, 48, 16, 48 -- and every one at 48 crosses into
-     * the next 64-byte line and splits into two accesses. Half the stores, one
-     * extra port cycle each, two stores a round: one and a half cycles. That is
-     * the whole of the gap, and it is why glibc's memcpy -- which aligns before
-     * it streams -- reads the same block 52% faster.
-     *
-     * The destination and not the source, because stores are the scarcer side:
-     * two store pipes against three load pipes. Both cannot be aligned unless
-     * they happen to agree modulo thirty-two, and they do not.
-     *
-     * Thirty-two bytes are copied unaligned once, then the cursor jumps to the
-     * next boundary and some of those bytes are written again. Copying a byte
-     * twice is free; splitting every second store for the length of the run is
-     * not. Only above 128 bytes, below which the head is more than the run.
-     *
-     * It sits after the entry label and not before it: the memcpy test above
-     * branches *to* that label, so anything in front of it is reached only by
-     * falling out of the call, which never happens. Written there first, it
-     * assembled, linked, ran, and did nothing at all -- three deliberate
-     * corruptions of it left the soak green, which is what said so.
-     */
-    cmp     x2, #128
-    b.lo    L(lz4_lit_go)
-    ldp     q0, q1, [x1]
-    stp     q0, q1, [x0]
-    add     x6, x0, #32
-    bic     x6, x6, #31                 // the next boundary at or after x0 + 32
-    sub     x6, x6, x0                  // so one to thirty-two bytes, never none
-    add     x0, x0, x6
-    add     x1, x1, x6
-    sub     x2, x2, x6                  // at least 96 left, so the loop still runs
-L(lz4_lit_go):
-#endif
     subs    x2, x2, #64
     b.lo    L(lz4_lit_tail)
 L(lz4_lit_blk):
