@@ -447,10 +447,33 @@ one () {
     done
     "${GC[@]}" compute scp "$RUNNER" "$vm:~/run.sh" --zone="$zone" --quiet >/dev/null
 
+    # Detached, and polled for.
+    #
+    # This used to hold one SSH session open for the whole benchmark, which
+    # meant the run lived exactly as long as the connection did. On 2026-09-24
+    # three machines lost their second revision to a "connection reset by peer"
+    # at the same line of all three logs -- an hour of rented time each, and
+    # nothing to show, because the remote process went down with the session.
+    #
+    # Now the runner is launched with nohup and the local side asks every thirty
+    # seconds whether the report exists. A reset costs one poll. The report file
+    # is the marker rather than an exit code, because that is the same file the
+    # download below looks for: if it is there the run produced something, and if
+    # it is not there was nothing to fetch either way.
     for sha in $SHORT; do
         echo "== running $sha (apt and rustc are paid once, on the first)"
         "${GC[@]}" compute ssh "$vm" --zone="$zone" --quiet \
-            --command="bash ~/run.sh $RUNS $sha $QUICK $TIME $WARM '$KEVA_FILTER'" || echo "== $sha reported a failure"
+            --command="rm -f ~/report-$sha.txt ~/log-$sha.txt; nohup bash ~/run.sh $RUNS $sha $QUICK $TIME $WARM '$KEVA_FILTER' > ~/log-$sha.txt 2>&1 < /dev/null & echo launched" \
+            || echo "== $sha did not launch"
+        ok=""
+        for _ in $(seq 1 160); do
+            sleep 30
+            if "${GC[@]}" compute ssh "$vm" --zone="$zone" --quiet \
+                --command="test -f ~/report-$sha.txt" >/dev/null 2>&1; then ok=1; break; fi
+        done
+        "${GC[@]}" compute ssh "$vm" --zone="$zone" --quiet \
+            --command="cat ~/log-$sha.txt" 2>/dev/null || true
+        [ -n "$ok" ] || echo "== $sha reported a failure"
     done
 
     echo "== downloading"
