@@ -470,11 +470,17 @@ one () {
         "${GC[@]}" compute ssh "$vm" --zone="$zone" --quiet \
             --command="rm -f ~/done-$sha ~/log-$sha.txt; nohup bash -c \"$inner\" >/dev/null 2>&1 </dev/null & echo launched" \
             || echo "== $sha did not launch"
+        # A heartbeat, because detaching the run also detached the output: while
+        # the benchmark is running there is nothing to print locally, and a
+        # watchdog that reads silence as a hang will delete a healthy machine.
+        # One did, twenty-six minutes in. Now the log moves every five minutes,
+        # so silence means what it is supposed to mean.
         ok=""
-        for _ in $(seq 1 160); do
+        for i in $(seq 1 160); do
             sleep 30
             if "${GC[@]}" compute ssh "$vm" --zone="$zone" --quiet \
                 --command="test -f ~/done-$sha" >/dev/null 2>&1; then ok=1; break; fi
+            [ $((i % 10)) -eq 0 ] && echo "== $sha still running, $((i / 2)) min"
         done
         "${GC[@]}" compute ssh "$vm" --zone="$zone" --quiet \
             --command="cat ~/log-$sha.txt" 2>/dev/null || true
