@@ -323,6 +323,22 @@ fn detect_lz4_body() -> Lz4Body {
     }
 }
 
+/// Which LZ4 body this machine resolves to.
+///
+/// For diagnostics: `examples/quick --entry` times the dispatch by calling
+/// [`unpack_lz4_into_slice_on`] with the answer hoisted out of the loop and
+/// comparing that against [`unpack_lz4_into_slice`], which asks again per call.
+pub fn lz4_body() -> Lz4Body {
+    #[cfg(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        detect_lz4_body()
+    }
+    #[cfg(not(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    {
+        Lz4Body::Baseline
+    }
+}
+
 /// Run the named LZ4 body.
 ///
 /// A second function rather than a fourth arm in [`run`]: the two formats pick

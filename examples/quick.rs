@@ -33,6 +33,10 @@ const BASELINE: &str = "bench-results/quick.txt";
 const CELL_MS: u128 = 300;
 
 fn main() {
+    if std::env::args().any(|a| a == "--entry") {
+        entry_cost();
+        return;
+    }
     let save = std::env::args().any(|a| a == "--save");
     let shapes = corpora();
 
@@ -189,6 +193,61 @@ fn time_pair(budget_ms: u128, mut a: impl FnMut(), mut b: impl FnMut()) -> (f64,
     let hi = pairs[3].0 / pairs[3].1;
     let spread = 100.0 * (hi / lo - 1.0);
     (pairs[2].0, pairs[2].1, spread)
+}
+
+/// What a call costs before it has copied anything, split by layer.
+///
+/// `t = F + n/B` over two sizes gives the fixed cost without needing the clock
+/// rate. Doing it twice -- once through `unpack_lz4_into_slice`, which asks
+/// which body to run on every call, and once through the `_on` form with that
+/// answer hoisted out of the loop -- splits the fixed cost into the Rust
+/// dispatch and everything else.
+#[cfg(feature = "liblz4")]
+fn entry_cost() {
+    let body = keva_asm::unpack::lz4_body();
+    println!("Body: {body:?}\n");
+    let mut rows: Vec<(&str, f64, f64)> = Vec::new();
+    for (label, n) in [("512", 512usize), ("4096", 4096)] {
+        let data = noise(n);
+        let (raw, len) = lz4_block(&data).unwrap();
+        let mut ar = Arena::new(raw.len(), len + 64);
+        ar.buf[ar.src..ar.src + raw.len()].copy_from_slice(&raw);
+        let (head, tail) = ar.buf.split_at_mut(ar.a);
+        let block: &[u8] = &head[ar.src..ar.src + raw.len()];
+        let (dst, _) = tail.split_at_mut(ar.b - ar.a);
+        // Same buffer for both so the only difference is the dispatch.
+        let with = {
+            let d = &mut *dst;
+            time(400, || {
+                assert!(keva_asm::unpack::unpack_lz4_into_slice(block, d, len));
+            })
+            .0
+        };
+        let without = {
+            let d = &mut *dst;
+            time(400, || {
+                assert!(keva_asm::unpack::unpack_lz4_into_slice_on(body, block, d, len));
+            })
+            .0
+        };
+        rows.push((label, with, without));
+        println!("{label:>6} B   mit Dispatch {with:>8.2} ns   ohne {without:>8.2} ns");
+    }
+    let fit = |a: f64, b: f64| {
+        let bw = 3584.0 / (b - a);
+        (a - 512.0 / bw, bw)
+    };
+    let (fw, bw) = fit(rows[0].1, rows[1].1);
+    let (fo, bo) = fit(rows[0].2, rows[1].2);
+    println!("\n{:<24}{:>12}{:>14}", "", "Festkosten", "Strom");
+    println!("{:<24}{fw:>9.2} ns{bw:>11.1} GB/s", "mit Dispatch");
+    println!("{:<24}{fo:>9.2} ns{bo:>11.1} GB/s", "ohne Dispatch");
+    println!("{:<24}{:>9.2} ns", "davon Rust-Dispatch", fw - fo);
+}
+
+#[cfg(not(feature = "liblz4"))]
+fn entry_cost() {
+    println!("braucht --features liblz4");
 }
 
 /// A `Vec` whose buffer starts at a known offset modulo 4096.

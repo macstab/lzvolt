@@ -314,6 +314,92 @@
     .globl KEVA_NAME(KEVA_ENTRY)
 
 KEVA_NAME(KEVA_ENTRY):
+#if defined(KEVA_EPYC) && defined(KEVA_LZ4)
+    /*
+     * A whole value that is one literal run, answered before the prologue runs.
+     *
+     * This is what an incompressible value is: liblz4 writes one token with an
+     * empty match nibble, a length chain, and then the bytes. The body below
+     * already recognises the shape at `L(lit_only)` -- but it recognises it
+     * *after* six pushes and five `lea` that compute zone limits and margins a
+     * single-block value never consults, and it pays six pops on the way out.
+     *
+     * At 512 bytes that bookkeeping is the measurement. Solved against the
+     * streaming rate over two sizes, the fixed cost of a call on this part is
+     * 8.84 ns against liblz4's 4.51, which at 512 bytes is 60% of the job and
+     * the whole of the 23% deficit there. The model says a call with that much
+     * taken out lands at parity.
+     *
+     * Nothing callee-saved is touched, so there is nothing to save: source,
+     * destination, length, copy, return. Every test below falls through to the
+     * full entry when it does not hold, so this can only ever be a shortcut --
+     * and the Rust side re-checks the result, so a wrong answer here would be a
+     * failed decode rather than a silent one.
+     *
+     * Bounded to [32, 3072). Below thirty-two the overlapping tail copy has no
+     * room; at 3072 the aligned head takes over, and that path is measured.
+     *
+     * SysV: rdi src, rsi src_len, rdx dst, rcx dst_cap, r8 declared, r9 start.
+     */
+    test    %r9, %r9                        /* only a value that starts at zero */
+    jne     L(heavy)
+    cmp     $32, %r8
+    jb      L(heavy)
+    cmp     $3072, %r8
+    jae     L(heavy)
+    lea     64(%r8), %rax
+    cmp     %rax, %rcx                      /* the slack the kernel assumes */
+    jb      L(heavy)
+    test    %rsi, %rsi
+    je      L(heavy)
+    movzbl  (%rdi), %eax                    /* the token */
+    test    $0x0F, %eax                     /* a match here means more blocks */
+    jne     L(heavy)
+    shr     $4, %eax                        /* the literal nibble */
+    mov     $1, %r10d                       /* header bytes consumed so far */
+    cmp     $15, %eax
+    jne     L(lite_len)
+L(lite_ext):
+    cmp     %rsi, %r10                      /* the chain must stay in the input */
+    jae     L(heavy)
+    movzbl  (%rdi,%r10,1), %r11d
+    inc     %r10
+    add     %r11, %rax
+    cmp     $255, %r11d
+    je      L(lite_ext)
+L(lite_len):
+    cmp     %r8, %rax                       /* the run is the whole value */
+    jne     L(heavy)
+    lea     (%r10,%r8,1), %r11
+    cmp     %rsi, %r11                      /* and consumes the whole input */
+    jne     L(heavy)
+
+    lea     (%rdi,%r10,1), %rsi             /* where the literals begin */
+    lea     -32(%r8), %r11                  /* the last start that reads in bounds */
+    xor     %eax, %eax
+L(lite_cp):
+    cmp     %r11, %rax
+    ja      L(lite_tail)
+    movdqu  (%rsi,%rax,1), %xmm0
+    movdqu  16(%rsi,%rax,1), %xmm1
+    movdqu  %xmm0, (%rdx,%rax,1)
+    movdqu  %xmm1, 16(%rdx,%rax,1)
+    add     $32, %rax
+    jmp     L(lite_cp)
+L(lite_tail):
+    /*
+     * The last thirty-two bytes, overlapping whatever the loop already wrote.
+     * Writing a byte twice is free; reading past the input is not, and the
+     * guard above established that these thirty-two are the final ones.
+     */
+    movdqu  (%rsi,%r11,1), %xmm0
+    movdqu  16(%rsi,%r11,1), %xmm1
+    movdqu  %xmm0, (%rdx,%r11,1)
+    movdqu  %xmm1, 16(%rdx,%r11,1)
+    mov     %r8d, %eax
+    ret
+L(heavy):
+#endif
     push    %rbx
     push    %rbp
     push    %r12
