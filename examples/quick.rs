@@ -75,7 +75,7 @@ fn main() {
         // Our own format, where the packer accepts the value at all.
         let mut packed = Vec::new();
         if pack::pack(data, &mut packed) {
-            let mut out = Vec::with_capacity(data.len() + 64);
+            let mut out = pinned_vec(data.len() + 4160);
             let (ours, spread) = time(CELL_MS, || {
                 pack::unpack(&packed, &mut out).unwrap();
             });
@@ -191,10 +191,61 @@ fn time_pair(budget_ms: u128, mut a: impl FnMut(), mut b: impl FnMut()) -> (f64,
     (pairs[2].0, pairs[2].1, spread)
 }
 
-/// The same, for a cell with nothing to compare against in this process.
+/// A `Vec` whose buffer starts at a known offset modulo 4096.
+///
+/// The LZ4 cells decode into an arena at fixed offsets; the own-format path
+/// cannot, because `pack::unpack` takes a `&mut Vec<u8>` and a `Vec` owns its
+/// allocation. Address-space randomisation then puts that allocation at a
+/// different 4 KiB offset every process, and `own/varied_512` read 30% apart
+/// between two runs of the same binary because of it.
+///
+/// So: allocate a handful of candidates, keep the one that lands where we want,
+/// drop the rest. Crude, and it settles the layout -- which is all a comparison
+/// needs. Duplicating the length-header parsing here to reach the slice API
+/// would be worse: that logic can drift from the format and this file would not
+/// notice.
+fn pinned_vec(cap: usize) -> Vec<u8> {
+    let mut candidates: Vec<Vec<u8>> = Vec::new();
+    for _ in 0..48 {
+        let v: Vec<u8> = Vec::with_capacity(cap);
+        if v.as_ptr() as usize % 4096 == 1088 {
+            return v;
+        }
+        candidates.push(v);
+    }
+    // Nothing landed on the mark in forty-eight tries. Take the first one --
+    // that cell is then as noisy as it was before, and its own measured spread
+    // will say so rather than the verdict inventing a finding.
+    candidates.swap_remove(0)
+}
+
+/// One implementation, with the spread taken from its own samples.
+///
+/// Not `time_pair` against an empty closure: that divides by a time near zero,
+/// and the spread came out `inf` -- which made the verdict threshold infinite
+/// and meant a regression in our *own* format could never be reported. Those
+/// are the cells that are not allowed to move at all.
 fn time(budget_ms: u128, mut f: impl FnMut()) -> (f64, f64) {
-    let (a, _, spread) = time_pair(budget_ms, &mut f, || {});
-    (a, spread)
+    for _ in 0..8 {
+        f();
+    }
+    let probe = Instant::now();
+    for _ in 0..64 {
+        f();
+    }
+    let per_call = (probe.elapsed().as_nanos() as f64 / 64.0).max(0.25);
+    let rounds = ((budget_ms as f64 * 1_000_000.0 / 5.0) / per_call).max(1.0) as u64;
+
+    let mut v: Vec<f64> = Vec::with_capacity(5);
+    for _ in 0..5 {
+        let t = Instant::now();
+        for _ in 0..rounds {
+            f();
+        }
+        v.push(t.elapsed().as_nanos() as f64 / rounds as f64);
+    }
+    v.sort_by(|x, y| x.partial_cmp(y).unwrap());
+    (v[2], 100.0 * (v[3] / v[1] - 1.0))
 }
 
 type Cell = (String, f64, f64, f64);
