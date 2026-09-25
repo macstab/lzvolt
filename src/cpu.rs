@@ -156,6 +156,14 @@ fn brand_says(brand: &str, line: &str) -> bool {
         .any(|w| w.eq_ignore_ascii_case(line.as_bytes()))
 }
 
+/// Ask the machine once, at the first call to [`features`].
+///
+/// Everything here is a question with a defined answer -- CPUID leaves on
+/// x86-64, MIDR_EL1 through sysfs on AArch64 -- and nothing is inferred from
+/// anything else. A part whose brand string names no line we have measured
+/// comes back with `xeon` and `epyc` both false, and dispatch then picks the
+/// body that assumes nothing about either, which is the right answer for
+/// hardware nobody has benchmarked.
 fn detect() -> Features {
     let mut f = Features::default();
 

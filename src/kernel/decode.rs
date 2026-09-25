@@ -56,6 +56,7 @@ extern "C" {
 // nothing outside x86-64 links them.
 #[cfg(all(keva_asm, target_arch = "x86_64"))]
 extern "C" {
+    /// Even split, any SSSE3 part whose brand names no line.
     fn keva_unpack_ssse3(
         src: *const u8,
         src_len: usize,
@@ -65,6 +66,7 @@ extern "C" {
         start: usize,
     ) -> u32;
 
+    /// Wide split, the same unrecognised-part body.
     fn keva_unpack_wide_ssse3(
         src: *const u8,
         src_len: usize,
@@ -74,6 +76,8 @@ extern "C" {
         start: usize,
     ) -> u32;
 
+    /// Even split, Intel server line. Carries `rep movsb` above REP_MIN,
+    /// which Zen would pay tens of cycles of start-up for.
     fn keva_unpack_xeon(
         src: *const u8,
         src_len: usize,
@@ -83,6 +87,7 @@ extern "C" {
         start: usize,
     ) -> u32;
 
+    /// Wide split, Intel server line.
     fn keva_unpack_wide_xeon(
         src: *const u8,
         src_len: usize,
@@ -92,6 +97,8 @@ extern "C" {
         start: usize,
     ) -> u32;
 
+    /// Even split, AMD server line. No string instruction: Zen has ERMSB
+    /// without Fast Short REP MOV.
     fn keva_unpack_epyc(
         src: *const u8,
         src_len: usize,
@@ -101,6 +108,7 @@ extern "C" {
         start: usize,
     ) -> u32;
 
+    /// Wide split, AMD server line.
     fn keva_unpack_wide_epyc(
         src: *const u8,
         src_len: usize,
@@ -110,6 +118,7 @@ extern "C" {
         start: usize,
     ) -> u32;
 
+    /// Foreign LZ4 blocks on an unrecognised SSSE3 part.
     fn keva_unpack_lz4_ssse3(
         src: *const u8,
         src_len: usize,
@@ -119,6 +128,9 @@ extern "C" {
         start: usize,
     ) -> u32;
 
+    /// Foreign LZ4 blocks, Intel server line. 256-bit literal copy, so AVX2
+    /// is asked for before dispatch picks it -- a brand string is not a
+    /// capability.
     fn keva_unpack_lz4_xeon(
         src: *const u8,
         src_len: usize,
@@ -128,6 +140,10 @@ extern "C" {
         start: usize,
     ) -> u32;
 
+    /// Foreign LZ4 blocks, AMD server line. Its memcpy threshold is 8192
+    /// where the Xeon body uses 128: Zen 4 reaches its store limit with two
+    /// 32-byte moves, so glibc can only arrive later. See
+    /// docs/MEASUREMENTS.md.
     fn keva_unpack_lz4_epyc(
         src: *const u8,
         src_len: usize,

@@ -110,6 +110,8 @@ extern "C" {
         table: *mut u32,
     ) -> u32;
 
+    /// AMD server line. Separate from the Xeon body for the same reason the
+    /// decoder's are: the same code has measured opposite signs on the two.
     fn keva_pack_amd(
         src: *const u8,
         src_len: usize,
@@ -483,6 +485,8 @@ pub fn find_scalar(input: &[u8], table: &mut [u32], state: &mut PackState) {
 mod tests {
     use super::*;
 
+    /// Records-shaped JSON: a few varying fields in a fixed frame, which is
+    /// what reaches the wide split and what a cache mostly holds.
     fn records(total: usize) -> Vec<u8> {
         let mut out = Vec::with_capacity(total);
         let mut i = 0u64;
@@ -496,6 +500,8 @@ mod tests {
         out
     }
 
+    /// The same frame with high-entropy fields, so matches stay short and the
+    /// block rate rather than the copy rate decides the cost.
     fn varied(total: usize) -> Vec<u8> {
         let mut state = 0x2545_F491_4F6C_DD1Du64;
         let mut next = move || {
@@ -512,6 +518,8 @@ mod tests {
         out
     }
 
+    /// Incompressible. The packer declines to pack it, so this exercises the
+    /// refusal path rather than the copy.
     fn noise(total: usize) -> Vec<u8> {
         let mut state = 0x9E37_79B9_7F4A_7C15u64;
         (0..total)
