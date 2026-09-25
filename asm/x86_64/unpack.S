@@ -343,7 +343,7 @@ KEVA_NAME(KEVA_ENTRY):
      */
     test    %r9, %r9                        /* only a value that starts at zero */
     jne     L(heavy)
-    cmp     $32, %r8
+    cmp     $64, %r8
     jb      L(heavy)
     cmp     $3072, %r8
     jae     L(heavy)
@@ -374,28 +374,43 @@ L(lite_len):
     cmp     %rsi, %r11                      /* and consumes the whole input */
     jne     L(heavy)
 
-    lea     (%rdi,%r10,1), %rsi             /* where the literals begin */
-    lea     -32(%r8), %r11                  /* the last start that reads in bounds */
-    xor     %eax, %eax
-L(lite_cp):
-    cmp     %r11, %rax
-    ja      L(lite_tail)
-    movdqu  (%rsi,%rax,1), %xmm0
-    movdqu  16(%rsi,%rax,1), %xmm1
-    movdqu  %xmm0, (%rdx,%rax,1)
-    movdqu  %xmm1, 16(%rdx,%rax,1)
-    add     $32, %rax
-    jmp     L(lite_cp)
-L(lite_tail):
     /*
-     * The last thirty-two bytes, overlapping whatever the loop already wrote.
-     * Writing a byte twice is free; reading past the input is not, and the
-     * guard above established that these thirty-two are the final ones.
+     * The same copy the full path uses, because the first cut of this did not.
+     *
+     * Thirty-two bytes a round with a compare and a branch measured -20.8% on
+     * noise_512 -- the entry saving was real and the loop gave back more than
+     * twice as much. This is `L(lit_l32)`'s shape: sixty-four bytes a round in
+     * two 256-bit moves, the index counting up to zero so the loop condition is
+     * the flag the `add` already set.
      */
-    movdqu  (%rsi,%r11,1), %xmm0
-    movdqu  16(%rsi,%r11,1), %xmm1
-    movdqu  %xmm0, (%rdx,%r11,1)
-    movdqu  %xmm1, 16(%rdx,%r11,1)
+    lea     (%rdi,%r10,1), %rsi             /* where the literals begin */
+    mov     %rsi, %r11                      /* and keep it, for the tail */
+    mov     %rdx, %rdi                      /* rdi is free now: keep dst's start */
+    mov     %r8, %rax
+    and     $-64, %rax                      /* whole rounds of it */
+    add     %rax, %rsi
+    add     %rax, %rdx
+    neg     %rax
+L(lite_cp):
+    vmovdqu (%rsi,%rax,1), %ymm0
+    vmovdqu 32(%rsi,%rax,1), %ymm1
+    vmovdqu %ymm0, (%rdx,%rax,1)
+    vmovdqu %ymm1, 32(%rdx,%rax,1)
+    add     $64, %rax
+    jne     L(lite_cp)
+    /*
+     * The final sixty-four, overlapping what the loop already wrote. Writing a
+     * byte twice is free; reading past the input is not, and the guard above
+     * established that these are the last bytes of it. Taken from the run's
+     * start, which is why it was kept -- the cursors above moved by the whole
+     * rounds and not by the length.
+     */
+    lea     -64(%r8), %rax
+    vmovdqu (%r11,%rax,1), %ymm0
+    vmovdqu 32(%r11,%rax,1), %ymm1
+    vmovdqu %ymm0, (%rdi,%rax,1)
+    vmovdqu %ymm1, 32(%rdi,%rax,1)
+    vzeroupper
     mov     %r8d, %eax
     ret
 L(heavy):
