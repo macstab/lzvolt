@@ -2416,3 +2416,54 @@ Instruktionen byteidentisch zum generischen Body und reines Gewicht; jetzt ist
 sie der Grund, dass ein Neoverse-Teil eine andere Seite ausrichtet als ein
 Apple-Teil -- und der M2-Body ist unangetastet, was gegen HEAD geprueft ist und
 nicht behauptet.
+
+## Der leichte Eintritt auf EPYC: +61%, nach einem Fehlschlag mit Diagnose
+
+Ein inkompressibler Wert ist ein Token mit leerem Match-Nibble, eine
+Laengenkette und die Bytes. Der Body erkennt diese Form laengst -- aber erst
+hinter sechs Pushes und fuenf `lea`, die Zonengrenzen und Raender berechnen, die
+ein Ein-Block-Wert nie liest, und er zahlt sechs Pops beim Verlassen.
+
+### Erster Versuch: -20.8%
+
+| lz4/noise_512 | Basis | leichter Eintritt |
+|---|---|---|
+| ns | 10.1 | 12.6 |
+| drei Laeufe | | **-20.9 / -20.8 / -20.6%** |
+
+Die Zerlegung sagte, dass darin zwei gegenlaeufige Posten stecken: der Eintritt
+sparte rund drei Nanosekunden, und die 32-Byte-Schleife mit Vergleich und
+Sprung, die ich statt `L(lit_last)`s Kopie geschrieben hatte, gab mehr als das
+Doppelte zurueck.
+
+### Zweiter Versuch, mit derselben Kopie: +61%
+
+| lz4/noise_512 | Basis | leichter Eintritt |
+|---|---|---|
+| ns | 10.0 | **6.4 - 6.7** |
+| GB/s | 51.1 | **76.8 - 80.3** |
+| gegen liblz4 | **-8.0%** | **+39.2 / +43.1 / +48.1%** |
+| Delta | | **+61.0 / +55.5 / +51.3%** |
+
+noise_4k ruehrt sich um 0.7%, noise_64k um 0.5%, records_512 um 0.6% -- alle
+drei liegen ueber der 3072er-Grenze und nehmen den Pfad nicht. Das ist die
+Gegenprobe, dass der Gewinn aus der angefassten Stelle kommt.
+
+Auf dem Teil selbst geprueft, weil er hier nicht laeuft: Rosetta hat kein AVX2,
+`Lz4Body::all()` haelt die EPYC-Bodies zurueck, und der lokale Soak erreicht
+diesen Code nicht. Auf der c3d: **5760 Faelle, 0 falsch**, 106 Tests. Und nur
+`unpack_lz4_epyc.o` bewegt sich -- `unpack_epyc`, `unpack_wide_epyc`,
+`unpack_xeon`, `unpack_lz4_xeon` und `unpack_ssse3` sind byteidentisch.
+
+### Und eine Korrektur an einer frueheren Zahl
+
+Die Basis liest hier **-8.0%** gegen liblz4, wo criterion **-23.4%** gemessen
+hatte. Der Unterschied ist die Pufferlage: `examples/quick` legt Quelle und Ziel
+in eine Arena mit festen Versaetzen, criterion nimmt, was der Allokator gibt.
+Ein Drittel dessen, was den ganzen Tag als struktureller Rueckstand galt, war
+die Messapparatur.
+
+Damit ist auch die Rechnung von heute Vormittag zu relativieren: dort stand, die
+Zelle sitze bei -23.4% auf dem Boden des Entwurfs, weil das Zwei-Parameter-
+Modell -23.0% vorhersagt. Das Modell war fuer *jene* Messung richtig. Der Boden
+lag woanders.
