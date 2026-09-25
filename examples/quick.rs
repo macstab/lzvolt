@@ -139,10 +139,11 @@ fn report(
 /// One line per cell, because a format nobody has to parse cannot drift.
 fn store(path: &str, cells: &[(String, f64, f64)]) {
     let _ = std::fs::create_dir_all(std::path::Path::new(path).parent().unwrap());
-    let body: String = cells
-        .iter()
-        .map(|(n, a, b)| format!("{n}\t{a}\t{b}\n"))
-        .collect();
+    use std::fmt::Write;
+    let mut body = String::new();
+    for (n, a, b) in cells {
+        let _ = writeln!(body, "{n}\t{a}\t{b}");
+    }
     let _ = std::fs::write(path, body);
 }
 
