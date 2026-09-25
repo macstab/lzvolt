@@ -2779,15 +2779,26 @@ mod tests {
             // already, to the Xeon decoder on Emerald Rapids.
             let bodies = keva_asm::unpack::Lz4Body::all();
             // Four on an x86-64 part with AVX, two without -- the line bodies
-            // copy 256 bits at a time and are not callable there. One
-            // elsewhere. Pinned so that adding a body without extending this
-            // loop is a failure rather than a silent gap.
+            // copy 256 bits at a time and are not callable there. Two on
+            // AArch64 since Neoverse V2 got its own, and both run anywhere
+            // because that part line changes the shape of a loop rather than
+            // the instructions it uses. One on anything else.
+            //
+            // Pinned so that adding a body without extending this loop is a
+            // failure rather than a silent gap, which is what it did: the
+            // Neoverse body went in and this assertion has been red ever since,
+            // unseen for a day because the loop that checked every change ran
+            // `cargo test -p keva-core` without `--features liblz4` and never
+            // reached the four tests that need it. The standardised run found
+            // it, which is what the standardised run is for.
             let want = if cfg!(target_arch = "x86_64") {
                 if keva_asm::cpu::features().avx2 {
                     4
                 } else {
                     2
                 }
+            } else if cfg!(target_arch = "aarch64") {
+                2
             } else {
                 1
             };

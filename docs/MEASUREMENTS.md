@@ -2567,3 +2567,81 @@ seinem:
 | varied_64k | -1.4% | +89.1% | +71.4% | +62.6% | +83.4% |
 
 Auf records_64k das Doppelte an logischen Bytes je Sekunde je GB RAM.
+
+## Der standardisierte Lauf auf `ad7d338`
+
+Drei Maschinen, drei Laeufe je Maschine, volle Testmatrix vor der Messung,
+voller Filter. 46 Minuten. Mediane aus drei.
+
+### Zuerst: ein roter Test, seit einem Tag
+
+Auf ARM schlug `the_kernel_itself_reads_what_liblz4_wrote` fehl -- kein
+Kernelfehler, sondern die Waechterpruefung darin:
+
+    assertion `left == right` failed: a body was added or removed
+    without this test noticing.   left: 2   right: 1
+
+Der Test zaehlt die LZ4-Bodies und war auf AArch64 auf eins festgenagelt. Die
+Neoverse-Teilelinie machte zwei daraus. **Er war seit `3bf7bb4` rot, also seit
+dem Vormittag, und ist einen ganzen Arbeitstag lang nicht aufgefallen** -- weil
+die Pruefschleife nach jeder Aenderung `cargo test -p keva-core` ohne
+`--features liblz4` lief und die vier Interop-Tests damit nie ausfuehrte.
+
+Genau dafuer existiert der lange Lauf: vier Konfigurationen statt einer.
+
+### Packen, GiB/s
+
+| Form | Xeon | | EPYC | | Neoverse V2 | |
+|---|---|---|---|---|---|---|
+| | keva | vs | keva | vs | keva | vs |
+| records_512 | 2.00 | **+55%** | 2.62 | **+122%** | 2.23 | **+54%** |
+| varied_512 | 1.25 | **+58%** | 1.55 | **+89%** | 1.22 | +28% |
+| noise_512 | 2.43 | **+81%** | 2.95 | **+134%** | 2.87 | **+77%** |
+| records_4k | 2.78 | +19% | 3.60 | +29% | 3.33 | +22% |
+| varied_4k | 1.15 | +20% | 1.47 | +27% | 1.16 | -2% |
+| noise_4k | 7.16 | **+70%** | 7.74 | **+76%** | 10.34 | **+99%** |
+| records_64k | 3.14 | +25% | 3.83 | +20% | 3.56 | +20% |
+| varied_64k | 1.25 | **+92%** | 1.08 | +0% | 1.08 | +4% |
+| noise_64k | 114.6 | **+859%** | 125.6 | **+820%** | 165.1 | **+837%** |
+
+### Dekodieren, eigenes Format, GiB/s
+
+| Form | Xeon | | EPYC | | Neoverse V2 | |
+|---|---|---|---|---|---|---|
+| records_512 | 9.44 | **+29%** | 10.78 | **+33%** | 10.60 | **+22%** |
+| varied_512 | 8.24 | **+29%** | 9.10 | **+28%** | 8.47 | **+27%** |
+| records_4k | 11.71 | +18% | 12.63 | +14% | 13.14 | **+32%** |
+| varied_4k | 7.08 | **+41%** | 8.40 | **+37%** | 8.32 | **+54%** |
+| records_64k | 11.86 | **+36%** | 12.25 | **+23%** | 12.93 | **+45%** |
+| varied_64k | 7.01 | **+72%** | 8.40 | **+64%** | 8.15 | **+83%** |
+
+**Achtzehn von achtzehn Zellen vorn, +14% bis +83%.**
+
+### Dekodieren, identische LZ4-Bloecke, GiB/s
+
+| Form | Xeon | | EPYC | | Neoverse V2 | |
+|---|---|---|---|---|---|---|
+| records_512 | 8.49 | **+25%** | 9.22 | **+28%** | 10.00 | +18% |
+| varied_512 | 6.21 | -3% | 6.94 | -3% | 7.01 | +5% |
+| noise_512 | 43.17 | **-15%** | 35.76 | **-12%** | 38.15 | +4% |
+| records_4k | 11.23 | +14% | 12.70 | +14% | 12.74 | **+29%** |
+| varied_4k | 5.58 | +11% | 6.87 | +10% | 7.35 | **+36%** |
+| noise_4k | 66.38 | -2% | 70.93 | +9% | 64.84 | -3% |
+| records_64k | 11.63 | **+33%** | 13.17 | **+31%** | 14.22 | **+60%** |
+| varied_64k | 4.67 | +15% | 5.85 | +15% | 6.51 | **+46%** |
+| noise_64k | 35.07 | +2% | 41.39 | +1% | 68.92 | -4% |
+
+### Und wo dieser Lauf dem Kurzwerkzeug widerspricht
+
+`noise_512` im Fremdformat liest hier -15% / -12% / +4%, wo `examples/quick`
++26% / +39% / +36% gemessen hat. Der Unterschied ist die Pufferlage, und er ist
+schon dokumentiert: `quick` legt Quelle und Ziel in eine Arena mit festen
+Versaetzen, criterion nimmt, was der Allokator gibt. Bei neun Nanosekunden je
+Aufruf sind dreissig Prozent Spanne allein aus 4K-Aliasing gemessen worden.
+
+Beide Zahlen sind fuer ihr Regime richtig, und die Folgerung ist unbequem:
+**unser Kernel ist auf dieser Zelle deutlich lagenempfindlicher als liblz4.**
+Der leichte Eintritt richtet auf x86 naemlich *nicht* aus -- nur der
+Neoverse-Body tut das, und genau der ist im Fremdformat bei noise_512 als
+einziger nicht negativ. Das ist ein Hinweis mit einem Mechanismus dahinter und
+der naechste Schritt, falls hier weitergearbeitet wird.
