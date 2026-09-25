@@ -2363,3 +2363,56 @@ Werkzeug liest fuer die Umkehrung -7.0 bis -8.0% und -6.7 bis -7.2%.
 Die Aufloesung ist je Zelle gemessen und nie besser als 6% angesetzt, weil das
 ist, was auf einem Laptop uebrig bleibt. Nichts, was dieses Projekt tatsaechlich
 gewonnen hat, war kleiner als 8%.
+
+## Die Quelle ausrichten, auf Neoverse V2: +49%
+
+Eine c4a, sieben Minuten, und getauscht wurde nur `unpack.S` zwischen `12741c5`
+und `9883466` -- alles andere identisch, beide Revisionen auf derselben Maschine
+im selben Zustand, gemessen mit `examples/quick`.
+
+| Zelle | Basis | neu | Delta (drei Laeufe) | GB/s |
+|---|---|---|---|---|
+| lz4/noise_4k | 84.4 ns | **56.9 ns** | **+48.6 / +49.9 / +49.4%** | 48.5 -> **72.0** |
+| lz4/noise_512 | 13.1 ns | **11.1 ns** | **+17.9 / +17.6 / +18.2%** | 39.0 -> **46.2** |
+| lz4/noise_64k | 871 ns | 869 ns | +0.5% | unveraendert |
+
+Aufloesung je Zelle 0.1 bis 0.6%. Gegen liblz4:
+
+| | vorher | nachher |
+|---|---|---|
+| noise_4k | **-34.9%** | -3.2 / -2.3 / -2.7% |
+| noise_512 | **-19.3%** | -4.8 / -5.1 / -4.6% |
+| noise_64k | -3.3% | -2.8% |
+
+Von fuenfunddreissig Prozent hinten auf drei. noise_64k ruehrt sich nicht, was
+die Gegenprobe ist: dort greift `LIT_MEMCPY 8192`, der Kopf wird nie betreten,
+und die Zelle bleibt stehen. Records und varied im Fremdformat innerhalb 1.3%,
+Eigenformat innerhalb 1.8%.
+
+**`own/varied_512` liest +5.0 bis +7.0% und ist kein Gewinn.** Der
+Eigenformat-Body ist zwischen den beiden Revisionen byteidentisch; was sich
+bewegt hat, ist das Layout der Textsektion, weil `unpack_lz4_neoverse.o`
+gewachsen ist. Real gemessen, nicht verdient -- und ein Beispiel dafuer, wieviel
+Code-Platzierung auf dieser Groesse wert ist.
+
+### Was daran das Verfahren betrifft
+
+Die PMU-Zaehler haben das vorhergesagt: unsere Loads zu 100% unausgerichtet
+(44.7 Mrd. gegen 1830 unausgerichtete Stores), glibcs genau umgekehrt, und
+glibc liest dieselben Bytes 60% schneller. Gemessen sind 49%.
+
+Das ist an diesem Tag die erste Aenderung, bei der eine Theorie vorher gesagt
+hat, was hinterher herauskam. Die davor -- der Ausrichtungskopf auf dem Ziel,
+das gefaltete `lea`, die 64-Byte-Schleife auf V2 -- waren aus denselben Zahlen
+*erschlossen* und haben null bis negativ gemessen. Der Unterschied ist nicht
+mehr Nachdenken, sondern dass hier ein Zaehler die Frage beantwortet hat, statt
+dass ich sie mir hergeleitet habe. Der Zaehler war die ganze Zeit verfuegbar und
+brauchte nur `--performance-monitoring-unit=standard` beim Erzeugen der Instanz.
+
+### Und die Teilelinie
+
+Sie traegt damit. Vor dieser Messung war `keva_unpack_lz4_neoverse` 556
+Instruktionen byteidentisch zum generischen Body und reines Gewicht; jetzt ist
+sie der Grund, dass ein Neoverse-Teil eine andere Seite ausrichtet als ein
+Apple-Teil -- und der M2-Body ist unangetastet, was gegen HEAD geprueft ist und
+nicht behauptet.
