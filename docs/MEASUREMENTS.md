@@ -2518,3 +2518,52 @@ Treffer, weil zwischen Label und Prolog Kommentarzeilen stehen. Tests und Soak
 liefen gruen, aber ueber unveraenderten Code. Vier Mutationen ueberlebten, was
 schon der Hinweis war; ein `brk` an der Stelle feuerte nicht, was es bewies.
 Danach mit einem Werkzeug eingefuegt, das bei Nichttreffer abbricht.
+
+## Axion, der letzte Test: die beiden Gewinne addieren statt kuerzen
+
+Der leichte Eintritt sprang ueber den Prolog und damit auch ueber den
+Quell-Ausrichtungskopf, der in der Literalschleife des vollen Pfades sitzt --
+ein Wert, der kurz genug fuer den Eintritt ist, erreicht ihn nie. Deshalb
+brachte er auf Axion 6%, wo Xeon und M2 26 bis 30% bekamen. Jetzt macht der
+Eintritt beides.
+
+| lz4/noise_512 | ohne leichten Eintritt | mit beidem |
+|---|---|---|
+| ns | 11.1 | **7.7 - 7.8** |
+| GB/s | 46.2 | **65.5 - 66.1** |
+| gegen liblz4 | -4.7% | **+35.4 bis +36.2%** |
+| Delta | | **+42.1 / +42.9 / +42.4%** |
+
+noise_4k und noise_64k bewegen sich unter 1.2%, beide liegen ueber der Grenze.
+
+Der generische AArch64-Body ist dabei unangetastet: sein Instruktionsstrom ist
+identisch, das Objekt unterscheidet sich um ein lokales Label im Symboltisch.
+
+## Wo der Entpacker nach diesem Tag steht
+
+`lz4/noise_512`, die Zelle, die morgens auf drei von vier Teilen hinten lag:
+
+| Teil | morgens | abends |
+|---|---|---|
+| EPYC | -8.0% | **+39 bis +48%** |
+| Xeon | -2.8% | **+25.6 bis +26.5%** |
+| M2 Max | +4.2% | **+30.5 bis +31.4%** |
+| Axion | -15.9% | **+35.4 bis +36.2%** |
+
+Axions `noise_4k` ging am selben Tag von **-34.9% auf -2.3%**, EPYCs von -7% auf
++23.8%.
+
+### Und das Produkt
+
+Fuer einen Cache sind Kapazitaet und Durchsatz unabhaengige Achsen: mehr Werte
+je GB RAM, und jeder Wert schneller gelesen. Eigenes Format gegen liblz4 auf
+seinem:
+
+| Form | Kapazitaet | M2 Max | Xeon | EPYC | Axion |
+|---|---|---|---|---|---|
+| records_4k | +35.1% | +67.4% | +58.1% | +48.6% | +75.4% |
+| **records_64k** | **+44.7%** | **+101.5%** | **+96.3%** | +79.1% | **+106.6%** |
+| varied_4k | +4.7% | +58.6% | +46.9% | +42.1% | +60.3% |
+| varied_64k | -1.4% | +89.1% | +71.4% | +62.6% | +83.4% |
+
+Auf records_64k das Doppelte an logischen Bytes je Sekunde je GB RAM.
