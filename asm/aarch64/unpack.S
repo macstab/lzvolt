@@ -335,7 +335,42 @@ L(lite_len):
     mov     x9, x6                          // kept, for the tail
     mov     x10, x2                         // kept, for the tail
     mov     x12, x2                         // destination cursor
+#ifdef KEVA_NEOVERSE
+    /*
+     * The source to a 32-byte boundary first, which on this part is worth more
+     * than the prologue this entry just skipped.
+     *
+     * The two gains were fighting: the aligned head lives in the full path's
+     * literal loop, and a value short enough for this entry never reaches it.
+     * Measured that way the light entry bought 6% here against 26-30% on the
+     * other three parts, which is the shape of one improvement cancelling
+     * another rather than of a small effect.
+     *
+     * The PMU said why alignment matters here and the destination does not:
+     * 44.70 billion unaligned loads against 1830 unaligned stores, and glibc --
+     * which aligns the source and eats unaligned stores -- reads the same bytes
+     * 60% faster. Aligning the source alone measured +49% at 4 KiB.
+     */
+    ldp     q0, q1, [x6]
+    stp     q0, q1, [x12]
+    add     x13, x6, #32
+    bic     x13, x13, #31                   // the source's next boundary
+    sub     x13, x13, x6                    // one to thirty-two bytes
+    add     x6, x6, x13
+    add     x12, x12, x13
+    sub     x14, x4, x13
+    and     x11, x14, #0xffffffffffffffc0   // whole rounds of what is left
+    cbz     x11, L(lite_tail)               // the head may have left under one
+#else
+    /*
+     * Without the head the length is untouched, so it is at least the
+     * sixty-four the guard demanded and the loop always runs. Kept out of the
+     * shared path deliberately: the two instructions the Neoverse body needs to
+     * carry a shortened length are two the others would execute for nothing,
+     * and this body assembles byte-identical to the one before this change.
+     */
     and     x11, x4, #0xffffffffffffffc0    // whole rounds of sixty-four
+#endif
 L(lite_cp):
     ldp     q0, q1, [x6], #32
     ldp     q2, q3, [x6], #32
@@ -343,11 +378,14 @@ L(lite_cp):
     stp     q2, q3, [x12], #32
     subs    x11, x11, #64
     b.ne    L(lite_cp)
+L(lite_tail):
     /*
      * The final sixty-four, overlapping what the loop already wrote. Writing a
      * byte twice is free; reading past the input is not, and the guard above
      * established that these are the last bytes of it. Taken from the run's
-     * start, because the cursors moved by whole rounds and not by the length.
+     * start, which is why it was kept -- it does not matter how the cursors got
+     * to where they are, and with the aligned head above they no longer moved
+     * by whole rounds.
      */
     sub     x11, x4, #64
     add     x6, x9, x11
