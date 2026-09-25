@@ -279,6 +279,87 @@
  * callee-saved register.
  */
 KEVA_NAME(KEVA_ENTRY):
+#ifdef KEVA_LZ4
+    /*
+     * A whole value that is one literal run, answered before the prologue runs.
+     *
+     * This is what an incompressible value is: liblz4 writes one token with an
+     * empty match nibble, a length chain, and then the bytes. The body below
+     * recognises the shape too, at `L(lit_only)`, but only after eleven
+     * registers go to the stack and the zone limits and margins are computed --
+     * none of which a single-block value consults -- and it pays them back on
+     * the way out.
+     *
+     * At 512 bytes that bookkeeping is a third of the job here and about half
+     * on EPYC, where taking it out measured +61%. Nothing callee-saved is
+     * touched on this path, so there is nothing to save.
+     *
+     * Bounded to [64, 3072): sixty-four is the round width, since the tail is
+     * one whole round taken from the end, and above 3072 the full path's own
+     * thresholds take over on ground that is already measured.
+     *
+     * AAPCS64: x0 src, x1 src_len, x2 dst, x3 dst_cap, x4 declared, x5 start.
+     */
+    cbnz    x5, L(heavy)                    // only a value that starts at zero
+    cmp     x4, #64
+    b.lo    L(heavy)
+    cmp     x4, #3072
+    b.hs    L(heavy)
+    add     x6, x4, #64
+    cmp     x3, x6                          // the slack the kernel assumes
+    b.lo    L(heavy)
+    cbz     x1, L(heavy)
+    ldrb    w6, [x0]                        // the token
+    tst     w6, #0x0F                       // a match here means more blocks
+    b.ne    L(heavy)
+    lsr     w7, w6, #4                      // the literal nibble
+    mov     x8, #1                          // header bytes consumed so far
+    cmp     w7, #15
+    b.ne    L(lite_len)
+L(lite_ext):
+    cmp     x8, x1                          // the chain must stay in the input
+    b.hs    L(heavy)
+    ldrb    w9, [x0, x8]
+    add     x8, x8, #1
+    add     x7, x7, x9
+    cmp     w9, #255
+    b.eq    L(lite_ext)
+L(lite_len):
+    cmp     x7, x4                          // the run is the whole value
+    b.ne    L(heavy)
+    add     x9, x8, x4
+    cmp     x9, x1                          // and consumes the whole input
+    b.ne    L(heavy)
+
+    add     x6, x0, x8                      // where the literals begin
+    mov     x9, x6                          // kept, for the tail
+    mov     x10, x2                         // kept, for the tail
+    mov     x12, x2                         // destination cursor
+    and     x11, x4, #0xffffffffffffffc0    // whole rounds of sixty-four
+L(lite_cp):
+    ldp     q0, q1, [x6], #32
+    ldp     q2, q3, [x6], #32
+    stp     q0, q1, [x12], #32
+    stp     q2, q3, [x12], #32
+    subs    x11, x11, #64
+    b.ne    L(lite_cp)
+    /*
+     * The final sixty-four, overlapping what the loop already wrote. Writing a
+     * byte twice is free; reading past the input is not, and the guard above
+     * established that these are the last bytes of it. Taken from the run's
+     * start, because the cursors moved by whole rounds and not by the length.
+     */
+    sub     x11, x4, #64
+    add     x6, x9, x11
+    add     x12, x10, x11
+    ldp     q0, q1, [x6], #32
+    ldp     q2, q3, [x6]
+    stp     q0, q1, [x12], #32
+    stp     q2, q3, [x12]
+    mov     w0, w4
+    ret
+L(heavy):
+#endif
     /*
      * Ten registers saved, nine used: x27 appears nowhere but here and the
      * epilogue. Removing it was tried and was a bug.

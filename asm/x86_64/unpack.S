@@ -314,7 +314,7 @@
     .globl KEVA_NAME(KEVA_ENTRY)
 
 KEVA_NAME(KEVA_ENTRY):
-#if defined(KEVA_EPYC) && defined(KEVA_LZ4)
+#ifdef KEVA_LZ4
     /*
      * A whole value that is one literal run, answered before the prologue runs.
      *
@@ -341,9 +341,20 @@ KEVA_NAME(KEVA_ENTRY):
      *
      * SysV: rdi src, rsi src_len, rdx dst, rcx dst_cap, r8 declared, r9 start.
      */
+/*
+ * Sixty-four bytes a round where 256-bit moves are available, thirty-two where
+ * they are not -- the same split the full path's literal loop already makes.
+ * The lower bound is the round width, because the tail copy is one whole round
+ * taken from the end.
+ */
+#ifdef KEVA_YMM
+#  define LITE_BLK 64
+#else
+#  define LITE_BLK 32
+#endif
     test    %r9, %r9                        /* only a value that starts at zero */
     jne     L(heavy)
-    cmp     $64, %r8
+    cmp     $LITE_BLK, %r8
     jb      L(heavy)
     cmp     $3072, %r8
     jae     L(heavy)
@@ -387,16 +398,23 @@ L(lite_len):
     mov     %rsi, %r11                      /* and keep it, for the tail */
     mov     %rdx, %rdi                      /* rdi is free now: keep dst's start */
     mov     %r8, %rax
-    and     $-64, %rax                      /* whole rounds of it */
+    and     $-LITE_BLK, %rax                /* whole rounds of it */
     add     %rax, %rsi
     add     %rax, %rdx
     neg     %rax
 L(lite_cp):
+#ifdef KEVA_YMM
     vmovdqu (%rsi,%rax,1), %ymm0
     vmovdqu 32(%rsi,%rax,1), %ymm1
     vmovdqu %ymm0, (%rdx,%rax,1)
     vmovdqu %ymm1, 32(%rdx,%rax,1)
-    add     $64, %rax
+#else
+    movdqu  (%rsi,%rax,1), %xmm0
+    movdqu  16(%rsi,%rax,1), %xmm1
+    movdqu  %xmm0, (%rdx,%rax,1)
+    movdqu  %xmm1, 16(%rdx,%rax,1)
+#endif
+    add     $LITE_BLK, %rax
     jne     L(lite_cp)
     /*
      * The final sixty-four, overlapping what the loop already wrote. Writing a
@@ -405,12 +423,19 @@ L(lite_cp):
      * start, which is why it was kept -- the cursors above moved by the whole
      * rounds and not by the length.
      */
-    lea     -64(%r8), %rax
+    lea     -LITE_BLK(%r8), %rax
+#ifdef KEVA_YMM
     vmovdqu (%r11,%rax,1), %ymm0
     vmovdqu 32(%r11,%rax,1), %ymm1
     vmovdqu %ymm0, (%rdi,%rax,1)
     vmovdqu %ymm1, 32(%rdi,%rax,1)
     vzeroupper
+#else
+    movdqu  (%r11,%rax,1), %xmm0
+    movdqu  16(%r11,%rax,1), %xmm1
+    movdqu  %xmm0, (%rdi,%rax,1)
+    movdqu  %xmm1, 16(%rdi,%rax,1)
+#endif
     mov     %r8d, %eax
     ret
 L(heavy):
