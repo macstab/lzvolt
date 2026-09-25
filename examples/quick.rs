@@ -37,34 +37,49 @@ fn main() {
     let shapes = corpora();
 
     let old = load(BASELINE);
-    let mut now: Vec<(String, f64, f64)> = Vec::new();
+    let mut now: Vec<Cell> = Vec::new();
 
     println!(
-        "{:<22}{:>10}{:>11}{:>12}{:>10}",
-        "", "ns/Aufruf", "GB/s", "vs liblz4", "vs Basis"
+        "{:<22}{:>10}{:>11}{:>12}{:>10}{:>9}",
+        "", "ns/Aufruf", "GB/s", "vs liblz4", "vs Basis", "Aufl."
     );
 
     for (name, data) in &shapes {
+        // The reference for both rows of a shape, measured in this process.
+        let mut reference = f64::NAN;
+
         // Foreign blocks: liblz4 writes, we read. The interop body.
-        if let Some((block, len)) = lz4_block(data) {
-            let mut mine = vec![0u8; len + 64];
-            let ours = time(CELL_MS, || {
-                assert!(keva_asm::unpack::unpack_lz4_into_slice(&block, &mut mine, len));
-            });
-            let theirs = time(CELL_MS, || {
-                lz4_decompress(&block, &mut mine, len);
-            });
-            report(&format!("lz4/{name}"), len, ours, theirs, &old, &mut now);
+        if let Some((raw, len)) = lz4_block(data) {
+            let mut ar = Arena::new(raw.len(), len + 64);
+            ar.buf[ar.src..ar.src + raw.len()].copy_from_slice(&raw);
+            // Split the arena once so the two closures can hold disjoint
+            // halves; the offsets are what make the layout reproducible.
+            let (head, tail) = ar.buf.split_at_mut(ar.a);
+            let block: &[u8] = &head[ar.src..ar.src + raw.len()];
+            let (dst_a, dst_b) = tail.split_at_mut(ar.b - ar.a);
+            let (ours, theirs, spread) = time_pair(
+                CELL_MS,
+                || {
+                    assert!(keva_asm::unpack::unpack_lz4_into_slice(
+                        block,
+                        &mut dst_a[..len + 64],
+                        len
+                    ));
+                },
+                || lz4_decompress(block, &mut dst_b[..len + 64], len),
+            );
+            reference = theirs;
+            report(&format!("lz4/{name}"), len, ours, theirs, spread, &old, &mut now);
         }
 
         // Our own format, where the packer accepts the value at all.
         let mut packed = Vec::new();
         if pack::pack(data, &mut packed) {
             let mut out = Vec::with_capacity(data.len() + 64);
-            let ours = time(CELL_MS, || {
+            let (ours, spread) = time(CELL_MS, || {
                 pack::unpack(&packed, &mut out).unwrap();
             });
-            report(&format!("own/{name}"), data.len(), ours, f64::NAN, &old, &mut now);
+            report(&format!("own/{name}"), data.len(), ours, reference, spread, &old, &mut now);
         }
     }
 
@@ -78,48 +93,120 @@ fn main() {
     }
 }
 
-/// Nanoseconds per call, best of five, each measured over as many rounds as
-/// fit in `budget_ms`.
+/// Source and destinations carved out of one allocation at fixed offsets.
 ///
-/// Best of five and not the mean: a slow round is something else on the machine
-/// -- another process, a frequency step, the scheduler moving the thread to a
-/// small core -- and averaging it in reports that as the code's cost. A fast
-/// round cannot be an artefact in the same way; nothing makes a loop finish
-/// work it did not do.
+/// Aligning each buffer to 64 bytes was not enough. What also matters is the
+/// distance between them modulo 4096: when a load and a recent store land on
+/// the same 4 KiB offset the hardware has to disambiguate them, and that is
+/// worth tens of percent on a small copy. Separate `Vec`s put that distance
+/// wherever the allocator felt like, which is stable inside one process and
+/// different in the next -- so the same binary measured `lz4/varied_512` 32%
+/// apart between two runs, five times in a row, with nothing changed.
 ///
-/// Five rather than three because the small cells need it. A 512-byte
-/// incompressible value decodes in about nine nanoseconds, and on a laptop the
-/// same code measured 9.2 and 18.8 in two consecutive runs at three.
-fn time(budget_ms: u128, mut f: impl FnMut()) -> f64 {
-    for _ in 0..8 {
-        f();
-    }
-    let mut best = f64::MAX;
-    for _ in 0..5 {
-        let mut rounds: u64 = 1;
-        loop {
-            let t = Instant::now();
-            for _ in 0..rounds {
-                f();
-            }
-            let ns = t.elapsed().as_nanos();
-            if ns >= budget_ms * 1_000_000 / 5 {
-                best = best.min(ns as f64 / rounds as f64);
-                break;
-            }
-            rounds = rounds.saturating_mul(4);
+/// One arena, fixed offsets, and a deliberate 1088-byte stagger so the three
+/// regions never share a 4 KiB offset. The number this produces is not the
+/// production number -- production gets whatever the allocator gives it -- but
+/// it is the same number every run, which is the only property a comparison
+/// needs.
+struct Arena {
+    buf: Vec<u8>,
+    src: usize,
+    a: usize,
+    b: usize,
+}
+
+impl Arena {
+    fn new(src_len: usize, dst_len: usize) -> Self {
+        let stride = (src_len.max(dst_len) + 4096 + 63) & !63;
+        let mut buf = vec![0u8; stride * 3 + 4096 + 128];
+        let base = buf.as_ptr().align_offset(4096);
+        let _ = &mut buf;
+        Self {
+            buf,
+            src: base,
+            a: base + stride + 1088,
+            b: base + stride * 2 + 2176,
         }
     }
-    best
 }
+
+/// Time two implementations against each other, interleaved.
+///
+/// Not one after the other. Measuring ours for three hundred milliseconds and
+/// then theirs for three hundred puts a frequency step between the two numbers,
+/// and the ratio then describes the step. Interleaved, both halves of every
+/// repetition see the same machine, and the ratio survives whatever the clock
+/// was doing.
+///
+/// The answer is the *median* of five ratios rather than the best of five. Best
+/// is right for a single measurement -- nothing makes a loop finish work it did
+/// not do -- but a ratio has a fast side and a slow side and the best of it is
+/// simply the luckiest pairing.
+fn time_pair(budget_ms: u128, mut a: impl FnMut(), mut b: impl FnMut()) -> (f64, f64, f64) {
+    for _ in 0..8 {
+        a();
+        b();
+    }
+    // One round count for both, so the two halves do the same amount of work --
+    // and computed rather than reached by doubling.
+    //
+    // It used to quadruple until the budget was met, which quantises the round
+    // count to a power of four. A cell near a boundary lands on one side in one
+    // run and the other side in the next, and four times the loop length is
+    // four times the cache and TLB pressure. That is constant inside a run and
+    // different between runs, which is exactly the shape of the phantom
+    // regressions this harness kept reporting: own/varied_512 at -31% with
+    // nothing changed, five runs agreeing with each other and none with the
+    // baseline.
+    let probe = Instant::now();
+    for _ in 0..64 {
+        a();
+    }
+    let per_call = (probe.elapsed().as_nanos() as f64 / 64.0).max(0.25);
+    let rounds = ((budget_ms as f64 * 1_000_000.0 / 5.0) / per_call).max(1.0) as u64;
+
+    let mut pairs: Vec<(f64, f64)> = Vec::with_capacity(5);
+    for _ in 0..5 {
+        let t = Instant::now();
+        for _ in 0..rounds {
+            a();
+        }
+        let ta = t.elapsed().as_nanos() as f64 / rounds as f64;
+        let t = Instant::now();
+        for _ in 0..rounds {
+            b();
+        }
+        let tb = t.elapsed().as_nanos() as f64 / rounds as f64;
+        pairs.push((ta, tb));
+    }
+    pairs.sort_by(|x, y| (x.0 / x.1).partial_cmp(&(y.0 / y.1)).unwrap());
+    // The middle ratio, and how far the neighbours sit from it. That spread is
+    // this cell's resolution: a nine-nanosecond call on a laptop cannot be read
+    // to three percent, and a fixed threshold either cries wolf there or goes
+    // deaf on the large cells. Measuring it costs nothing -- the five samples
+    // are already in hand.
+    let lo = pairs[1].0 / pairs[1].1;
+    let hi = pairs[3].0 / pairs[3].1;
+    let spread = 100.0 * (hi / lo - 1.0);
+    (pairs[2].0, pairs[2].1, spread)
+}
+
+/// The same, for a cell with nothing to compare against in this process.
+fn time(budget_ms: u128, mut f: impl FnMut()) -> (f64, f64) {
+    let (a, _, spread) = time_pair(budget_ms, &mut f, || {});
+    (a, spread)
+}
+
+type Cell = (String, f64, f64, f64);
 
 fn report(
     name: &str,
     bytes: usize,
     ours: f64,
     theirs: f64,
-    old: &[(String, f64, f64)],
-    now: &mut Vec<(String, f64, f64)>,
+    spread: f64,
+    old: &[Cell],
+    now: &mut Vec<Cell>,
 ) {
     let gbs = bytes as f64 / ours;
     let vs_lib = if theirs.is_nan() {
@@ -127,27 +214,38 @@ fn report(
     } else {
         format!("{:+.1}%", 100.0 * (theirs / ours - 1.0))
     };
-    let vs_base = match old.iter().find(|(n, _, _)| n == name) {
-        // Less time is better, so the sign is flipped to read as "faster".
-        Some((_, prev, _)) => format!("{:+.1}%", 100.0 * (prev / ours - 1.0)),
+    // Against the baseline as a *ratio* to liblz4, not as absolute time.
+    //
+    // Absolute nanoseconds are not comparable between two invocations on a
+    // laptop: frequency and core assignment move them five to eight percent
+    // with the code untouched, which this harness duly reported as "better"
+    // until the reference went in. liblz4 runs in the same process on the same
+    // bytes, so dividing by it cancels whatever the machine was doing.
+    let vs_base = match old.iter().find(|(n, _, _, _)| n == name) {
+        Some((_, prev, prev_ref, _)) if !theirs.is_nan() && !prev_ref.is_nan() => {
+            let was = prev / prev_ref;
+            let is = ours / theirs;
+            format!("{:+.1}%", 100.0 * (was / is - 1.0))
+        }
+        Some(_) => String::from("--"),
         None => String::from("neu"),
     };
-    println!("{name:<22}{ours:>10.1}{gbs:>11.2}{vs_lib:>12}{vs_base:>10}");
-    now.push((name.to_string(), ours, theirs));
+    println!("{name:<22}{ours:>10.1}{gbs:>11.2}{vs_lib:>12}{vs_base:>10}{:>9}", format!("+-{spread:.1}%"));
+    now.push((name.to_string(), ours, theirs, spread));
 }
 
 /// One line per cell, because a format nobody has to parse cannot drift.
-fn store(path: &str, cells: &[(String, f64, f64)]) {
+fn store(path: &str, cells: &[Cell]) {
     let _ = std::fs::create_dir_all(std::path::Path::new(path).parent().unwrap());
     use std::fmt::Write;
     let mut body = String::new();
-    for (n, a, b) in cells {
-        let _ = writeln!(body, "{n}\t{a}\t{b}");
+    for (n, a, b, sp) in cells {
+        let _ = writeln!(body, "{n}\t{a}\t{b}\t{sp}");
     }
     let _ = std::fs::write(path, body);
 }
 
-fn load(path: &str) -> Vec<(String, f64, f64)> {
+fn load(path: &str) -> Vec<Cell> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
@@ -158,6 +256,7 @@ fn load(path: &str) -> Vec<(String, f64, f64)> {
                 f.next()?.to_string(),
                 f.next()?.parse().ok()?,
                 f.next()?.parse().unwrap_or(f64::NAN),
+                f.next().and_then(|v| v.parse().ok()).unwrap_or(6.0),
             ))
         })
         .collect()
@@ -169,32 +268,31 @@ fn load(path: &str) -> Vec<(String, f64, f64)> {
 /// where this harness stops being able to tell code from machine -- and the
 /// liblz4 column is checked first, since a run where the control moved is a run
 /// about the machine and not about the change.
-fn verdict(old: &[(String, f64, f64)], now: &[(String, f64, f64)]) {
-    let (mut up, mut down, mut muted) = (Vec::new(), Vec::new(), Vec::new());
-    for (name, ns, lib) in now {
-        let Some((_, prev, prev_lib)) = old.iter().find(|(n, _, _)| n == name) else {
+fn verdict(old: &[Cell], now: &[Cell]) {
+    let (mut up, mut down, mut blind) = (Vec::new(), Vec::new(), 0usize);
+    for (name, ns, reference, spread) in now {
+        let Some((_, prev, prev_ref, prev_spread)) = old.iter().find(|(n, _, _, _)| n == name)
+        else {
             continue;
         };
-        let d = 100.0 * (prev / ns - 1.0);
-        // Per cell and not per run: varied_64k's control wanders several
-        // percent on a laptop, and letting that suppress the verdict on
-        // noise_4k throws away the answer because a different question was
-        // noisy.
-        let drift = if lib.is_nan() || prev_lib.is_nan() {
-            0.0
-        } else {
-            (prev_lib / lib - 1.0).abs() * 100.0
-        };
-        if drift > 3.0 {
-            if d.abs() >= 3.0 {
-                muted.push((name.clone(), d, drift));
-            }
+        if reference.is_nan() || prev_ref.is_nan() {
+            blind += 1;
             continue;
         }
-        if d >= 3.0 {
-            up.push((name.clone(), d));
-        } else if d <= -3.0 {
-            down.push((name.clone(), d));
+        let d = 100.0 * ((prev / prev_ref) / (ns / reference) - 1.0);
+        // The cell's own resolution, from both runs, and never below six
+        // percent. A move smaller than what the harness can see is not a
+        // finding, and reporting it as one is how a morning gets spent chasing
+        // a change that was the scheduler. Six and not three because six is
+        // what this measured: with the layout pinned, unchanged code still
+        // wandered up to 5.8% between runs. Nothing this project has actually
+        // won was smaller than 8%, so the floor costs no real finding -- and
+        // the number that goes in the log comes from rented hardware anyway.
+        let limit = spread.max(*prev_spread).max(6.0);
+        if d >= limit {
+            up.push((name.clone(), d, limit));
+        } else if d <= -limit {
+            down.push((name.clone(), d, limit));
         }
     }
     println!();
@@ -202,25 +300,25 @@ fn verdict(old: &[(String, f64, f64)], now: &[(String, f64, f64)]) {
         (true, true) => println!("=  unveraendert"),
         (false, true) => {
             println!("^  BESSER");
-            for (n, d) in &up {
-                println!("     {n:<22}{d:+.1}%");
+            for (n, d, l) in &up {
+                println!("     {n:<22}{d:+.1}%   (Aufloesung {l:.1}%)");
             }
         }
         (true, false) => {
             println!("v  SCHLECHTER");
-            for (n, d) in &down {
-                println!("     {n:<22}{d:+.1}%");
+            for (n, d, l) in &down {
+                println!("     {n:<22}{d:+.1}%   (Aufloesung {l:.1}%)");
             }
         }
         (false, false) => {
             println!("~  gemischt");
-            for (n, d) in up.iter().chain(down.iter()) {
-                println!("     {n:<22}{d:+.1}%");
+            for (n, d, l) in up.iter().chain(down.iter()) {
+                println!("     {n:<22}{d:+.1}%   (Aufloesung {l:.1}%)");
             }
         }
     }
-    for (n, d, drift) in &muted {
-        println!("?  {n:<22}{d:+.1}%  -- verworfen, liblz4 selbst {drift:.1}%");
+    if blind > 0 {
+        println!("   ({blind} Zellen ohne Bezugswert -- ohne liblz4 gebaut?)");
     }
 }
 

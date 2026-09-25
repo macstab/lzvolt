@@ -2307,3 +2307,59 @@ disassemblieren seither 556 Instruktionen Zeile fuer Zeile identisch.
 Die Zerlegung sagt auch, warum die Theorie dort falsch war: Axion streamt mit
 50.6 GB/s gegen glibcs 81.4, waehrend die Festkosten unter liblz4s liegen. Das
 Problem ist die Kopie selbst und nicht ihre Ausrichtung.
+
+## Ein Urteil in sieben Sekunden, und was es gekostet hat, eines zu bekommen
+
+Die Frage "hat das geholfen" wurde bis hierher mit dem Instrument beantwortet,
+das fuer "was sind die Zahlen" gebaut ist: criterion, kompletter Packer-Report,
+drei Laeufe, gemietete Hardware, vierzig Minuten je Revision. So ist ein
+achtzigminuetiger Lauf entstanden, um herauszufinden, ob eine Assemblerschleife
+schneller geworden ist.
+
+`examples/quick.rs` beantwortet nur diese eine Frage. Kein Framework zwischen
+Uhr und Aufruf: eine Schleife, zwei Zeitmessungen, Nanosekunden je Aufruf --
+die Einheit, in der das Kostenmodell ohnehin geschrieben ist.
+
+### Vier Fehler, bis es nicht mehr gelogen hat
+
+Der erste Entwurf meldete auf unveraendertem Code "BESSER" auf fuenf Zellen.
+Jeder der vier folgenden Befunde war ein echter Messfehler, keiner davon
+Statistik:
+
+1. **Absolute Nanosekunden ueber Prozessgrenzen verglichen.** Frequenz und
+   Kernzuweisung verschieben sie um 5-8%. Gegen liblz4 normiert, im selben
+   Prozess gemessen.
+2. **Nacheinander statt verschraenkt gemessen.** Dreihundert Millisekunden
+   unsere Zelle, dann dreihundert liblz4 -- dazwischen passt ein Frequenzschritt,
+   und das Verhaeltnis beschreibt dann den Schritt. Jetzt abwechselnd, Median
+   aus fuenf Paaren.
+3. **Die Rundenzahl war auf Viererpotenzen quantisiert.** Eine Zelle nahe der
+   Grenze landet in einem Lauf bei 4^6 und im naechsten bei 4^7 Runden: vierfache
+   Schleifenlaenge, vierfacher Cache-Druck. Innerhalb eines Laufs konstant,
+   zwischen Laeufen verschieden -- genau die Form der Phantomregressionen.
+   Jetzt aus einer Probemessung gerechnet.
+4. **4K-Aliasing.** Quelle und Ziel auf 64 Byte auszurichten genuegte nicht; was
+   ebenfalls zaehlt, ist ihr Abstand modulo 4096. Getrennte `Vec` legen den
+   dorthin, wo der Allokator gerade steht -- stabil im Prozess, anders im
+   naechsten. Dieselbe Binaerdatei mass `lz4/varied_512` **32% auseinander**,
+   fuenfmal hintereinander. Jetzt eine Arena mit festen Versaetzen und 1088 Byte
+   Versatz, damit keine zwei Regionen denselben 4-KiB-Offset teilen.
+
+Punkt 4 ist derselbe Effekt, dessen Untersuchung dieses Werkzeug dienen soll --
+die Messapparatur litt an dem Problem, das sie messen sollte.
+
+### Was es kann, gegengeprueft in beide Richtungen
+
+| | |
+|---|---|
+| acht Laeufe, Code unveraendert | **8x `= unveraendert`** |
+| A1 chirurgisch rueckgaengig | **3x `v SCHLECHTER`**: noise_512 -7.0 bis -8.0%, noise_4k -6.7 bis -7.2% |
+| zurueck auf HEAD | wieder `= unveraendert` |
+| Laufzeit | **7 Sekunden** |
+
+Die Vierzig-Minuten-Messung hatte fuer A1 **+7.0%** und **+7.9%** ergeben. Das
+Werkzeug liest fuer die Umkehrung -7.0 bis -8.0% und -6.7 bis -7.2%.
+
+Die Aufloesung ist je Zelle gemessen und nie besser als 6% angesetzt, weil das
+ist, was auf einem Laptop uebrig bleibt. Nichts, was dieses Projekt tatsaechlich
+gewonnen hat, war kleiner als 8%.
