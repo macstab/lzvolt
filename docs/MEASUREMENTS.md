@@ -2467,3 +2467,54 @@ Damit ist auch die Rechnung von heute Vormittag zu relativieren: dort stand, die
 Zelle sitze bei -23.4% auf dem Boden des Entwurfs, weil das Zwei-Parameter-
 Modell -23.0% vorhersagt. Das Modell war fuer *jene* Messung richtig. Der Boden
 lag woanders.
+
+## Der leichte Eintritt auf allen vier Teilen
+
+Ein Wert, der aus einem einzigen Literallauf besteht, beantwortet vor dem
+Prolog. Gemessen mit `examples/quick`, drei Laeufe je Teil, nur `unpack.S`
+zwischen den Revisionen getauscht.
+
+| Teil | vorher | nachher | Delta | gegen liblz4 |
+|---|---|---|---|---|
+| EPYC | 10.0 ns | 6.4-6.7 | **+61 / +56 / +51%** | -8.0% -> **+39 bis +48%** |
+| Xeon | 9.3 ns | 7.1-7.2 | **+29.2 / +30.1 / +29.9%** | -2.8% -> **+25.6 bis +26.5%** |
+| M2 Max | 9.1 ns | 7.3 | **+26.1 / +25.5 / +25.3%** | +4.2% -> **+30.5 bis +31.4%** |
+| Axion | 11.6 ns | 10.9-11.1 | +5.9 / +5.8 / +6.6% | -8.3% -> -2.2 bis -2.9% |
+
+noise_4k und noise_64k bewegen sich auf allen vier unter 1.2%: sie liegen ueber
+der 3072er-Grenze und nehmen den Pfad nicht. Korrektheit auf Xeon und EPYC je
+5760 Soak-Faelle, 0 falsch, 106 Tests. Alle zehn Eigenformat-Bodies sind auf
+beiden Architekturen byteidentisch.
+
+### Warum Axion so viel weniger bekommt
+
+Dort traegt die Basis bereits den Quell-Ausrichtungskopf, und der ist selbst
+Festkosten. Der leichte Eintritt spart den Prolog, richtet aber nicht aus -- er
+tauscht also einen Gewinn gegen den anderen, und uebrig bleiben sechs Prozent
+auf einer Aufloesung von sechs. Zwei der drei Laeufe sagen deshalb
+"unveraendert". Den Quell-Kopf in den leichten Eintritt zu ziehen statt ihn zu
+umgehen waere die Behebung.
+
+### Was hier methodisch falsch lief
+
+Ich hatte M2 und Axion mit der Begruendung ausgeschlossen, ihre Festkosten seien
+schon so niedrig wie liblz4s. Das war die falsche Frage. Richtig ist: wieviel
+von einem 512-Byte-Aufruf ist Festkosten, die eine Abkuerzung entfernen kann --
+EPYC 48%, Axion 41%, M2 30%. Auf EPYC waren wir beim Eintritt sogar *billiger*
+als liblz4 und haben trotzdem 61% gewonnen.
+
+Und die Zahl, auf die ich die Begruendung gestuetzt hatte (EPYC F = 8.84 ns),
+stammte aus den criterion-Daten, deren Pufferlage sich am selben Tag als
+verfaelschend erwiesen hatte. Mit festgenagelten Puffern sind es 4.76 ns, und
+nach dem leichten Eintritt 0.71.
+
+Der Einwand kam von ihm: der Code ist auf allen Architekturen derselbe, also
+muesse das Problem ueberall dasselbe sein. Das stimmte.
+
+### Ein Fehler beim Einbau, und wie er auffiel
+
+Die erste Einfuegung auf AArch64 ging still daneben -- eine Textersetzung ohne
+Treffer, weil zwischen Label und Prolog Kommentarzeilen stehen. Tests und Soak
+liefen gruen, aber ueber unveraenderten Code. Vier Mutationen ueberlebten, was
+schon der Hinweis war; ein `brk` an der Stelle feuerte nicht, was es bewies.
+Danach mit einem Werkzeug eingefuegt, das bei Nichttreffer abbricht.
