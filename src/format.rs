@@ -298,8 +298,8 @@ impl Packer {
 /// wrote it is a store that cannot be replicated.
 #[inline]
 fn pack_dispatch(input: &[u8], out: &mut Vec<u8>, table: &mut [u32; HASH_SIZE]) -> bool {
-    if keva_asm::pack_find::kernel_is_production_packer() {
-        return keva_asm::pack_find::pack_asm(input, out, table.as_mut_slice()).is_some();
+    if crate::kernel::encode::kernel_is_production_packer() {
+        return crate::kernel::encode::pack_asm(input, out, table.as_mut_slice()).is_some();
     }
     pack_with(input, out, table)
 }
@@ -1241,12 +1241,35 @@ fn pack_pass<const SHIFT: u32, S: Slot>(
     let _ = (blocks, saturated);
 }
 
+/// The length prefix: seven bits a byte, high bit meaning "one more".
+///
+/// Carried over from the store this codec was extracted from, where it encoded
+/// entry lengths. It was the codec's only reference reaching outside itself, and
+/// it reached out only from the tests -- twenty lines were cheaper to copy than
+/// a dependency to keep.
+#[cfg(test)]
+fn put_varint(buf: &mut [u8], mut value: u64) -> usize {
+    let mut written = 0;
+    loop {
+        let mut byte = (value & 0x7F) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        buf[written] = byte;
+        written += 1;
+        if value == 0 {
+            return written;
+        }
+    }
+}
+
 /// A LEB128 varint into a `Vec`. Only the tests use it now -- the header stopped
 /// being one -- and they need it to build streams the decoder must reject.
 #[cfg(test)]
 fn put_varint_into(value: u64, out: &mut Vec<u8>) {
     let mut buf = [0u8; 10];
-    let used = crate::store::entry::put_varint(&mut buf, value);
+    let used = put_varint(&mut buf, value);
     out.extend_from_slice(&buf[..used]);
 }
 
@@ -1511,11 +1534,11 @@ impl Split {
         }
     }
     #[inline]
-    fn kernel(self) -> keva_asm::unpack::Split {
+    fn kernel(self) -> crate::kernel::decode::Split {
         if self == LONG_MATCH {
-            keva_asm::unpack::Split::WideMatch
+            crate::kernel::decode::Split::WideMatch
         } else {
-            keva_asm::unpack::Split::Even
+            crate::kernel::decode::Split::Even
         }
     }
 }
@@ -1785,11 +1808,11 @@ pub fn unpack(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
     // decode. Declining is not an error report — it means "this needs the
     // decoder that can name what is wrong", which is the one below. So a stream
     // the kernel refuses is never rejected on its word alone.
-    if keva_asm::unpack::asm_available() {
+    if crate::kernel::decode::asm_available() {
         if let Ok(f) = frame(input) {
             let ok = match f.switch {
-                None => keva_asm::unpack::unpack_asm(f.body, out, f.declared, f.split.kernel()),
-                Some(switch) => keva_asm::unpack::unpack_asm_hybrid(
+                None => crate::kernel::decode::unpack_asm(f.body, out, f.declared, f.split.kernel()),
+                Some(switch) => crate::kernel::decode::unpack_asm_hybrid(
                     f.body,
                     out,
                     f.declared,
@@ -1834,7 +1857,7 @@ pub fn unpack_into(block: &[u8], out: &mut Vec<u8>, declared: usize) -> Result<(
     // nowhere else, by the shape of the call rather than by looking at the
     // bytes: a caller who has to hand over a length is holding a block that
     // does not carry one, and only LZ4 blocks do not carry one.
-    if keva_asm::unpack::asm_available() && keva_asm::unpack::unpack_lz4_asm(block, out, declared) {
+    if crate::kernel::decode::asm_available() && crate::kernel::decode::unpack_lz4_asm(block, out, declared) {
         return Ok(());
     }
     // The portable decoder wants the header, so give it one.
@@ -2475,7 +2498,7 @@ mod tests {
     /// portable decoder without saying so.
     #[test]
     fn the_kernel_reads_a_block_that_is_all_literals() {
-        if !keva_asm::unpack::asm_available() {
+        if !crate::kernel::decode::asm_available() {
             return;
         }
 
@@ -2518,9 +2541,9 @@ mod tests {
             // needs the library linked, and there is no x86-64 build of it on
             // an Apple machine, so without this the changed path would be
             // exercised on rented hardware and nowhere else.
-            for &body in keva_asm::unpack::Lz4Body::all() {
-                let mut out = vec![0u8; n + keva_asm::unpack::UNPACK_SLACK];
-                if !keva_asm::unpack::unpack_lz4_into_slice_on(body, &block, &mut out, n) {
+            for &body in crate::kernel::decode::Lz4Body::all() {
+                let mut out = vec![0u8; n + crate::kernel::decode::UNPACK_SLACK];
+                if !crate::kernel::decode::unpack_lz4_into_slice_on(body, &block, &mut out, n) {
                     refused.push(n);
                     continue;
                 }
@@ -2533,7 +2556,7 @@ mod tests {
                 // outside the slack the caller promised.
                 assert_eq!(
                     out.len(),
-                    n + keva_asm::unpack::UNPACK_SLACK,
+                    n + crate::kernel::decode::UNPACK_SLACK,
                     "the buffer moved"
                 );
             }
@@ -2595,9 +2618,9 @@ mod tests {
                 want.extend_from_slice(&tail);
 
                 let n = want.len();
-                for &body in keva_asm::unpack::Lz4Body::all() {
-                    let mut out = vec![0u8; n + keva_asm::unpack::UNPACK_SLACK];
-                    if !keva_asm::unpack::unpack_lz4_into_slice_on(body, &block, &mut out, n) {
+                for &body in crate::kernel::decode::Lz4Body::all() {
+                    let mut out = vec![0u8; n + crate::kernel::decode::UNPACK_SLACK];
+                    if !crate::kernel::decode::unpack_lz4_into_slice_on(body, &block, &mut out, n) {
                         refused += 1;
                         continue; // a refusal is the caller's fallback
                     }
@@ -2699,9 +2722,9 @@ mod tests {
                 want.extend_from_slice(&tail);
                 let n = want.len();
 
-                for &body in keva_asm::unpack::Lz4Body::all() {
-                    let mut out = vec![0u8; n + keva_asm::unpack::UNPACK_SLACK];
-                    if !keva_asm::unpack::unpack_lz4_into_slice_on(body, &block, &mut out, n) {
+                for &body in crate::kernel::decode::Lz4Body::all() {
+                    let mut out = vec![0u8; n + crate::kernel::decode::UNPACK_SLACK];
+                    if !crate::kernel::decode::unpack_lz4_into_slice_on(body, &block, &mut out, n) {
                         continue; // a refusal is the caller's fallback, not a fault
                     }
                     if out[..n] != want[..] {
@@ -2732,7 +2755,7 @@ mod tests {
     #[cfg(feature = "liblz4")]
     #[test]
     fn the_kernel_itself_reads_what_liblz4_wrote() {
-        if !keva_asm::unpack::asm_available() {
+        if !crate::kernel::decode::asm_available() {
             return;
         }
 
@@ -2777,7 +2800,7 @@ mod tests {
             // here, so a divergence in any other would sit unseen until it
             // reached a part nobody tests on -- which has happened once
             // already, to the Xeon decoder on Emerald Rapids.
-            let bodies = keva_asm::unpack::Lz4Body::all();
+            let bodies = crate::kernel::decode::Lz4Body::all();
             // Four on an x86-64 part with AVX, two without -- the line bodies
             // copy 256 bits at a time and are not callable there. Two on
             // AArch64 since Neoverse V2 got its own, and both run anywhere
@@ -2792,7 +2815,7 @@ mod tests {
             // reached the four tests that need it. The standardised run found
             // it, which is what the standardised run is for.
             let want = if cfg!(target_arch = "x86_64") {
-                if keva_asm::cpu::features().avx2 {
+                if crate::cpu::features().avx2 {
                     4
                 } else {
                     2
@@ -2808,8 +2831,8 @@ mod tests {
                 "a body was added or removed without this test noticing"
             );
             for &body in bodies {
-                let mut out = vec![0u8; data.len() + keva_asm::unpack::UNPACK_SLACK];
-                let ok = keva_asm::unpack::unpack_lz4_into_slice_on(
+                let mut out = vec![0u8; data.len() + crate::kernel::decode::UNPACK_SLACK];
+                let ok = crate::kernel::decode::unpack_lz4_into_slice_on(
                     body,
                     &block,
                     &mut out,
@@ -3088,7 +3111,7 @@ mod tests {
     /// all. This one fails instead.
     #[test]
     fn the_kernel_accepts_every_stream_the_packer_writes() {
-        if !keva_asm::unpack::asm_available() {
+        if !crate::kernel::decode::asm_available() {
             return;
         }
         let mut packed = Vec::new();
@@ -3103,9 +3126,9 @@ mod tests {
                 let f = frame(&packed).expect("the packer wrote a header");
                 let took = match f.switch {
                     None => {
-                        keva_asm::unpack::unpack_asm(f.body, &mut out, f.declared, f.split.kernel())
+                        crate::kernel::decode::unpack_asm(f.body, &mut out, f.declared, f.split.kernel())
                     }
-                    Some(switch) => keva_asm::unpack::unpack_asm_hybrid(
+                    Some(switch) => crate::kernel::decode::unpack_asm_hybrid(
                         f.body,
                         &mut out,
                         f.declared,
@@ -3131,7 +3154,7 @@ mod tests {
 
     #[test]
     fn the_assembly_decoder_agrees_with_the_portable_one() {
-        if !keva_asm::unpack::asm_available() {
+        if !crate::kernel::decode::asm_available() {
             return;
         }
 
@@ -3193,9 +3216,9 @@ mod tests {
             let f = frame(&packed).expect("the packer wrote a header");
             let took = match f.switch {
                 None => {
-                    keva_asm::unpack::unpack_asm(f.body, &mut asm_out, f.declared, f.split.kernel())
+                    crate::kernel::decode::unpack_asm(f.body, &mut asm_out, f.declared, f.split.kernel())
                 }
-                Some(switch) => keva_asm::unpack::unpack_asm_hybrid(
+                Some(switch) => crate::kernel::decode::unpack_asm_hybrid(
                     f.body,
                     &mut asm_out,
                     f.declared,
@@ -3238,7 +3261,7 @@ mod tests {
     /// wrong value reaches a client.
     #[test]
     fn the_assembly_decoder_never_accepts_more_than_the_portable_one() {
-        if !keva_asm::unpack::asm_available() {
+        if !crate::kernel::decode::asm_available() {
             return;
         }
 
@@ -3269,9 +3292,9 @@ mod tests {
             };
             let took = match f.switch {
                 None => {
-                    keva_asm::unpack::unpack_asm(f.body, &mut asm_out, f.declared, f.split.kernel())
+                    crate::kernel::decode::unpack_asm(f.body, &mut asm_out, f.declared, f.split.kernel())
                 }
-                Some(switch) => keva_asm::unpack::unpack_asm_hybrid(
+                Some(switch) => crate::kernel::decode::unpack_asm_hybrid(
                     f.body,
                     &mut asm_out,
                     f.declared,
@@ -3294,7 +3317,7 @@ mod tests {
 
     #[test]
     fn the_assembly_packer_agrees_byte_for_byte() {
-        if !keva_asm::pack_find::asm_available() {
+        if !crate::kernel::encode::asm_available() {
             // No kernel on this target. That is a supported configuration, not
             // a skipped test — there is simply nothing to diff against.
             return;
@@ -3353,14 +3376,14 @@ mod tests {
         // the packer that actually runs. Diffing either against the other's
         // reference would compare two different algorithms and could only pass
         // by accident.
-        let production = keva_asm::pack_find::kernel_is_production_packer();
+        let production = crate::kernel::encode::kernel_is_production_packer();
 
         // Coverage asserted rather than assumed: if the dispatch ever stops
         // reporting the bodies that exist, this test would quietly shrink to
         // one line and keep passing.
         #[cfg(target_arch = "x86_64")]
         assert_eq!(
-            keva_asm::pack_find::PartLine::all().len(),
+            crate::kernel::encode::PartLine::all().len(),
             3,
             "x86-64 has three assembled bodies and the test must drive all of them"
         );
@@ -3369,14 +3392,14 @@ mod tests {
         // The three part lines are identical today and this is what says so;
         // without it an Intel runner would never execute the AMD body, and a
         // divergence in it would wait for production to find it.
-        for &line in keva_asm::pack_find::PartLine::all() {
+        for &line in crate::kernel::encode::PartLine::all() {
             // Both sides start from the sentinel, not from zero: a zero slot reads
             // as position -1 and would send the kernel's verify load out of bounds.
             // Fresh per line, because the table is carried across records and a
             // line that inherited another's table would be searching a different
             // one.
             let mut rust_table = Box::new([EMPTY; HASH_SIZE]);
-            let mut asm_table = keva_asm::pack_find::new_table();
+            let mut asm_table = crate::kernel::encode::new_table();
 
             for input in &cases {
                 let rust_kept = if production {
@@ -3385,7 +3408,7 @@ mod tests {
                     pack_with_eager(input, &mut rust_out, &mut rust_table)
                 };
                 let asm_kept =
-                    keva_asm::pack_find::pack_asm_on(line, input, &mut asm_out, &mut asm_table)
+                    crate::kernel::encode::pack_asm_on(line, input, &mut asm_out, &mut asm_table)
                         .is_some();
 
                 // The eager kernel writes the even split only. Where the portable
@@ -3435,8 +3458,8 @@ mod tests {
     /// output by 94 bytes.
     #[test]
     fn every_assembled_body_is_reached_and_agrees() {
-        if !keva_asm::pack_find::asm_available()
-            || !keva_asm::pack_find::kernel_is_production_packer()
+        if !crate::kernel::encode::asm_available()
+            || !crate::kernel::encode::kernel_is_production_packer()
         {
             return;
         }
@@ -3492,13 +3515,13 @@ mod tests {
         let mut rust_out = Vec::new();
         let mut asm_out = Vec::new();
         let mut rust_table = Box::new([EMPTY; HASH_SIZE]);
-        let mut asm_table = keva_asm::pack_find::new_table();
+        let mut asm_table = crate::kernel::encode::new_table();
         let mut round_trip = Vec::new();
 
         for input in &cases {
             let rust_kept = pack_with(input, &mut rust_out, &mut rust_table);
             let asm_kept =
-                keva_asm::pack_find::pack_asm(input, &mut asm_out, &mut asm_table).is_some();
+                crate::kernel::encode::pack_asm(input, &mut asm_out, &mut asm_table).is_some();
 
             assert_eq!(
                 rust_kept,

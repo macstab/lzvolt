@@ -5,7 +5,7 @@
 //! braucht, wo heute erst fuenfzehn eine ausloest. Der Gewinn sind die
 //! Bloecke, deren Offset der vorige schon war.
 
-use keva_core::store::pack;
+use lzv::format;
 
 fn records(total: usize) -> Vec<u8> {
     let (mut o, mut i) = (Vec::new(), 0u64);
@@ -69,7 +69,7 @@ fn main() {
         ("varied_64k", varied(65_536)),
     ] {
         let mut packed = Vec::new();
-        if !pack::pack(&data, &mut packed) {
+        if !format::pack(&data, &mut packed) {
             println!("  {name}: roh gespeichert");
             continue;
         }

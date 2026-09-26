@@ -1,0 +1,24 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Criterion writes results here; benchmark output is reproduced, not committed.
+/target/criterion
+
+# Editors
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local perf captures
+perf.data
+perf.data.old
+*.svg.tmp
+flamegraph.svg
+
+# Measurements belong to the machine that took them. The report script writes
+# here by default; the pattern catches the explicitly named files CI produces,
+# in case the same command is ever run by hand.
+/bench-results/
+/packer-report*.txt

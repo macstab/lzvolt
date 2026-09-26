@@ -24,10 +24,10 @@ fn main() {
                 // and EPYC ones -- which is where the AVX literal loop lives --
                 // went unexercised until a deliberate corruption in that loop
                 // failed to turn this red.
-                let ok = keva_asm::unpack::Lz4Body::all()
+                let ok = lzv::raw::Lz4Body::all()
                     .iter()
                     .all(|&body| {
-                        keva_asm::unpack::unpack_lz4_into_slice_on(body, &block, &mut out, data.len())
+                        lzv::raw::unpack_lz4_into_slice_on(body, &block, &mut out, data.len())
                     });
                 cases += 1;
                 if !ok {

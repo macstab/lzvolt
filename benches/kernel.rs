@@ -9,7 +9,7 @@
 //! compiled and measured is what makes either claim falsifiable.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use keva_asm::pack_find::{self, PackState, SKIP_TRIGGER, TABLE_SIZE};
+use lzv::kernel::encode::{self, PackState, SKIP_TRIGGER, TABLE_SIZE};
 
 fn records(total: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(total);
@@ -73,9 +73,9 @@ fn sweep(input: &[u8], table: &mut [u32], asm: bool) -> u32 {
     let mut total = 0u32;
     loop {
         if asm {
-            pack_find::find(input, table, &mut state);
+            encode::find(input, table, &mut state);
         } else {
-            pack_find::find_scalar(input, table, &mut state);
+            encode::find_scalar(input, table, &mut state);
         }
         if state.len == 0 {
             return total;

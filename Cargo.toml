@@ -1,30 +1,73 @@
 [package]
-name = "keva-asm"
-description = "Hand-written SIMD kernels for KevaVolt's hot paths, with runtime CPU dispatch."
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
-authors.workspace = true
+name = "lzv"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "A byte-oriented LZ77 codec with per-value token layout and hand-written kernels per part line. Reads and writes LZ4 blocks too."
+repository = "https://github.com/macstab/lzv"
+categories = ["compression"]
+keywords = ["compression", "lz77", "lz4", "simd", "assembly"]
+exclude = ["bench-results/", "scripts/"]
+
+[lib]
+# rlib for Rust callers; the other two are what makes the C ABI usable from
+# anything else. See include/lzv.h and src/ffi.rs.
+crate-type = ["rlib", "staticlib", "cdylib"]
 
 [build-dependencies]
 cc = "1"
 
 [dev-dependencies]
-criterion = { workspace = true }
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+# The third opinion in the comparison benchmarks. Pure Rust, so it costs nothing
+# to have present even when the C library is not.
+lz4_flex = { version = "0.11", default-features = false, features = ["std"] }
 
 [features]
 default = ["asm"]
 # Assembling the hand-written kernels can be turned off to fall back to the
-# portable scalar reference. Useful when bringing up a new target, and it is
-# what the differential tests compare against.
+# portable reference. Useful when bringing up a new target, and it is what the
+# differential tests compare against.
 asm = []
+# Links the system liblz4, which the interop soak and the comparison benchmarks
+# need. Not required to use the library.
+liblz4 = []
+
+# The comparison benchmarks and the interop soak link the system liblz4, so
+# they only build when asked for it. Nothing in the library itself needs it.
+[[bench]]
+name = "codec"
+harness = false
+required-features = ["liblz4"]
 
 [[bench]]
-name = "ctrl_match"
+name = "kernel"
 harness = false
 
-[[bench]]
-name = "pack_find"
-harness = false
+[profile.release]
+# The decoder's fixed cost per call is a third to a half of the work on a
+# 512-byte value, so a call that survives across the crate boundary is a
+# measurable loss to a caller. Both of these are what keeps the thin wrappers
+# in lib.rs from becoming real calls.
+lto = "fat"
+codegen-units = 1
+
+[[example]]
+name = "soak"
+required-features = ["liblz4"]
+
+[[example]]
+name = "census"
+required-features = ["liblz4"]
+
+[[example]]
+name = "quick"
+required-features = ["liblz4"]
+
+[[example]]
+name = "profile"
+required-features = ["liblz4"]
+
+[[example]]
+name = "split_census"

@@ -82,12 +82,12 @@ pub fn new_table() -> Vec<u32> {
     vec![EMPTY; TABLE_SIZE]
 }
 
-#[cfg(all(keva_asm, target_arch = "aarch64"))]
+#[cfg(all(lzv_asm, target_arch = "aarch64"))]
 extern "C" {
     fn keva_pack_find(input: *const u8, len: usize, table: *mut u32, state: *mut PackState);
 }
 
-#[cfg(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[cfg(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
 extern "C" {
     fn keva_pack(
         src: *const u8,
@@ -100,7 +100,7 @@ extern "C" {
 
 // One symbol per part line. Declared only where they exist: nothing outside
 // x86-64 links them.
-#[cfg(all(keva_asm, target_arch = "x86_64"))]
+#[cfg(all(lzv_asm, target_arch = "x86_64"))]
 extern "C" {
     fn keva_pack_xeon(
         src: *const u8,
@@ -145,11 +145,11 @@ impl PartLine {
     /// Intel runner would never execute the AMD body and a divergence in it
     /// could sit unnoticed until someone ran it in production.
     pub fn all() -> &'static [PartLine] {
-        #[cfg(all(keva_asm, target_arch = "x86_64"))]
+        #[cfg(all(lzv_asm, target_arch = "x86_64"))]
         {
             &[PartLine::Baseline, PartLine::Xeon, PartLine::Amd]
         }
-        #[cfg(not(all(keva_asm, target_arch = "x86_64")))]
+        #[cfg(not(all(lzv_asm, target_arch = "x86_64")))]
         {
             &[PartLine::Baseline]
         }
@@ -161,7 +161,7 @@ impl PartLine {
 /// `cpu::features()` is a `OnceLock`, so CPUID runs once per process and this
 /// is a predicted branch on a value that never changes -- once per record,
 /// outside the kernel. Inside it there is no CPU check at all.
-#[cfg(all(keva_asm, target_arch = "x86_64"))]
+#[cfg(all(lzv_asm, target_arch = "x86_64"))]
 #[inline]
 fn detect_line() -> PartLine {
     let f = crate::cpu::features();
@@ -178,7 +178,7 @@ fn detect_line() -> PartLine {
 ///
 /// The caller owes what the kernel's contract asks: `dst_cap` bytes writable at
 /// `dst`, `src_len` readable at `src`, and a table of at least [`TABLE_SIZE`].
-#[cfg(all(keva_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[cfg(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[inline]
 unsafe fn run(
     line: PartLine,
@@ -219,7 +219,7 @@ unsafe fn run(
 /// The AArch64 kernel is not sized this way. It bails out the moment its output
 /// reaches the input length, so `src_len + 16` is sufficient there, and it is
 /// left alone: changing what that kernel is handed is a separate measurement.
-#[cfg(all(keva_asm, target_arch = "x86_64"))]
+#[cfg(all(lzv_asm, target_arch = "x86_64"))]
 fn room(n: usize) -> usize {
     n + n / MIN_MATCH * 3 + n / 128 + 16 + 64 + 10
 }
@@ -256,12 +256,12 @@ fn room(n: usize) -> usize {
 /// where the choice between the two splits is made.
 pub fn pack_asm(input: &[u8], out: &mut Vec<u8>, table: &mut [u32]) -> Option<usize> {
     // As above: the tail of this function belongs to the other `cfg`.
-    #[cfg(all(keva_asm, target_arch = "x86_64"))]
+    #[cfg(all(lzv_asm, target_arch = "x86_64"))]
     #[allow(clippy::needless_return)]
     {
         return pack_asm_on(detect_line(), input, out, table);
     }
-    #[cfg(not(all(keva_asm, target_arch = "x86_64")))]
+    #[cfg(not(all(lzv_asm, target_arch = "x86_64")))]
     #[allow(clippy::needless_return)]
     {
         pack_asm_on(PartLine::Baseline, input, out, table)
@@ -288,7 +288,7 @@ pub fn pack_asm_on(
     // block, not the function's tail, and the tail belongs to the other `cfg`.
     // Dropping it would evaluate `None` and discard it.
     #[cfg(not(all(
-        keva_asm,
+        lzv_asm,
         any(target_arch = "aarch64", target_arch = "x86_64")
     )))]
     #[allow(clippy::needless_return)]
@@ -305,7 +305,7 @@ pub fn pack_asm_on(
     // instruction, so the argument does not carry over and the fill would be
     // pure cost. Whether `rep stosb` reaches the same place by another route is
     // a question for the GCE run, not an assumption to build in.
-    #[cfg(all(keva_asm, target_arch = "x86_64"))]
+    #[cfg(all(lzv_asm, target_arch = "x86_64"))]
     #[allow(clippy::needless_return)]
     {
         out.clear();
@@ -340,7 +340,7 @@ pub fn pack_asm_on(
         return Some(written);
     }
 
-    #[cfg(all(keva_asm, target_arch = "aarch64"))]
+    #[cfg(all(lzv_asm, target_arch = "aarch64"))]
     {
         out.clear();
         out.resize(input.len() + 16, 0);
@@ -381,7 +381,7 @@ pub fn pack_asm_on(
 /// Whether this build has an assembly kernel for packing.
 pub const fn asm_available() -> bool {
     cfg!(all(
-        keva_asm,
+        lzv_asm,
         any(target_arch = "aarch64", target_arch = "x86_64")
     ))
 }
@@ -395,7 +395,7 @@ pub const fn asm_available() -> bool {
 /// backward extension and the adaptive split -- so it is diffed against the
 /// packer that actually runs.
 pub const fn kernel_is_production_packer() -> bool {
-    cfg!(all(keva_asm, target_arch = "x86_64"))
+    cfg!(all(lzv_asm, target_arch = "x86_64"))
 }
 
 /// Advance the search until it finds a match or runs out of input.
@@ -406,7 +406,7 @@ pub const fn kernel_is_production_packer() -> bool {
 pub fn find(input: &[u8], table: &mut [u32], state: &mut PackState) {
     debug_assert!(table.len() >= TABLE_SIZE);
 
-    #[cfg(all(keva_asm, target_arch = "aarch64"))]
+    #[cfg(all(lzv_asm, target_arch = "aarch64"))]
     // SAFETY: the kernel reads `input` only at offsets it has bounds-checked
     // against `len`, and touches `table` only at indices masked to HASH_BITS,
     // which `TABLE_SIZE` covers. `state` is a `#[repr(C)]` struct of four
@@ -415,7 +415,7 @@ pub fn find(input: &[u8], table: &mut [u32], state: &mut PackState) {
         keva_pack_find(input.as_ptr(), input.len(), table.as_mut_ptr(), state);
     }
 
-    #[cfg(not(all(keva_asm, target_arch = "aarch64")))]
+    #[cfg(not(all(lzv_asm, target_arch = "aarch64")))]
     find_scalar(input, table, state);
 }
 

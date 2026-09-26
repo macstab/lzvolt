@@ -4,7 +4,7 @@
 //! LZ4, and five attempts to close it by reasoning have returned between -4.5%
 //! and +31%. This exists so the sixth is aimed.
 
-use keva_core::store::pack;
+use lzv::format;
 
 /// Records-shaped, which is what reaches the wide split and where the day's
 /// format work landed. Pass "varied" on the command line for the other one.
@@ -107,14 +107,14 @@ fn main() {
         let rounds: u64 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(u64::MAX);
         let mut sink = 0u64;
         for _ in 0..rounds {
-            assert!(keva_asm::unpack::unpack_lz4_into_slice(&block, &mut out, data.len()));
+            assert!(lzv::raw::unpack_lz4_into_slice(&block, &mut out, data.len()));
             sink = sink.wrapping_add(out[0] as u64);
         }
         println!("{sink}");
         return;
     }
     let mut packed = Vec::new();
-    assert!(pack::pack(&data, &mut packed));
+    assert!(format::pack(&data, &mut packed));
 
     let mut out = Vec::with_capacity(data.len() + 64);
     let mut sink = 0u64;
@@ -125,7 +125,7 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(u64::MAX);
     for _ in 0..rounds {
-        pack::unpack(&packed, &mut out).unwrap();
+        format::unpack(&packed, &mut out).unwrap();
         sink = sink.wrapping_add(out[0] as u64);
     }
     println!("{sink}");

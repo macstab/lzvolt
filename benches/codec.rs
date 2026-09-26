@@ -12,7 +12,7 @@
 //! slow packer costs far less than the raw ratio suggests.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use keva_core::store::pack;
+use lzv::format;
 
 /// Record-shaped, which is what a store actually holds. A run of identical
 /// bytes would report a throughput no real value ever reaches, because the
@@ -123,7 +123,7 @@ fn packing(c: &mut Criterion) {
         // exactly what was removed.
         group.bench_with_input(BenchmarkId::from_parameter(label), &data, |b, data| {
             let mut out = Vec::with_capacity(data.len() * 2);
-            let mut packer = pack::Packer::new();
+            let mut packer = format::Packer::new();
             b.iter(|| black_box(packer.pack(black_box(data), &mut out)));
         });
     }
@@ -139,7 +139,7 @@ fn packing(c: &mut Criterion) {
 /// crosses once per value, so what shows up here is the kernel's real margin
 /// rather than the boundary's cost.
 fn packing_asm(c: &mut Criterion) {
-    if !keva_asm::pack_find::asm_available() {
+    if !lzv::kernel::encode::asm_available() {
         return;
     }
     let mut group = c.benchmark_group("pack/asm");
@@ -156,9 +156,9 @@ fn packing_asm(c: &mut Criterion) {
 
         group.bench_function(BenchmarkId::new("asm", label), |b| {
             let mut out = Vec::with_capacity(data.len() + 16);
-            let mut table = keva_asm::pack_find::new_table();
+            let mut table = lzv::kernel::encode::new_table();
             b.iter(|| {
-                black_box(keva_asm::pack_find::pack_asm(
+                black_box(lzv::kernel::encode::pack_asm(
                     black_box(&data),
                     &mut out,
                     &mut table,
@@ -168,7 +168,7 @@ fn packing_asm(c: &mut Criterion) {
 
         group.bench_function(BenchmarkId::new("rust", label), |b| {
             let mut out = Vec::with_capacity(data.len() * 2);
-            let mut packer = pack::Packer::new();
+            let mut packer = format::Packer::new();
             b.iter(|| black_box(packer.pack(black_box(&data), &mut out)));
         });
     }
@@ -195,9 +195,9 @@ fn sizes(c: &mut Criterion) {
 
         group.bench_function(BenchmarkId::new("pack", bytes), |b| {
             let mut out = Vec::with_capacity(bytes + 16);
-            let mut table = keva_asm::pack_find::new_table();
+            let mut table = lzv::kernel::encode::new_table();
             b.iter(|| {
-                black_box(keva_asm::pack_find::pack_asm(
+                black_box(lzv::kernel::encode::pack_asm(
                     black_box(&data),
                     &mut out,
                     &mut table,
@@ -206,12 +206,12 @@ fn sizes(c: &mut Criterion) {
         });
 
         let mut packed = Vec::new();
-        if !pack::pack(&data, &mut packed) {
+        if !format::pack(&data, &mut packed) {
             continue;
         }
         group.bench_function(BenchmarkId::new("unpack", bytes), |b| {
             let mut out = Vec::with_capacity(bytes);
-            b.iter(|| pack::unpack(black_box(&packed), &mut out).unwrap());
+            b.iter(|| format::unpack(black_box(&packed), &mut out).unwrap());
         });
     }
 
@@ -229,7 +229,7 @@ fn unpacking(c: &mut Criterion) {
         ("varied_64k", varied(65_536)),
     ] {
         let mut packed = Vec::new();
-        if !pack::pack(&data, &mut packed) {
+        if !format::pack(&data, &mut packed) {
             continue;
         }
         // Throughput is reported against the original size, since that is what
@@ -237,7 +237,7 @@ fn unpacking(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(data.len() as u64));
         group.bench_with_input(BenchmarkId::from_parameter(label), &packed, |b, packed| {
             let mut out = Vec::with_capacity(data.len());
-            b.iter(|| pack::unpack(black_box(packed), &mut out).unwrap());
+            b.iter(|| format::unpack(black_box(packed), &mut out).unwrap());
         });
     }
 
@@ -254,7 +254,7 @@ fn ratio(c: &mut Criterion) {
         ("noise_4k", noise(4096)),
     ] {
         let mut packed = Vec::new();
-        let kept = pack::pack(&data, &mut packed);
+        let kept = format::pack(&data, &mut packed);
         eprintln!(
             "  ratio {label}: {} -> {} bytes ({:.2}x, {})",
             data.len(),
@@ -384,14 +384,14 @@ fn same_bytes(c: &mut Criterion) {
         // The LZ4 body, which is what a foreign block reaches in production
         // too. Identical to the even body today; the point of the separation is
         // that it stops being so without our own format's timings moving.
-        assert!(keva_asm::unpack::unpack_lz4_into_slice(
+        assert!(lzv::raw::unpack_lz4_into_slice(
             &block,
             &mut mine,
             data.len()
         ));
         group.bench_function(BenchmarkId::new("keva", label), |b| {
             b.iter(|| {
-                black_box(keva_asm::unpack::unpack_lz4_into_slice(
+                black_box(lzv::raw::unpack_lz4_into_slice(
                     black_box(&block),
                     &mut mine,
                     data.len(),
@@ -474,15 +474,15 @@ fn own_format(c: &mut Criterion) {
         // Ours: the packed body with the header stripped, so the kernel is
         // handed exactly what liblz4's is -- a block and a length.
         let mut ours = Vec::new();
-        let packed = pack::pack(&data, &mut ours);
+        let packed = format::pack(&data, &mut ours);
         let (body, split, other, switch) = if packed {
             let (_declared, hybrid, header) = header_of(&ours);
             // Nothing starts in the wide split; it is reached only by switching.
-            let split = keva_asm::unpack::Split::Even;
-            let other = if split == keva_asm::unpack::Split::Even {
-                keva_asm::unpack::Split::WideMatch
+            let split = lzv::raw::Split::Even;
+            let other = if split == lzv::raw::Split::Even {
+                lzv::raw::Split::WideMatch
             } else {
-                keva_asm::unpack::Split::Even
+                lzv::raw::Split::Even
             };
             // A value that changes split partway is two calls, and it is
             // measured as two -- that is what its reader actually pays.
@@ -508,8 +508,8 @@ fn own_format(c: &mut Criterion) {
             // them. They exist so the decode closure has one shape.
             (
                 Vec::new(),
-                keva_asm::unpack::Split::Even,
-                keva_asm::unpack::Split::Even,
+                lzv::raw::Split::Even,
+                lzv::raw::Split::Even,
                 None,
             )
         };
@@ -554,10 +554,10 @@ fn own_format(c: &mut Criterion) {
         let mut mine = vec![0u8; data.len() + 64];
         let mut yours = vec![0u8; data.len() + 64];
         let decode = |body: &[u8], mine: &mut [u8]| match switch {
-            None => keva_asm::unpack::unpack_into_slice(body, mine, data.len(), split),
+            None => lzv::raw::unpack_into_slice(body, mine, data.len(), split),
             Some((in_at, out_at)) => {
-                keva_asm::unpack::unpack_section(&body[..in_at], mine, out_at, 0, split)
-                    && keva_asm::unpack::unpack_section(
+                lzv::raw::unpack_section(&body[..in_at], mine, out_at, 0, split)
+                    && lzv::raw::unpack_section(
                         &body[in_at..],
                         mine,
                         data.len(),
@@ -619,7 +619,7 @@ fn own_format(c: &mut Criterion) {
 #[cfg(not(feature = "liblz4"))]
 fn own_format(_: &mut Criterion) {}
 
-/// The whole read, not the kernel: what a caller of `pack::unpack` pays.
+/// The whole read, not the kernel: what a caller of `format::unpack` pays.
 ///
 /// `own_format` strips the header outside the timed loop and hands the kernel a
 /// bare body, so every number this project has published for our own format is
@@ -657,7 +657,7 @@ fn production(c: &mut Criterion) {
         ("noise_64k", noise(65_536)),
     ] {
         let mut ours = Vec::new();
-        let packed = pack::pack(&data, &mut ours);
+        let packed = format::pack(&data, &mut ours);
 
         let mut theirs = vec![0u8; data.len() + 1024];
         let n = unsafe {
@@ -677,14 +677,14 @@ fn production(c: &mut Criterion) {
         let mut flexout = vec![0u8; data.len() + 64];
 
         if packed {
-            pack::unpack(&ours, &mut mine).expect("our own block");
+            format::unpack(&ours, &mut mine).expect("our own block");
             assert_eq!(mine, data);
         }
 
         group.throughput(Throughput::Bytes(data.len() as u64));
         group.bench_function(BenchmarkId::new("keva", label), |b| {
             if packed {
-                b.iter(|| black_box(pack::unpack(black_box(&ours), &mut mine).is_ok()));
+                b.iter(|| black_box(format::unpack(black_box(&ours), &mut mine).is_ok()));
             } else {
                 // Refused, so the store holds the bytes as they arrived and the
                 // reader copies them out. No header, no kernel.
@@ -704,12 +704,12 @@ fn production(c: &mut Criterion) {
         if packed {
             let (_declared, hybrid, header) = header_of(&ours);
             // Nothing starts in the wide split; it is reached only by switching.
-            let split = keva_asm::unpack::Split::Even;
+            let split = lzv::raw::Split::Even;
             let body = ours[header..].to_vec();
             if !hybrid {
                 group.bench_function(BenchmarkId::new("keva_framed", label), |b| {
                     b.iter(|| {
-                        black_box(keva_asm::unpack::unpack_asm(
+                        black_box(lzv::raw::unpack_asm(
                             black_box(&body),
                             &mut mine,
                             data.len(),
@@ -783,7 +783,7 @@ fn three_packers(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(data.len() as u64));
 
         let mut ours = Vec::with_capacity(data.len() * 2);
-        let mut packer = pack::Packer::new();
+        let mut packer = format::Packer::new();
         packer.pack(&data, &mut ours);
         let keva_len = ours.len();
         group.bench_function(BenchmarkId::new("keva", label), |b| {
