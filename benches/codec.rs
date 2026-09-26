@@ -327,7 +327,7 @@ fn against_lz4(c: &mut Criterion) {
 /// produced and each side is handed the uncompressed length the same way, so
 /// what is left is the decoder and nothing else.
 ///
-///   RUSTFLAGS="-L/opt/homebrew/lib" cargo bench -p keva-core --features liblz4
+///   cargo bench --features liblz4
 #[cfg(feature = "liblz4")]
 fn same_bytes(c: &mut Criterion) {
     #[link(name = "lz4")]

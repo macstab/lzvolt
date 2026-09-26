@@ -11,8 +11,8 @@
 //! per call -- which is what the cost model is written in, rather than GiB/s
 //! medians that have to be converted back.
 //!
-//!   cargo run --release -p keva-core --features liblz4 --example quick
-//!   cargo run --release -p keva-core --features liblz4 --example quick -- --save
+//!   cargo run --release --features liblz4 --example quick
+//!   cargo run --release --features liblz4 --example quick -- --save
 //!
 //! `--save` records the current numbers as the baseline. Every later run prints
 //! the change against it, so the answer is an arrow rather than a table to
@@ -43,9 +43,17 @@ fn main() {
     let old = load(BASELINE);
     let mut now: Vec<Cell> = Vec::new();
 
+    // Which machine produced these. A table of nanoseconds says nothing
+    // without it, and a table pasted into a log without it says less.
+    println!(
+        "{}  |  {}  |  kernel: {}",
+        machine(),
+        std::env::consts::ARCH,
+        lzvolt::backend()
+    );
     println!(
         "{:<22}{:>10}{:>11}{:>12}{:>10}{:>9}",
-        "", "ns/Aufruf", "GB/s", "vs liblz4", "vs Basis", "Aufl."
+        "", "ns/call", "GB/s", "vs liblz4", "vs base", "res."
     );
 
     for (name, data) in &shapes {
@@ -89,9 +97,9 @@ fn main() {
 
     if save {
         store(BASELINE, &now);
-        println!("\nBasis geschrieben nach {BASELINE} ({} Zellen)", now.len());
+        println!("\nBaseline written to {BASELINE} ({} cells)", now.len());
     } else if old.is_empty() {
-        println!("\nKeine Basis vorhanden. `--save` legt eine an.");
+        println!("\nNo baseline yet. `--save` writes one.");
     } else {
         verdict(&old, &now);
     }
@@ -231,7 +239,7 @@ fn entry_cost() {
             .0
         };
         rows.push((label, with, without));
-        println!("{label:>6} B   mit Dispatch {with:>8.2} ns   ohne {without:>8.2} ns");
+        println!("{label:>6} B   with dispatch {with:>8.2} ns   without {without:>8.2} ns");
     }
     let fit = |a: f64, b: f64| {
         let bw = 3584.0 / (b - a);
@@ -239,9 +247,9 @@ fn entry_cost() {
     };
     let (fw, bw) = fit(rows[0].1, rows[1].1);
     let (fo, bo) = fit(rows[0].2, rows[1].2);
-    println!("\n{:<24}{:>12}{:>14}", "", "Festkosten", "Strom");
-    println!("{:<24}{fw:>9.2} ns{bw:>11.1} GB/s", "mit Dispatch");
-    println!("{:<24}{fo:>9.2} ns{bo:>11.1} GB/s", "ohne Dispatch");
+    println!("\n{:<24}{:>12}{:>14}", "", "fixed cost", "rate");
+    println!("{:<24}{fw:>9.2} ns{bw:>11.1} GB/s", "with dispatch");
+    println!("{:<24}{fo:>9.2} ns{bo:>11.1} GB/s", "without dispatch");
     println!("{:<24}{:>9.2} ns", "davon Rust-Dispatch", fw - fo);
 }
 
@@ -407,29 +415,75 @@ fn verdict(old: &[Cell], now: &[Cell]) {
     }
     println!();
     match (up.is_empty(), down.is_empty()) {
-        (true, true) => println!("=  unveraendert"),
+        (true, true) => println!("=  UNCHANGED"),
         (false, true) => {
-            println!("^  BESSER");
+            println!("^  BETTER");
             for (n, d, l) in &up {
-                println!("     {n:<22}{d:+.1}%   (Aufloesung {l:.1}%)");
+                println!("     {n:<22}{d:+.1}%   (resolution {l:.1}%)");
             }
         }
         (true, false) => {
-            println!("v  SCHLECHTER");
+            println!("v  WORSE");
             for (n, d, l) in &down {
-                println!("     {n:<22}{d:+.1}%   (Aufloesung {l:.1}%)");
+                println!("     {n:<22}{d:+.1}%   (resolution {l:.1}%)");
             }
         }
         (false, false) => {
-            println!("~  gemischt");
+            println!("~  MIXED");
             for (n, d, l) in up.iter().chain(down.iter()) {
-                println!("     {n:<22}{d:+.1}%   (Aufloesung {l:.1}%)");
+                println!("     {n:<22}{d:+.1}%   (resolution {l:.1}%)");
             }
         }
     }
     if blind > 0 {
-        println!("   ({blind} Zellen ohne Bezugswert -- ohne liblz4 gebaut?)");
+        println!("   ({blind} cells with no reference -- built without liblz4?)");
     }
+}
+
+/// The processor's own name for itself, for the banner above the table.
+///
+/// Not `std::env::consts::ARCH`, which would say `aarch64` for both an M2 and
+/// a Neoverse V2 -- two machines whose numbers are not comparable and whose
+/// kernels are not even the same code. Falls back to the architecture when the
+/// platform will not say.
+fn machine() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = std::process::Command::new("sysctl")
+            .args(["-n", "machdep.cpu.brand_string"])
+            .output()
+        {
+            let name = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(text) = std::fs::read_to_string("/proc/cpuinfo") {
+            // x86 says "model name"; ARM parts usually do not, and say
+            // "CPU implementer" and "CPU part" instead.
+            for key in ["model name", "Model"] {
+                if let Some(line) = text.lines().find(|l| l.starts_with(key)) {
+                    if let Some((_, v)) = line.split_once(':') {
+                        return v.trim().to_owned();
+                    }
+                }
+            }
+            let part = text
+                .lines()
+                .find(|l| l.starts_with("CPU part"))
+                .and_then(|l| l.split_once(':'))
+                .map(|(_, v)| v.trim().to_owned());
+            if let Some(part) = part {
+                // 0xd4f is Neoverse V2, which is the one this project tunes for.
+                let named = if part == "0xd4f" { " (Neoverse V2)" } else { "" };
+                return format!("ARM part {part}{named}");
+            }
+        }
+    }
+    std::env::consts::ARCH.to_owned()
 }
 
 // ---- the corpora, the same three shapes the rest of the project uses --------

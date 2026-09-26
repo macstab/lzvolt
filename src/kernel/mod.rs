@@ -64,11 +64,28 @@ pub const fn asm_enabled() -> bool {
 ///
 /// A benchmark number that cannot be traced back to the code path that produced
 /// it is worthless, so this is reported alongside every result.
+///
+/// It therefore has to report the one distinction that changes the number by a
+/// factor rather than a percent: whether the assembled kernels are in or out.
+/// It used to name only the architecture's SIMD flavour, so a run with `asm`
+/// disabled and a run with it enabled both printed `neon-intrinsics` -- which
+/// is precisely the confusion the function exists to prevent.
+///
+/// Which part line runs inside the assembly is decided at runtime by
+/// [`crate::raw`]'s dispatch and cannot be named from a `const fn`.
 pub const fn backend_name() -> &'static str {
     if cfg!(target_arch = "aarch64") {
-        "neon-intrinsics"
+        if asm_enabled() {
+            "aarch64 assembly"
+        } else {
+            "neon intrinsics"
+        }
     } else if cfg!(target_arch = "x86_64") {
-        "sse2-intrinsics"
+        if asm_enabled() {
+            "x86-64 assembly"
+        } else {
+            "sse2 intrinsics"
+        }
     } else {
         "scalar"
     }

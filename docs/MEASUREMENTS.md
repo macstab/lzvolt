@@ -119,7 +119,7 @@ first cell where our own format wins on size rather than trails.
 
 ## 2026-09-18 -- where the 20% went
 
-Short form, M2 Max, baseline `vor` = `12760b2` at the same measurement time.
+Short form, M2 Max, baseline `12760b2` at the same measurement time.
 Reproduced the long run's finding in three seconds: -22.9%, -21.5%, -6.9%,
 -9.1% on records_512, varied_512, records_4k, varied_64k.
 
@@ -986,24 +986,24 @@ The gap is -1% to -4% on most cells and -20.7% on noise_64k.
 Reading a format someone else designed against the implementation that designed
 it is the harder half, and it is where the remaining work is.
 
-## 2026-09-20 — memcpy im LZ4-Literalpfad: +34.4% auf noise_64k
+## 2026-09-20 — memcpy in the LZ4 literal path: +34.4% on noise_64k
 
-Die Frage war "wieso machen wir im Falle von noise keinen memcpy?" — und die
-Antwort auf den ersten Versuch von gestern: wir haben, aber an der falschen
-Stelle. Der Aufruf stand in `L(slow_lit_wide)`, und ein 64-KiB-Literallauf wird
-dort abgewiesen (`x16 + 32 > x20`, weil ein Lauf bis ans Eingabeende keine 32
-Bytes mehr hinter sich hat). Er landet in `L(slow_lit_exact)` und damit in
-`L(lz4_lit_blk)`. Der Aufruf ist nie gelaufen.
+The question was "why don't we call memcpy in the noise case?" — and the answer
+to yesterday's first attempt: we do, but in the wrong place. The call sat in
+`L(slow_lit_wide)`, and a 64 KiB literal run is turned away there (`x16 + 32 >
+x20`, because a run that reaches the end of the input has no 32 bytes left
+behind it). It lands in `L(slow_lit_exact)` and from there in
+`L(lz4_lit_blk)`. The call never ran.
 
-Das Profil nach dem Ketten-Fix zeigt genau dort die Zeit, 5076 Samples:
+The profile after the chain fix puts the time exactly there, 5076 samples:
 
     .Ll_lz4_lit_blk    4377   86.2%
     .Ll_litlen_byte     637   12.5%
 
-### Die Schwelle, gemessen statt geschätzt
+### The threshold, measured rather than guessed
 
-`same_bytes/keva/noise_*`, M2 Max, Criterion 2 s, Mediane aus drei, Basis im
-selben Lauf gemessen. Drei Schwellen nacheinander:
+`same_bytes/keva/noise_*`, M2 Max, Criterion 2 s, medians of three, baseline
+measured in the same run. Three thresholds one after another:
 
 | LIT_MEMCPY |  512 B |  4 KiB | 64 KiB |
 |------------|--------|--------|--------|
@@ -1011,263 +1011,259 @@ selben Lauf gemessen. Drei Schwellen nacheinander:
 | 4096       |  +0.3% |  −1.8% | +36.8% |
 | **8192**   |  −0.1% |  +0.8% | **+34.4%** |
 
-Ein Aufruf kostet etwa so viel, wie die Schleife auf 512 Bytes gewinnt, und bei
-4096 stehen beide gleich — aber nur, wenn 4096 noch *in* die Schleife fällt.
-Mit der Schwelle auf 4096 nimmt ein 4-KiB-Wert den Aufruf gerade eben und
-verliert 1.8%; darüber ist die Zeile sauber. Deshalb 8192 und nicht 4096.
+A call costs about what the loop gains on 512 bytes, and at 4096 the two are
+even — but only if 4096 still falls *inside* the loop. With the threshold at
+4096 a 4 KiB value takes the call by a hair and loses 1.8%; above that the row
+is clean. Hence 8192 and not 4096.
 
-Absolut, gegen die Kontrollen im selben Lauf: noise_64k 42.5 -> 57.2 GiB/s,
-liblz4 57.4, lz4_flex 40.1. Aus −26.5% wird Parität.
+In absolute terms, against the controls in the same run: noise_64k 42.5 -> 57.2
+GiB/s, liblz4 57.4, lz4_flex 40.1. A deficit of 26.5% becomes parity.
 
-### Dass unser Format sich nicht bewegt, ist nicht gemessen, sondern gezeigt
+### That our own format does not move is shown, not measured
 
-`objdump -d` über `unpack.o`, Symbol für Symbol vor und nach der Änderung: alle
-55 `.Le_*` (even) und alle 47 `.Lw_*` (wide) sind instruktionsgleich. Verändert
-hat sich `.Ll_slow_lit_exact` (2 -> 8) und neu ist `.Ll_lz4_lit_loop`. Ein
-Durchsatzvergleich hätte hier nur das Rauschen der Maschine gezeigt — in
-denselben Läufen bewegte sich lz4_flex auf `varied_512` um 9.3%.
+`objdump -d` over `unpack.o`, symbol by symbol before and after the change: all
+55 `.Le_*` (even) and all 47 `.Lw_*` (wide) are instruction-identical. What
+changed is `.Ll_slow_lit_exact` (2 -> 8), and `.Ll_lz4_lit_loop` is new. A
+throughput comparison would only have shown the machine's noise here — across
+those same runs lz4_flex moved 9.3% on `varied_512`.
 
-### Offen
+### Open
 
-x86_64 hat für diesen Pfad schon `rep movsb` hinter `REP_MIN 1024`, aber nur
-auf der Xeon-Linie; EPYC hat ihn bewusst nicht, weil Zen ERMSB ohne FSRM hat.
-Ob dort ein `memcpy`-Aufruf dasselbe tut wie hier, ist ungemessen.
+x86_64 already has `rep movsb` for this path behind `REP_MIN 1024`, but only on
+the Xeon line; EPYC deliberately does not, because Zen has ERMSB without FSRM.
+Whether a `memcpy` call does the same thing there as it does here is unmeasured.
 
-## 2026-09-20 — Der lange Match: vier Instruktionen statt acht, aber nicht ueberall
+## 2026-09-20 — The long match: four instructions instead of eight, but not everywhere
 
-Das Profil nach dem memcpy-Commit zeigt, dass alle drei verlierenden
-Fremdformat-Zellen vollstaendig in der schnellen Schleife sitzen -- kein
-langsamer Pfad mehr, und `rep_checked`, das bei `lz4_records_4k` einmal 47.1%
-war, taucht gar nicht mehr auf:
+The profile after the memcpy commit shows all three losing foreign-format cells
+sitting entirely in the fast loop -- no slow path left, and `rep_checked`,
+which was once 47.1% on `lz4_records_4k`, does not appear at all any more:
 
     lz4_varied_4k     fast 33.4%  fast_offset 32.9%  fast_copy 10.4%
     lz4_records_64k   fast 24.8%  fast_lendone 23.2%  fast_offset 22.1%
                       fast_longout 8.9%  fast_longblk 8.2%
     lz4_records_4k    fast 25.8%  fast_lendone 21.1%  fast_offset 19.3%
 
-`fast_longblk` und `fast_longout` zusammen sind 17.1% bzw. 14.2%, und die
-Schleife trug dieselbe Buchfuehrung, die bei `litcp_block` schon einmal
-herausflog: Zaehler, Vergleich, zwei Zeigeradditionen und ein unbedingter
-Ruecksprung um zwei Moves herum. Post-Index und `subs` machen aus acht vier.
+`fast_longblk` and `fast_longout` together are 17.1% and 14.2%, and the loop
+carried the same bookkeeping that was already thrown out of `litcp_block`: a
+counter, a comparison, two pointer additions and an unconditional jump back
+around two moves. Post-indexing and `subs` turn eight into four.
 
-### Zwei Aenderungen, ein Messfehler
+### Two changes, one measurement error
 
-Zuerst beide Blockschleifen umgebaut, die Match- und die Literal-Variante.
-Mediane aus drei, Basis im selben Session-Block:
+Both block loops were rebuilt first, the match and the literal variant. Medians
+of three, baseline from the same session block:
 
-| eigenes Format | beide | nur Match |
+| own format | both | match only |
 |---|---|---|
 | records_4k  | +5.2% | +5.6% |
 | records_512 | +4.5% | +5.0% |
 | records_64k | +5.0% | +4.0% |
 | records_192 | **-3.7%** | +1.1% |
 
-Die Literal-Haelfte war der Schaden und ist zurueckgenommen. Warum sie schadet,
-ist nicht gemessen; dass sie schadet, dreimal.
+The literal half was the damage and has been reverted. Why it hurts is not
+measured; that it hurts, three times over.
 
-### Und eine Schleife in zwei Formen
+### And one loop in two forms
 
-Die Match-Haelfte allein gewann unser Format und verlor das fremde:
+The match half on its own won our format and lost the foreign one:
 
-    own_format/keva/records_64k   14.82 -> 15.47   +4.4%   Kontrollen +1.0%
-    same_bytes/keva/records_64k   11.11 -> 10.76   -3.2%   Kontrollen +1.2%
+    own_format/keva/records_64k   14.82 -> 15.47   +4.4%   controls +1.0%
+    same_bytes/keva/records_64k   11.11 -> 10.76   -3.2%   controls +1.2%
 
-Also beide Formen behalten, `#ifdef KEVA_LZ4` dazwischen. Der Grund ist
-Platzierung, nicht Arbeit: die Adressen, die Bytes und die Iterationszahl sind
-identisch, aber der LZ4-Body schickt 99% seiner records-Bloecke hier durch und
-unserer ein Fuenftel, und sechzehn Bytes Code weniger vor einer so heissen
-Schleife sind nicht gratis. Zwei Formen fuer 7.7% gemessene Differenz.
+So both forms are kept, with `#ifdef KEVA_LZ4` between them. The reason is
+placement, not work: the addresses, the bytes and the iteration count are
+identical, but the LZ4 body sends 99% of its records blocks through here and
+ours a fifth, and sixteen bytes less code in front of a loop that hot is not
+free. Two forms for a measured difference of 7.7%.
 
-### Stand danach, Mediane aus drei, netto gegen die Kontrollen
+### Where it stands after, medians of three, net of the controls
 
-| eigenes Format | delta | netto |  | fremdes LZ4 | delta | netto |
+| own format | delta | net |  | foreign LZ4 | delta | net |
 |---|---|---|---|---|---|---|
 | records_4k  | +6.8% | +6.5% | | records_4k  | +0.5% | +0.7% |
 | records_512 | +5.3% | +6.6% | | records_512 | +0.1% | +0.6% |
 | records_64k | +4.2% | +4.2% | | records_64k | +0.3% | +0.5% |
 | noise_64k   | +0.9% | +3.2% | | noise_512   | -1.7% | -1.8% |
 
-Eigenes Format 22 von 22 Zellen. Fremdes LZ4 unveraendert 10 von 18; der
-groesste Rueckstand ist jetzt varied_4k mit -4.4% gegen liblz4.
+Own format: 22 of 22 cells. Foreign LZ4 unchanged on 10 of 18; the largest
+deficit is now varied_4k at -4.4% against liblz4.
 
-x86_64 hat dieselbe Schleife und ist ungemessen.
+x86_64 has the same loop and is unmeasured.
 
-## 2026-09-20 — varied im Fremdformat: der Zensus, und eine widerlegte Idee
+## 2026-09-20 — varied in the foreign format: the census, and a refuted idea
 
-Der Auftrag war der Flow von varied_4k und varied_512 im fremden LZ4-Format,
-wo wir -4.4% und -2.6% gegen liblz4 liegen. Ein Zensus ueber den LZ4-Block
-zaehlt, was der Decoder je Block gefragt wird -- und daneben, wie oft die
-Antwort sich gegenueber dem Block davor aendert, denn das ist, was der
-Praediktor sieht:
+The task was the flow of varied_4k and varied_512 in the foreign LZ4 format,
+where we sit 4.4% and 2.6% behind liblz4. A census over the LZ4 block counts
+what the decoder is asked per block -- and alongside it, how often the answer
+changes from one block to the next, because that is what the predictor sees:
 
 | | varied_512 | varied_4k | records_4k | records_64k |
 |---|---|---|---|---|
-| Bytes je Block | 18.9 | 17.5 | 36.9 | 32.5 |
-| Literale / Match | 2.6 / 15.3 | 2.0 / 15.5 | 2.2 / 34.7 | 0.2 / 32.3 |
-| Matchnibble gesaettigt | 11.1% | 24.8% | 76.6% | 75.0% |
-| davon Wechsel | 22.2% | 34.2% | 38.7% | 49.2% |
-| Matchlaengen 4-14 / 15-31 | 73% / 27% | 49% / 47% | 25% / 47% | 25% / 47% |
-| Literallaengen = 0 | 33% | 56% | 32% | 88% |
+| bytes per block | 18.9 | 17.5 | 36.9 | 32.5 |
+| literals / match | 2.6 / 15.3 | 2.0 / 15.5 | 2.2 / 34.7 | 0.2 / 32.3 |
+| match nibble saturated | 11.1% | 24.8% | 76.6% | 75.0% |
+| of those, a change | 22.2% | 34.2% | 38.7% | 49.2% |
+| match lengths 4-14 / 15-31 | 73% / 27% | 49% / 47% | 25% / 47% | 25% / 47% |
+| literal lengths = 0 | 33% | 56% | 32% | 88% |
 
-Zwei Dinge, die records nicht hat. varied traegt **17.5 Bytes je Block**, halb
-so viel wie records, und seine Matchlaengen liegen **auf der Schwelle**: die
-Saettigung beginnt bei 19 Bytes, und 49% liegen darunter, 47% darueber. Der
-Sprung `cmp w26,#15 / b.eq fast_long` wechselt bei jedem dritten Block die
-Richtung und ist damit nicht vorhersagbar.
+Two things records does not have. varied carries **17.5 bytes per block**, half
+what records carries, and its match lengths sit **on the threshold**:
+saturation begins at 19 bytes, and 49% fall below it, 47% above. The branch
+`cmp w26,#15 / b.eq fast_long` changes direction on every third block and is
+therefore not predictable.
 
-### Die Rechnung, die den Rest erklaert
+### The arithmetic that explains the rest
 
-Der Loop-Kopf sagt, die Schleife laeuft bei 8.7 Zyklen je Block. 17.5 Bytes
-durch 8.7 Zyklen bei 3.5 GHz sind **6.5 GiB/s**, und varied_4k misst 6.48.
-Die Form ist also vollstaendig durch die Token-Kette gebunden, nicht durch
-Arbeit -- liblz4 liegt bei denselben Bloecken auf etwa 8.3 Zyklen.
+The loop header says the loop runs at 8.7 cycles per block. 17.5 bytes over 8.7
+cycles at 3.5 GHz is **6.5 GiB/s**, and varied_4k measures 6.48. So this shape
+is bound entirely by the token chain and not by work -- liblz4 runs the same
+blocks at roughly 8.3 cycles.
 
-### Und die Idee, die daraus folgte und nicht stimmt
+### And the idea that followed from it, which is wrong
 
-Die Kette ist `ldrb` (4) -> `lsr` (1) -> `add x8` (1) -> `add x23, #2` (1).
-AArch64 kann Schieben und Addieren in einem Befehl, also `add x8, x7, x4,
-lsr #LIT_SHIFT` statt `lsr` + `add` -- auf dem Papier ein Zyklus von sieben,
-gut 11%.
+The chain is `ldrb` (4) -> `lsr` (1) -> `add x8` (1) -> `add x23, #2` (1).
+AArch64 can shift and add in one instruction, so `add x8, x7, x4, lsr
+#LIT_SHIFT` instead of `lsr` + `add` -- on paper one cycle out of seven, a good
+11%.
 
-Gemessen, zwei Laeufe, gegen die Kontrollen:
+Measured, two runs, against the controls:
 
-| | fremdes LZ4 | eigenes Format |
+| | foreign LZ4 | own format |
 |---|---|---|
 | records_4k | -5.9% | -6.0% |
 | records_64k | -5.6% | -6.5% |
 | varied_4k | -4.1% | -5.2% |
 | varied_64k | -9.7% | -6.1% |
 
-Die geschobene Addition ist auf M2 nicht ein Zyklus, sondern zwei, und der
-`lsr` musste ohnehin stehenbleiben -- der Vergleich und der Ausgabecursor
-wollen die Zahl. Also eine Instruktion mehr und kein Zyklus weniger.
-Zurueckgenommen.
+The shifted add is not one cycle on M2 but two, and the `lsr` had to stay
+regardless -- the comparison and the output cursor both want the number. So one
+instruction more and not one cycle less. Reverted.
 
-Damit ist die achte Idee an derselben Stelle gescheitert, und alle acht haben
-versucht, die Kette zu verkuerzen oder Instruktionen zu sparen. Was in diesem
-Kernel je gewirkt hat, war etwas anderes: mehr Bytes je Block (wide split,
-lazy matching, je ~19%) oder weniger Arbeit ueberhaupt (memcpy, +34%). Beim
-fremden Format ist die Blockgroesse nicht unsere Entscheidung.
+That makes the eighth idea to fail at this same spot, and all eight tried to
+shorten the chain or save instructions. What has ever worked in this kernel was
+something else: more bytes per block (wide split, lazy matching, about 19%
+each) or less work altogether (memcpy, +34%). In the foreign format the block
+size is not ours to decide.
 
-## 2026-09-20 — Der kurze gesaettigte Match: gebaut, gemessen, null
+## 2026-09-20 — The short saturated match: built, measured, nothing
 
-Vorgerechnet war es null und gemessen ist es null, aber gerechnet hatte ich mit
-Instruktionen, und die sind in diesem Loop nicht die Waehrung -- also gebaut.
+The arithmetic said nothing and the measurement says nothing, but the
+arithmetic was in instructions, and instructions are not the currency in this
+loop -- so it was built anyway.
 
-Das Nibble saettigt bei neunzehn Bytes, der feste Move schreibt zweiunddreissig.
-Jeder Match dazwischen lief durch Laengenbyte, Waechterkette und Blockschleife,
-um dieselben zweiunddreissig Bytes geschrieben zu bekommen, die `L(fast_copy)`
-in einem Speicherpaar erledigt. Auf varied ist das ein Fuenftel aller Bloecke.
-Zwei Instruktionen dazu (`cmp x14,#COPY_MAX` / `b.ls L(fast_copy)`), etwa fuenf
-gespart, nur unter KEVA_LZ4 -- der wide-Split schreibt achtundvierzig, und die
-Marge, die `L(fast_litlong)` prueft, sind zweiunddreissig.
+The nibble saturates at nineteen bytes; the fixed move writes thirty-two. Every
+match in between went through a length byte, the guard chain and the block loop
+in order to have written the same thirty-two bytes that `L(fast_copy)` does in
+one store pair. On varied that is a fifth of all blocks. Two instructions added
+(`cmp x14,#COPY_MAX` / `b.ls L(fast_copy)`), about five saved, only under
+KEVA_LZ4 -- the wide split writes forty-eight, and the margin `L(fast_litlong)`
+checks is thirty-two.
 
-Mediane aus drei gegen eine Basis aus sechs Laeufen mit unveraendertem Code:
+Medians of three against a baseline of six runs with unchanged code:
 
-| fremdes LZ4 | netto | | eigenes Format | netto |
+| foreign LZ4 | net | | own format | net |
 |---|---|---|---|---|
 | varied_4k | +0.6% | | records_4k | -0.4% |
 | varied_512 | -0.8% | | records_64k | +0.4% |
 | records_4k | -0.8% | | varied_512 | -3.2% |
 | records_64k | -1.3% | | noise_512 | +3.1% |
 
-Zurueckgenommen. Die neunte Idee an dieser Stelle, und die erste, deren
-Ergebnis vorher ausgerechnet war -- fuenf Instruktionen auf einem Fuenftel der
-Bloecke sind 0.5% der Instruktionen, und eine gesparte Instruktion kauft hier
-keinen Zyklus. Das steht seit dem `ccmp`-Versuch im Kopf von unpack.S und gilt
-weiter.
+Reverted. The ninth idea at this spot, and the first whose result had been
+worked out beforehand -- five instructions on a fifth of the blocks is 0.5% of
+the instructions, and a saved instruction buys no cycle here. That has stood at
+the head of unpack.S since the `ccmp` attempt and still holds.
 
-### Was der Lauf nebenbei geeicht hat
+### What the run calibrated on the side
 
-`own_format/varied_512` misst -3.2%, obwohl die Aenderung hinter `#ifdef
-KEVA_LZ4` steht und unsere Bodies sie nicht sehen. Ein Median aus drei traegt
-auf dieser Maschine also rund 3% Rauschen, und alles darunter ist keine
-Messung. Die Kontrollen in denselben Laeufen lagen bei +-0.5%, weshalb die
-Netto-Spalte und nicht die Delta-Spalte zaehlt.
+`own_format/varied_512` measures -3.2% even though the change sits behind
+`#ifdef KEVA_LZ4` and our bodies never see it. So a median of three carries
+about 3% of noise on this machine, and anything below that is not a
+measurement. The controls in those same runs were within ±0.5%, which is why
+the net column counts and the delta column does not.
 
-## 2026-09-20 — Der Decoder fuehrte seine eigenen Tabellen aus
+## 2026-09-20 — The decoder executed its own tables
 
-Kein Messergebnis, ein Fehler, und gefunden beim Absichern einer Messung.
+Not a measurement, a bug, and found while making a measurement safe.
 
-Das Epilog der Wiederhol-Routine stand hinter dem `#endif`, das die
-Shuffle-Masken beendet:
+The epilogue of the repeat routine sat after the `#endif` that closes the
+shuffle masks:
 
 ```asm
 L(rep_ret):
 #ifdef KEVA_LZ4
-    ... 512 Bytes Masken ...
+    ... 512 bytes of masks ...
 #endif
     ldp     x29, x30, [sp], #32
     ret
 ```
 
-In jedem Body ohne die Tabellen erreicht `L(rep_ret)` das `ret` direkt. Im
-LZ4-Body liegen fuenfhundertzwoelf Bytes Daten dazwischen, und jeder Ruecksprung
-aus der Doppelungsleiter hat sie als Code ausgefuehrt. `EXC_BAD_INSTRUCTION` in
-`.Ll_splat_first`, also mitten in der ersten Maske.
+In every body without the tables, `L(rep_ret)` reaches the `ret` directly. In
+the LZ4 body there are five hundred and twelve bytes of data in between, and
+every return from the doubling ladder executed them as code.
+`EXC_BAD_INSTRUCTION` in `.Ll_splat_first`, which is the middle of the first
+mask.
 
-Ausgeloest von jedem fremden LZ4-Block mit einem Match, das weiter zurueckreicht
-als es lang ist, bei Offset sechzehn oder mehr -- unter sechzehn faengt der
-Shuffle-Pfad davor ab. Ein 63-Byte-Wert mit Periode 23 reicht:
+Triggered by any foreign LZ4 block with a match reaching further back than it
+is long, at an offset of sixteen or more -- below sixteen the shuffle path
+catches it first. A 63-byte value with period 23 is enough:
 
     declared=63  block=38 bytes  ->  SIGILL
 
-Warum niemand es gesehen hat: die Tabellen stehen hinter `#ifdef KEVA_LZ4`, und
-alle Tests dekodieren unser eigenes Format. Die Benchmark-Shapes treffen die
-Bedingung nicht -- `records`, `varied` und `noise` haben in liblz4s Ausgabe
-keinen ueberlappenden Match bei Offset >= 16. Hundert gruene Tests und achtzehn
-gruene Benchmarkzellen, und der Decoder stuerzte auf der ersten Datei ab, die
-sich anders wiederholt.
+Why nobody saw it: the tables sit behind `#ifdef KEVA_LZ4`, and every test
+decodes our own format. The benchmark shapes do not meet the condition --
+`records`, `varied` and `noise` have no overlapping match at offset >= 16 in
+liblz4's output. A hundred green tests and eighteen green benchmark cells, and
+the decoder crashed on the first file that repeats itself differently.
 
-Der x86-Body hatte es nie: dort steht `L(splat_ret): ret` vor den Tabellen. Der
-aarch64-Port hat beim Uebernehmen das `ret` verloren.
+The x86 body never had it: there, `L(splat_ret): ret` stands in front of the
+tables. The aarch64 port lost the `ret` when it took the code over.
 
-Dazu zwei Tests. `the_kernel_reads_a_match_that_overlaps_itself` baut Bloecke
-von Hand -- Offsets 1 bis 40, Laengen bis 300 -- und laeuft damit auf jedem Body
-und ohne liblz4; ohne den Fix endet er mit SIGILL. Und `examples/lz4_soak.rs`
-schickt 5760 von liblz4 gepackte Faelle durch den Kernel und vergleicht Byte
-fuer Byte.
+Two tests for it. `the_kernel_reads_a_match_that_overlaps_itself` builds blocks
+by hand -- offsets 1 to 40, lengths up to 300 -- and runs them on every body
+and without liblz4; without the fix it ends in SIGILL. And
+`examples/lz4_soak.rs` puts 5760 liblz4-packed cases through the kernel and
+compares byte for byte.
 
-Die Lehre ist nicht "mehr Tests". Es ist, dass eine `#ifdef`-Variante ein
-zweites Programm ist, und dass dieses zweite Programm hier nur an einem
-Benchmark haengt, der Durchsatz misst und keine Korrektheit.
+The lesson is not "more tests". It is that an `#ifdef` variant is a second
+program, and that this second program hung here on nothing but a benchmark,
+which measures throughput and not correctness.
 
-## 2026-09-20 — Das Laengenbyte gratis, und die zehnte Widerlegung
+## 2026-09-20 — The length byte for free, and the tenth refutation
 
-Das Profil mit feineren Labels, `varied_4k`, 6728 Samples:
+The profile with finer labels, `varied_4k`, 6728 samples:
 
-    .Ll_fast        22.1%   die zwei Zonen-Vergleiche, also der Ruecksprung
-    .Ll_px_guard    20.3%   die fuenf Befehle direkt hinter b.eq L(fast_long)
-    .Ll_fast_offset 12.9%   ldrh Offset und Cursor
-    .Ll_px_token    12.3%   Token laden, schieben, Nibbles
-    .Ll_fast_copy   11.1%   der feste Move
+    .Ll_fast        22.1%   the two zone comparisons, so the jump back
+    .Ll_px_guard    20.3%   the five instructions right after b.eq L(fast_long)
+    .Ll_fast_offset 12.9%   ldrh of the offset, and the cursor
+    .Ll_px_token    12.3%   load the token, shift, nibbles
+    .Ll_fast_copy   11.1%   the fixed move
 
-`px_guard` sind fuenf billige ALU-Befehle, 12% der Instruktionen und 20% der
-Zeit, und sie liegen im Landepunkt des Sprungs, den der Zensus mit 34%
-Richtungswechsel als unvorhersagbar ausgewiesen hat.
+`px_guard` is five cheap ALU instructions, 12% of the instructions and 20% of
+the time, and it sits at the landing point of the branch the census identified
+as unpredictable at 34% direction changes.
 
-`varied_512` zeigt daneben 20.5% auf dem geprueften Pfad (`slow_lit_ready` 8.0,
-`slow_mat_ready` 4.5, `slow_lit_done` 3.7, `tail` 2.9, `slow` 1.4) -- das ist
-der Eingabe-Rand von siebzehn Bytes auf einem Wert, der in rund 27 Bloecke
-zerfaellt. Unangetastet.
+`varied_512` shows 20.5% on the checked path alongside it (`slow_lit_ready`
+8.0, `slow_mat_ready` 4.5, `slow_lit_done` 3.7, `tail` 2.9, `slow` 1.4) --
+that is the seventeen-byte input margin on a value that breaks into about 27
+blocks. Left alone.
 
-### Die Idee
+### The idea
 
-Das Byte, das einen gesaettigten Match verlaengert, liegt zwei hinter dem
-Offset. Ein 32-Bit-Load an derselben Adresse traegt beide und kostet dasselbe
-wie der 16-Bit-Load, den er ersetzt -- kein zweiter Load, keine zweite Adresse,
-und genau darin unterscheidet er sich von dem Versuch, der im Quelltext mit
--18% dokumentiert ist. Die Laenge wird dann mit `csel` gebildet und der Sprung
-auf "passt in den festen Move" ersetzt den auf "Nibble gesaettigt": 3% statt
-25%, und vorhersagbar.
+The byte that extends a saturated match sits two past the offset. A 32-bit load
+at the same address carries both and costs what the 16-bit load it replaces
+costs -- no second load, no second address, and that is exactly what
+distinguishes it from the attempt documented in the source at -18%. The length
+is then formed with `csel`, and a branch on "fits in the fixed move" replaces
+the branch on "nibble saturated": 3% instead of 25%, and predictable.
 
-### Zweimal gemessen, zweimal dasselbe
+### Measured twice, the same both times
 
-Beim ersten Mal fiel `b.hi L(fast_lenbig)` in sein eigenes Ziel, also lief
-jeder Block durch die Blockschleife -- varied -26%. Das Label aus dem Fallweg
-genommen und noch einmal, Basis drei Laeufe, neu zwei:
+The first time, `b.hi L(fast_lenbig)` fell into its own target, so every block
+ran through the block loop -- varied -26%. Label taken out of the fallthrough
+and measured again, baseline three runs, new code two:
 
-| fremdes LZ4 | netto |
+| foreign LZ4 | net |
 |---|---|
 | varied_512 | **-30.8%** |
 | varied_64k | -22.3% |
@@ -1276,62 +1272,61 @@ genommen und noch einmal, Basis drei Laeufe, neu zwei:
 | records_4k | -5.7% |
 | noise_512 | +2.2% |
 
-Der Grund steht im Diff: `cinc x23, x23, eq`. Vorher hing der Eingabecursor des
-naechsten Blocks nur an der Literalzahl -- `ldrb` -> `lsr` -> `add x8` ->
-`add x23, #2`. Jetzt haengt er zusaetzlich am Match-Nibble, an dessen Vergleich
-und am `cinc`, also zwei Zyklen mehr auf der einen Kette, an der diese Schleife
-nachweislich gebunden ist. Der eingesparte Mispredict ist 3.4 Zyklen auf einem
-Drittel der Bloecke, gut ein Zyklus im Mittel; zwei Zyklen auf allen Bloecken
-sind teurer.
+The reason is in the diff: `cinc x23, x23, eq`. The next block's input cursor
+used to depend only on the literal count -- `ldrb` -> `lsr` -> `add x8` ->
+`add x23, #2`. Now it also depends on the match nibble, on its comparison and
+on the `cinc`: two cycles more on the one chain this loop is demonstrably bound
+by. The mispredict saved is 3.4 cycles on a third of the blocks, a good cycle
+on average; two cycles on every block costs more.
 
-Eigenes Format unberuehrt, alle elf Zeilen zwischen -1.1% und +1.6% netto --
-die Aenderung steht hinter `#ifdef KEVA_LZ4`.
+Our own format untouched, all eleven rows between -1.1% and +1.6% net -- the
+change sits behind `#ifdef KEVA_LZ4`.
 
-Damit ist die zehnte Idee an dieser Stelle gescheitert, und die dritte in
-Folge, die die Kette verlaengert hat, ohne dass es beim Schreiben auffiel. Die
-Regel ist inzwischen scharf genug, um sie vorher anzuwenden: **was `x23` fuer
-den naechsten Block berechnet, darf nichts Neues beruehren.**
+That makes the tenth idea to fail at this spot, and the third in a row to have
+lengthened the chain without it being noticed while writing it. The rule is
+sharp enough by now to apply in advance: **whatever computes `x23` for the next
+block may not touch anything new.**
 
-## 2026-09-20 — Der gepolsterte Rest: der Rand kostet nichts mehr
+## 2026-09-20 — The padded remainder: the margin costs nothing now
 
-Die erste Idee seit dem memcpy, die haelt, und sie kommt aus demselben Profil
-wie die drei davor. `lz4_varied_512` verbrachte 20.5% auf dem geprueften Pfad:
+The first idea since the memcpy that holds, and it comes out of the same
+profile as the three before it. `lz4_varied_512` spent 20.5% on the checked
+path:
 
     slow_lit_ready 8.0   slow_mat_ready 4.5   slow_lit_done 3.7
     tail 2.9   slow 1.4
 
-Der Grund ist der Eingabe-Rand. Der schnelle Pfad liest eine feste Strecke ab
-dem Cursor -- ein Token und die Literalkopie, siebzehn Bytes -- und hoert so
-weit vor dem Ende auf, statt je Block zu pruefen. Ein 512-Byte-Wert von varied
-packt auf etwa 250 Bytes in 27 Bloecke, also sind siebzehn Bytes fast zwei
-davon, auf einem Pfad, der drei- bis viermal so teuer ist.
+The reason is the input margin. The fast path reads a fixed distance from the
+cursor -- a token and the literal copy, seventeen bytes -- and stops that far
+short of the end rather than checking per block. A 512-byte varied value packs
+to about 250 bytes in 27 blocks, so seventeen bytes is nearly two of them, on a
+path three to four times as expensive.
 
-### Was gebaut wurde
+### What was built
 
-Wenn der *Eingabe*-Cursor die Zone verlaesst -- und nur dann, der Ausgabe-Rand
-ist eine andere Frage -- werden die verbleibenden hoechstens siebzehn Bytes in
-vierundsechzig genullte Bytes im eigenen Rahmen kopiert, und `x19` wird um den
-Cursor verschoben, sodass jeder Index im Loop seine Bedeutung behaelt. Sonst
-weiss nichts im Body davon. Der Rand wird auf das echte Ende gesetzt, und der
-schnelle Pfad laeuft bis dorthin.
+When the *input* cursor leaves the zone -- and only then; the output margin is
+a separate question -- the remaining seventeen bytes at most are copied into
+sixty-four zeroed bytes in the frame, and `x19` is shifted by the cursor so
+that every index in the loop keeps its meaning. Nothing else in the body knows.
+The margin is set to the real end, and the fast path runs all the way there.
 
-Dass Polsterung keinen abgeschnittenen Strom verstecken kann, haelt drei
-Argumente aus: jeder Block, der ein Byte ab dem Ende liest, laesst den Cursor
-hinter dem Ende stehen; ein Offset von null wird dort abgelehnt, wo er gelesen
-wird; und `L(done)` prueft, dass der Cursor genau auf dem Ende steht, sonst
-uebernimmt der portable Decoder und liefert den Fehler.
+That padding cannot hide a truncated stream survives three arguments: any block
+reading a byte from the end leaves the cursor past the end; an offset of zero
+is refused where it is read; and `L(done)` checks that the cursor lands exactly
+on the end, failing which the portable decoder takes over and produces the
+error.
 
-### Die Kopie selbst war erst die Haelfte des Gewinns
+### The copy itself was only half the gain
 
-Byteweise gemessen: geprueter Pfad faellt von 20.5% auf 11.6%, aber
-`.Ll_pad_byte` steht mit **6.5%** drin. Siebzehn Bytes einmal je Wert sind auf
-einem 512-Byte-Wert kein Nichts. Ersetzt durch eine Breitenleiter -- 16, 8, 4,
-2, 1, nur die gesetzten Bits kosten --, also etwa fuenfzehn Instruktionen
-statt hundert.
+Measured byte by byte: the checked path falls from 20.5% to 11.6%, but
+`.Ll_pad_byte` shows up at **6.5%**. Seventeen bytes once per value is not
+nothing on a 512-byte value. Replaced with a width ladder -- 16, 8, 4, 2, 1,
+only the set bits cost anything -- so about fifteen instructions instead of a
+hundred.
 
-### Gemessen, Mediane aus 3 gepaarten Runden, netto gegen die Kontrollen
+### Measured, medians of 3 paired rounds, net of the controls
 
-| eigenes Format | netto | | fremdes LZ4 | netto |
+| own format | net | | foreign LZ4 | net |
 |---|---|---|---|---|
 | records_192 | **+8.1%** | | varied_512 | **+3.3%** |
 | noise_64k | +4.0% | | records_4k | +1.4% |
@@ -1340,56 +1335,56 @@ statt hundert.
 | records_512 | +1.1% | | noise_64k | -3.3% |
 | varied_4k | -0.7% | | records_64k | -0.4% |
 
-`varied_512` im Fremdformat steht damit bei -0.2% gegen liblz4 statt -3.1%.
+`varied_512` in the foreign format now sits at -0.2% against liblz4 instead of
+-3.1%.
 
-Die beiden `noise`-Zeilen sind die einzigen, die sich wehren, und dort feuert
-die Polsterung ueberhaupt nicht: ein Literallauf ueber den ganzen Block
-verlaesst den schnellen Pfad beim ersten Token, lange bevor der Rand eine
-Rolle spielt. In denselben Laeufen lief liblz4 auf genau diesen zwei Zellen um
-+2.6% und +2.7% nach oben, weshalb die Netto-Spalte negativ ist. Platzierung,
-nicht Mechanik -- der Kernel hat 96 auf 160 Byte Rahmen gewechselt.
+The two `noise` rows are the only ones that resist, and the padding does not
+fire there at all: a literal run covering the whole block leaves the fast path
+at the first token, long before the margin matters. In those same runs liblz4
+moved up by +2.6% and +2.7% on exactly those two cells, which is why the net
+column is negative. Placement, not mechanics -- the kernel went from a 96-byte
+frame to a 160-byte one.
 
-x86_64 hat denselben Rand und ist ungemessen.
+x86_64 has the same margin and is unmeasured.
 
-## 2026-09-20 — Vier Bytes, wo eines gelesen wurde
+## 2026-09-20 — Four bytes where one was read
 
-Die Frage war, ob die knappen Zellen im Fremdformat noch zu holen sind. In
-Zyklen je Block gerechnet -- der einzigen Einheit, in der Formen vergleichbar
-sind -- war der Rueckstand winzig:
+The question was whether the close cells in the foreign format were still
+winnable. Counted in cycles per block -- the only unit in which shapes are
+comparable -- the deficit was tiny:
 
-| | B/Block | keva | liblz4 | flex | fehlend |
+| | B/block | lzvolt | liblz4 | flex | missing |
 |---|---|---|---|---|---|
 | records_4k | 36.9 | 9.80 | 9.73 | 11.22 | +0.07 |
 | records_64k | 32.5 | 9.60 | 9.47 | 9.03 | +0.56 |
 | varied_4k | 17.5 | 8.78 | 8.40 | 8.46 | +0.37 |
 | varied_512 | 18.9 | 7.21 | 7.19 | 7.98 | +0.02 |
 
-Zwei davon lagen unter dem Rauschboden, also gleichauf. Gesucht waren 0.37 und
-0.56 Zyklen.
+Two of them were below the noise floor, so level. What was being chased was
+0.37 and 0.56 cycles.
 
-### Die Aenderung
+### The change
 
-Der Loop las das Token mit `ldrb` -- ein Byte. Ein `ldr w4` an derselben
-Adresse kostet dasselbe und bringt, solange der Literallauf leer ist, auch den
-Offset (Bits 8..23) und das Laengenbyte des Matches (Bits 24..31). Was das
-ersetzt, sind zwei weitere abhaengige L1-Zugriffe: die Offsetadresse ist
-`Token -> shift -> add`, liegt also drei Zyklen hinter dem Token, und das
-Laengenbyte nochmal drei dahinter -- auf der Kette, die den Ausgabecursor
-speist, auf den der naechste Block wartet. Dazu entfaellt fuer diese Bloecke
-die unbedingte 16-Byte-Literalkopie, die ohnehin ueberschrieben wurde.
+The loop read the token with `ldrb` -- one byte. An `ldr w4` at the same
+address costs the same and also brings, as long as the literal run is empty,
+the offset (bits 8..23) and the match's length byte (bits 24..31). What that
+replaces is two further dependent L1 accesses: the offset address is `token ->
+shift -> add`, so three cycles behind the token, and the length byte three
+behind that again -- on the chain that feeds the output cursor the next block
+waits for. On top of that, these blocks no longer do the unconditional 16-byte
+literal copy, which was overwritten anyway.
 
-Der Zensus sagt, wie oft: Literallauf leer in 88% von records_64k, 56% von
-varied_4k, einem Drittel des Rests. Bei records_64k saettigen davon 75% auch
-das Match-Nibble, also nimmt zwei Dritteln seiner Bloecke beides aus diesem
-einen Load.
+The census says how often: the literal run is empty in 88% of records_64k, 56%
+of varied_4k, a third of the rest. In records_64k, 75% of those also saturate
+the match nibble, so two thirds of its blocks take both out of this one load.
 
-Der befuerchtete Haken -- ein Muenzwurf-Sprung auf "Literallauf leer" bei
-varied -- ist nicht eingetreten. Der haeufige Fall faellt durch statt zu
-springen, und 56/44 reicht dem Praediktor offenbar.
+The catch that was feared -- a coin-flip branch on "literal run empty" for
+varied -- did not materialise. The common case falls through rather than
+branching, and 56/44 is apparently enough for the predictor.
 
-### Gemessen, Mediane aus 3 gepaarten Runden, netto gegen die Kontrollen
+### Measured, medians of 3 paired rounds, net of the controls
 
-| fremdes LZ4 | alt | neu | netto | jetzt vs liblz4 |
+| foreign LZ4 | old | new | net | now vs liblz4 |
 |---|---|---|---|---|
 | varied_64k | 5.54 | 7.59 | **+36.7%** | +52.7% |
 | varied_4k | 6.54 | 8.63 | **+31.5%** | +26.3% |
@@ -1401,34 +1396,33 @@ springen, und 56/44 reicht dem Praediktor offenbar.
 | noise_512 | 49.29 | 48.19 | -1.3% | +3.5% |
 | records_512 | 11.48 | 11.11 | -3.2% | +1.0% |
 
-**17 von 18 Zellen** im Fremdformat, gegen 10 vorher. Die eine Ausnahme ist
-noise_4k mit -0.3%, also Paritaet. Das eigene Format steht unveraendert bei 21
-von 22 -- die Aenderung liegt hinter `#ifdef KEVA_LZ4` und alle elf Zeilen
-bewegen sich zwischen -2.3% und +1.2% netto.
+**17 of 18 cells** in the foreign format, against 10 before. The one exception
+is noise_4k at -0.3%, which is parity. Our own format is unchanged at 21 of 22
+-- the change sits behind `#ifdef KEVA_LZ4` and all eleven rows move between
+-2.3% and +1.2% net.
 
-Korrektheit: 105 Tests mit `liblz4`, die 5760 Faelle des Soaks, und alle neun
-Benchmark-Formen byte-fuer-byte gegen das, was liblz4 gepackt hat.
+Correctness: 105 tests with `liblz4`, the soak's 5760 cases, and all nine
+benchmark shapes byte for byte against what liblz4 packed.
 
-### Was das ueber den Rest des Tages sagt
+### What that says about the rest of the day
 
-Elf Ideen, neun davon null oder schlechter. Die drei, die getragen haben, haben
-dasselbe getan: **Arbeit entfernt, nicht Instruktionen.** memcpy nahm eine
-Schleife weg (+34%), die Polsterung nahm den geprueften Pfad weg (+8%), und
-diese hier nimmt zwei abhaengige Loads und einen Vektor-Store weg (+37%). Alles,
-was stattdessen die Kette umbauen oder Befehle sparen wollte, hat zwischen 0%
-und -31% gekostet.
+Eleven ideas, nine of them zero or worse. The three that carried all did the
+same thing: **removed work, not instructions.** memcpy took a loop away (+34%),
+the padding took the checked path away (+8%), and this one takes two dependent
+loads and a vector store away (+37%). Everything that instead tried to rebuild
+the chain or save instructions cost between 0% and -31%.
 
-## 2026-09-20 — Derselbe Trick im even-Split
+## 2026-09-20 — The same trick in the even split
 
-Nach dem LZ4-Body las unser eigenes Format `varied_4k` mit 8.28 GiB/s, waehrend
-derselbe Kernel einen *fremden* LZ4-Block derselben Daten mit 8.63 las. Der
-Grund war nur die Wache: `varied` landet bei uns im even-Split, der dieselbe
-Token-Aufteilung hat wie LZ4 und den Trick nicht bekommen hatte. `#ifdef
-KEVA_LZ4` wurde zu `#ifndef KEVA_WIDE`.
+After the LZ4 body, our own format read `varied_4k` at 8.28 GiB/s while the
+same kernel read a *foreign* LZ4 block of the same data at 8.63. The reason was
+nothing but the guard: `varied` lands in our even split, which has the same
+token layout as LZ4 and had not been given the trick. `#ifdef KEVA_LZ4` became
+`#ifndef KEVA_WIDE`.
 
-Mediane aus drei gepaarten Runden, netto gegen die Kontrollen:
+Medians of three paired rounds, net of the controls:
 
-| eigenes Format | alt | neu | netto | jetzt vs liblz4 |
+| own format | old | new | net | now vs liblz4 |
 |---|---|---|---|---|
 | varied_64k | 8.10 | 9.56 | **+18.3%** | +92.8% |
 | varied_4k | 8.28 | 9.64 | **+16.4%** | +41.6% |
@@ -1440,57 +1434,56 @@ Mediane aus drei gepaarten Runden, netto gegen die Kontrollen:
 | records_512 | 13.30 | 13.09 | **-1.5%** | +18.6% |
 | records_192 | 9.62 | 9.32 | **-3.0%** | +43.7% |
 
-22 von 22 Zellen bleiben gewonnen.
+All 22 of 22 cells stay won.
 
-### Die zwei Minus sind echt, und sie haben einen Grund
+### The two negatives are real, and they have a reason
 
-Ueber je fuenf gepaarte Laeufe bestaetigt, Kontrolle flach bei +0.2%:
-records_192 -3.0%, records_512 -1.5%.
+Confirmed over five paired runs each, control flat at +0.2%: records_192
+-3.0%, records_512 -1.5%.
 
-Der Zensus sagt warum. Der schnelle Pfad faellt in den Sonderfall hinein statt
-zu ihm zu springen, weil ein leerer Literallauf 88% von records_64k in LZ4s
-Format ausmacht und 56% von varied. In *unserem* Format traegt records aber in
-56% seiner Bloecke einen bis drei Literale und nur in 32% keinen -- dort ist
-die Reihenfolge verkehrt herum.
+The census says why. The fast path falls *into* the special case rather than
+branching to it, because an empty literal run is 88% of records_64k in LZ4's
+format and 56% of varied. In *our* format, though, records carries one to three
+literals in 56% of its blocks and none in only 32% -- there the ordering is the
+wrong way round.
 
-### Umgedreht gebaut, und es ist schlimmer
+### Built the other way round, and it is worse
 
-Den Sonderfall aus dem Fallweg genommen und per Sprung erreicht:
+Special case taken out of the fallthrough and reached by a branch instead:
 
-| | netto |
+| | net |
 |---|---|
-| eigenes records_192 | -3.0% -> -2.1% |
-| fremdes records_64k | **-7.9%** |
-| fremdes varied_512 | **-11.8%** |
-| fremdes noise_512 | **-11.6%** |
+| own records_192 | -3.0% -> -2.1% |
+| foreign records_64k | **-7.9%** |
+| foreign varied_512 | **-11.8%** |
+| foreign noise_512 | **-11.6%** |
 
-Eine Anordnung kann nicht beiden Verteilungen dienen. Die Zahlen waehlen die,
-die steht.
+One arrangement cannot serve both distributions. The numbers pick the one that
+stays.
 
-### Und der Grund, warum es nicht feiner geht
+### And why it cannot be made finer
 
-Naheliegend waere, den Sonderfall auf Literallaeufe bis drei auszuweiten --
-das deckt 88% von records und 76% von varied, beide als Durchfall. Er ist
-durchgerechnet und nicht gebaut: der Offset saesse dann an einer variablen
-Position, also `ubfx` auf die Laenge, Schieben, Maskieren, und der Offset
-landet acht Zyklen hinter dem Token statt vier. Genau die vier Zyklen sind der
-ganze Gewinn. Die Verallgemeinerung wuerde das wegwerfen, was sie
-verallgemeinert.
+The obvious move is to widen the special case to literal runs up to three --
+that covers 88% of records and 76% of varied, both as fallthrough. It was
+worked out and not built: the offset would then sit at a variable position, so
+`ubfx` on the length, a shift, a mask, and the offset lands eight cycles behind
+the token instead of four. Those four cycles are the entire gain. The
+generalisation would throw away the thing it generalises.
 
-## 2026-09-20 — Das Repeat-Bit zurueck in den even-Split? Gezaehlt, nicht gebaut
+## 2026-09-20 — The repeat bit back in the even split? Counted, not built
 
-`records_512` war einmal 180 B und ist heute 195. Die fuenfzehn Bytes sind
-gegangen, als das Repeat-Bit aus dem even-Split in den wide-Split gezogen ist,
-weil es dort 22.9% Dekodierzeit kostete. Die Frage war, ob der Null-Literal-Pfad
-von heute das aufwiegt.
+`records_512` was once 180 B and is 195 today. The fifteen bytes went when the
+repeat bit moved from the even split into the wide split, because it cost 22.9%
+of decode time there. The question was whether today's zero-literal path pays
+that back.
 
-Er kann es nicht, und das ist eine Mengenbetrachtung: der neue Pfad
-beschleunigt Bloecke mit Literallauf **null**, der Preis von 3/4/1 trifft
-Bloecke mit Literallauf **ab sieben**. Disjunkt.
+It cannot, and the argument is about which blocks: the new path speeds up
+blocks with a literal run of **zero**, while the price of 3/4/1 falls on blocks
+with a literal run of **seven or more**. Disjoint.
 
-Der Zensus ueber unsere eigenen gepackten Werte (`examples/even_census.rs`):
+The census over our own packed values (`examples/even_census.rs`):
 
-| | Bloecke | Kette heute | Kette dann | neu | Anteil | Repeats | Groesse |
+| | blocks | chains today | chains then | new | share | repeats | size |
 |---|---|---|---|---|---|---|---|
 | records_192 | 4 | 2 | 2 | 0 | 0% | 1 | -2 B (-1.5%) |
 | records_512 | 12 | 2 | 5 | 3 | 25% | 9 | **-15 B (-7.7%)** |
@@ -1498,182 +1491,177 @@ Der Zensus ueber unsere eigenen gepackten Werte (`examples/even_census.rs`):
 | varied_4k | 186 | 50 | 113 | 63 | 34% | 35 | -7 B (-0.3%) |
 | varied_64k | 3054 | 738 | 1701 | 963 | 32% | 171 | **+621 B (+1.9%)** |
 
-Die 195 -> 180 stimmen auf das Byte mit dem Zensus vom 18.9. ueberein, was die
-Zaehlung validiert.
+The 195 -> 180 agrees to the byte with the census of 09-18, which validates the
+count.
 
-**Zwei Gruende, es nicht zu bauen.** Ein Drittel aller Bloecke wuerde neu aus
-der Schleife heraus in die Literalkette springen -- genau der Mechanismus, der
--22.9% und -21.5% gemessen hat. Und die Groesse traegt es nicht: der Gewinn
-existiert nur bei 512 Bytes, faellt bei 4 KiB auf 0.3% und dreht sich bei
-64 KiB um, weil die Wiederholungsrate mit der Groesse faellt (5.6% bei
-varied_64k) und die Literalkette mit ihr steigt.
+**Two reasons not to build it.** A third of all blocks would newly jump out of
+the loop into the literal chain -- exactly the mechanism that measured -22.9%
+and -21.5%. And the size does not carry it: the gain exists only at 512 bytes,
+falls to 0.3% at 4 KiB and reverses at 64 KiB, because the repeat rate falls
+with size (5.6% at varied_64k) while the literal chain rises with it.
 
-Derselbe Handel wie am 18.9., diesmal vorher ausgerechnet statt hinterher
-gemessen. Das ist der Punkt, an dem ein Zensus eine Messung ersetzt.
+The same trade as on 09-18, this time worked out beforehand instead of measured
+afterwards. That is the point at which a census replaces a measurement.
 
-## 2026-09-20 — x86 bekommt den breiten Token-Load, und ein Test, der vorher nichts geprueft hat
+## 2026-09-20 — x86 gets the wide token load, and a test that checked nothing
 
-Der Packer laeuft auf x86, die Decoder haben von den vier Gewinnen des Tages
-keinen. Portiert ist zunaechst nur einer -- der breite Token-Load, auf aarch64
-zwischen +22% und +52% wert -- und zwar allein, weil jede Antwort auf x86 eine
-gemietete Maschine kostet: zwei Aenderungen in einer Runde waeren bei einem
-schlechten Ergebnis nicht auseinanderzuhalten.
+The packer runs on x86; the decoders have none of the day's four gains. Only
+one is ported for now -- the wide token load, worth between +22% and +52% on
+aarch64 -- and on its own, because every answer on x86 costs a rented machine:
+two changes in one round could not be told apart if the result came back bad.
 
-Die x86-Stelle ist dieselbe: `movzwl (%rsi,%r10,1), %ecx` laedt den Offset an
-einer Adresse, die aus dem Token kommt, also Token laden, schieben, Offset
-laden. `mov (%r14), %eax` statt `movzbl` bringt Token, Offset und
-Laengenbyte in einem.
+The x86 site is the same one: `movzwl (%rsi,%r10,1), %ecx` loads the offset
+from an address derived from the token, so load the token, shift, load the
+offset. `mov (%r14), %eax` instead of `movzbl` brings token, offset and length
+byte in one.
 
-### Der Test, der grün war und nichts geprueft hat
+### The test that was green and checked nothing
 
-Geschwindigkeit braucht die Cloud, Korrektheit nicht -- beide Ziele bauen und
-testen hier. Nur: der vorhandene Ueberlapp-Test setzt seine Literalzahl aus dem
-Offset und erreicht damit nie null, also war der neue Pfad ungedeckt. Der neu
-geschriebene Test war es beim ersten Versuch ebenfalls:
+Speed needs the cloud, correctness does not -- both targets build and test
+here. Except: the existing overlap test derives its literal count from the
+offset and therefore never reaches zero, so the new path was uncovered. The
+newly written test was uncovered too, on the first attempt:
 
-    DIAG entschieden=0 abgelehnt=208
+    DIAG decided=0 refused=208
 
-Null von 208 handgebauten Bloecken wurden ueberhaupt dekodiert -- der erste
-Token trug ein Match-Nibble, aber ich hatte keinen Offset dahintergeschrieben,
-und `continue` bei Ablehnung hat das verschluckt. Ein gruener Test, der nichts
-ausfuehrt.
+None of 208 hand-built blocks were decoded at all -- the first token carried a
+match nibble, but I had not written an offset behind it, and `continue` on
+refusal swallowed that. A green test that executes nothing.
 
-Zwei Dinge haben das repariert. Der Block ist jetzt gueltig aufgebaut (Seed-Lauf
-mit Match, dann drei Bloecke ohne Literale, dann ein Literalschwanz), und die
-Zusicherung ist `refused == 0` statt `decided > refused`: eine Ablehnung ist
-die legitime Antwort des Kernels, aber sie ist auch, wie ein kaputter
-Schnellpfad sich versteckt -- er verschiebt den Rahmen, der naechste Block
-faellt durch eine Wache, und ein Test, der nur Bytes vergleicht, bleibt gruen.
+Two things fixed it. The block is now built validly (a seed run with a match,
+then three blocks with no literals, then a literal tail), and the assertion is
+`refused == 0` instead of `decided > refused`: a refusal is the kernel's
+legitimate answer, but it is also how a broken fast path hides -- it shifts the
+frame, the next block falls through a guard, and a test that only compares
+bytes stays green.
 
-### Gegengeprueft durch Mutation
+### Cross-checked by mutation
 
-| Mutation | aarch64 | x86 |
+| mutation | aarch64 | x86 |
 |---|---|---|
-| Cursor-Schritt 3 -> 2 | FAILED | FAILED |
-| Offset aus Bit 8 -> 9 | FAILED | -- |
-| Erweiterungsbyte Bit 24 -> 25 | -- | FAILED |
+| cursor step 3 -> 2 | FAILED | FAILED |
+| offset from bit 8 -> 9 | FAILED | -- |
+| extension byte bit 24 -> 25 | -- | FAILED |
 
-Erst damit ist belegt, dass der Test den Pfad ausfuehrt. Ohne diese Probe haette
-ich einen ungetesteten Assemblerpfad auf eine Architektur geschoben, die ich
-nicht messen kann.
+Only that establishes that the test executes the path. Without the probe I
+would have pushed an untested assembly path onto an architecture I cannot
+measure.
 
-Stand: 106 Tests auf aarch64, 102 auf x86, 5760 Soak-Faelle, clippy still.
-Ungemessen bleibt die Geschwindigkeit auf x86 -- dafuer braucht es eine Runde
-auf Xeon und EPYC.
+Status: 106 tests on aarch64, 102 on x86, 5760 soak cases, clippy quiet. Speed
+on x86 remains unmeasured -- that needs a round on Xeon and EPYC.
 
-## 2026-09-20 — liblz4 fuer x86 selbst gebaut, und was es sofort gefunden hat
+## 2026-09-20 — liblz4 built for x86 by hand, and what it found immediately
 
-Der Soak mit 5760 von liblz4 gepackten Werten lief nur auf aarch64, weil
-Homebrew hier kein x86-liblz4 hat. Der x86-Kernel war damit durch etwa
-zweihundert handgebaute Bloecke gedeckt und durch nichts sonst. lz4 hat keine
-Abhaengigkeiten und baut in vier Sekunden:
+The soak with 5760 liblz4-packed values ran only on aarch64, because Homebrew
+has no x86 liblz4 here. That left the x86 kernel covered by about two hundred
+hand-built blocks and by nothing else. lz4 has no dependencies and builds in
+four seconds:
 
     clang -arch x86_64 -O2 -c lz4.c lz4hc.c lz4frame.c xxhash.c
     ar rcs liblz4.a *.o
 
-Unter Rosetta gemessen waere sinnlos; ausgefuehrt ist es exakt derselbe
-Assembler, und Korrektheit ist genau das, was Rosetta nicht veraendert.
+Measuring under Rosetta would be pointless; what executes is exactly the same
+assembly, and correctness is precisely what Rosetta does not change.
 
-Erster Lauf gegen den frisch portierten x86-Kernel:
+First run against the freshly ported x86 kernel:
 
-    5760 Faelle, 9 falsch
+    5760 cases, 9 wrong
 
-Alle neun **REFUSED**, keiner WRONG -- der Kernel lehnt ab, der portable
-Decoder uebernimmt, die Ausgabe stimmt. Deshalb blieb jeder Test gruen. Gegen
-`HEAD~1` gemessen: 0 falsch. Also von mir eingebaut, in derselben Stunde.
+All nine **REFUSED**, none WRONG -- the kernel declines, the portable decoder
+takes over, the output is right. Which is why every test stayed green.
+Measured against `HEAD~1`: 0 wrong. So I put them there, within the hour.
 
-### Halbiert statt geraten
+### Bisected rather than guessed
 
-Die Abkuerzung fuer literallose Bloecke deaktiviert, den breiten Load behalten:
-**immer noch neun**. Damit war es nicht die Abkuerzung, sondern der Load selbst.
+Disable the shortcut for literal-less blocks, keep the wide load: **still
+nine**. So it was not the shortcut but the load itself.
 
-`L(dst_edge)` ist der eine Ausgang aus dem Schleifenkopf, der das Token in
-`%eax` *weiterreicht*, statt es neu zu laden -- `L(src_edge)` und
-`L(fast_litend)` machen beide ihr eigenes `movzbl`, und im Quelltext steht
-sogar, warum. Mit einem Dword-Load trug dieser Pfad drei Bytes des naechsten
-Blocks in `L(slow)`, das sie als Literalzahl schob.
+`L(dst_edge)` is the one exit from the loop header that *passes the token on*
+in `%eax` instead of reloading it -- `L(src_edge)` and `L(fast_litend)` both do
+their own `movzbl`, and the source even says why. With a dword load this path
+carried three bytes of the next block into `L(slow)`, which shifted them as a
+literal count.
 
-Ein `movzbl %al, %eax` auf einem Pfad, der einmal je Wert laeuft: 0 von 5760.
+One `movzbl %al, %eax` on a path that runs once per value: 0 of 5760.
 
-### Was das ueber den Tag sagt
+### What that says about the day
 
-Zwei Fehler heute, beide derselben Art: ein `#ifdef`-Zweig ist ein zweites
-Programm, und beide Male hat das zweite Programm eine Annahme gebrochen, die
-im ersten stillschweigend galt. Der Absturz heute frueh (Tabellen vor dem
-`ret`) und dieser hier. Beide gefunden, nicht weil ein Test sie vorhersah,
-sondern weil eine *unabhaengige* Referenz Byte fuer Byte verglichen hat.
+Two bugs today, both of the same kind: an `#ifdef` branch is a second program,
+and both times the second program broke an assumption that held tacitly in the
+first. This morning's crash (tables in front of the `ret`) and this one. Both
+found not because a test anticipated them, but because an *independent*
+reference compared byte for byte.
 
-## 2026-09-21 — Die AVX-Schwelle: gebaut, gemessen, widerlegt
+## 2026-09-21 — The AVX threshold: built, measured, refuted
 
-`noise_512` im Fremdformat liegt auf Xeon 30% hinter liblz4. Das Profil schien
-den Grund zu nennen -- `perf annotate` legte 78.9% des Kernels auf zwei
-Instruktionen der 64-Byte-Literalschleife, den *zweiten* `vmovdqu`-Load und den
-*zweiten* Store, waehrend das erste Paar derselben Iteration 0.00% zog. Dazu
-passte die Groessenreihe: noise_64k +4.4% (1024 Durchlaeufe), noise_4k +4.1%
-(64), noise_512 -31% (8). Ein Aufwand, der bei acht Durchlaeufen dominiert und
-bei vierundsechzig verschwindet, liest sich wie eine Anlaufkosten.
+`noise_512` in the foreign format sits 30% behind liblz4 on Xeon. The profile
+seemed to name the reason -- `perf annotate` put 78.9% of the kernel on two
+instructions of the 64-byte literal loop, the *second* `vmovdqu` load and the
+*second* store, while the first pair of the same iteration drew 0.00%. The size
+series fitted: noise_64k +4.4% (1024 iterations), noise_4k +4.1% (64),
+noise_512 -31% (8). A cost that dominates at eight iterations and vanishes at
+sixty-four reads like a start-up cost.
 
-Also eine Schwelle: Laeufe unter einem Kilobyte durch die 16-Byte-Schleife,
-laengere durch die 256-Bit-Schleife. Gemessen in beiden Reihenfolgen, weil die
-512-Byte-Zellen ueber den Abend um dreissig Punkte geschwankt haben:
+So a threshold: runs under a kilobyte through the 16-byte loop, longer ones
+through the 256-bit loop. Measured in both orders, because the 512-byte cells
+had swung by thirty points over the evening:
 
-| noise_512, GiB/s | Position 1 | Position 2 |
+| noise_512, GiB/s | position 1 | position 2 |
 |---|---|---|
-| ohne Schwelle | 35.23 | 35.20 |
-| mit Schwelle | 24.31 | **23.75** |
+| without threshold | 35.23 | 35.20 |
+| with threshold | 24.31 | **23.75** |
 
-Positionsunabhaengig und eindeutig: die breite Schleife ist auch bei acht
-Durchlaeufen um 32% besser. Zurueckgenommen.
+Position-independent and unambiguous: the wide loop is 32% better even at eight
+iterations. Reverted.
 
-`records_512` zeigte in einer Position -10.2% und in der anderen +16.4% --
-dieselbe Revision. Die Zelle ist ohne beide Reihenfolgen nicht lesbar, was der
-Skriptkopf seit Tagen sagt und was hier zum zweiten Mal fast zu einem falschen
-Urteil gefuehrt haette.
+`records_512` showed -10.2% in one position and +16.4% in the other -- the same
+revision. That cell is unreadable without both orders, which the script header
+has said for days and which here came close to buying a wrong verdict for the
+second time.
 
-### Was bleibt
+### What remains
 
-Bei 512 Bytes sind es rund 36 Zyklen gegen liblz4s 25, und die Kopie selbst ist
-davon nur etwa zehn. Der Rest sind Kosten, die einmal je Wert anfallen: zwoelf
-Push/Pop, der Zonenaufbau, und vor allem die Literallaengen-Kette -- 512 Bytes
-brauchen zwei Erweiterungsbytes, zwei abhaengige L1-Zugriffe hintereinander, auf
-einem Wert, der aus genau einem Block besteht und deshalb nichts hat, womit er
-diese Latenz ueberlappen koennte.
+At 512 bytes it is about 36 cycles against liblz4's 25, and the copy itself is
+only about ten of them. The rest is cost incurred once per value: twelve
+push/pop, the zone setup, and above all the literal-length chain -- 512 bytes
+need two extension bytes, two dependent L1 accesses back to back, on a value
+that consists of exactly one block and therefore has nothing to overlap that
+latency with.
 
-### Und eine Testluecke, die schwerer wiegt
+### And a test gap that weighs more
 
-Der AVX-Store wurde absichtlich verfaelscht -- der Soak blieb gruen.
-`Lz4Body::all()` gibt auf einer CPU ohne AVX2 nur `[Baseline, Ssse3]` zurueck,
-und unter Rosetta gibt es kein AVX2. Die Xeon- und EPYC-Bodies laufen auf diesem
-Rechner also **nie**, weder im Soak noch in den Tests. Auf der gemieteten
-Maschine nachgeholt: dieselbe Mutation laesst dort den Soak und zwei Tests
-fallen. Diese beiden Bodies sind ausschliesslich in der Cloud pruefbar.
+The AVX store was deliberately corrupted -- the soak stayed green.
+`Lz4Body::all()` returns only `[Baseline, Ssse3]` on a CPU without AVX2, and
+under Rosetta there is no AVX2. So the Xeon and EPYC bodies **never** run on
+this machine, neither in the soak nor in the tests. Repeated on the rented
+machine: the same mutation drops the soak and two tests there. Those two bodies
+can only be checked in the cloud.
 
-## 2026-09-21 — Der letzte Literallauf, ohne zweimal zu fragen
+## 2026-09-21 — The last literal run, without asking twice
 
-Gefunden durch Lesen, nicht durch Messen. `L(fast_litext)` liest die
-Literallaengen-Kette, stellt dann fest, dass der Lauf bis ans Eingabeende reicht
--- `lea 2(%rsi,%r10,1) / cmp %r13 / ja L(fast_litend)` -- und springt nach
-`L(slow)`, wo das Token **neu geladen**, die Nibbles **neu extrahiert** und
-**dieselbe Kette ein zweites Mal** gelaufen wird.
+Found by reading, not by measuring. `L(fast_litext)` reads the literal-length
+chain, then discovers that the run reaches the end of the input -- `lea
+2(%rsi,%r10,1) / cmp %r13 / ja L(fast_litend)` -- and jumps to `L(slow)`, where
+the token is **loaded again**, the nibbles are **extracted again** and **the
+same chain is walked a second time**.
 
-Bei einem Wert, der aus genau einem Block besteht, liegt das vollstaendig auf
-dem kritischen Pfad. 512 Bytes inkompressibler Daten sind genau das: Token,
-zwei Erweiterungsbytes, 512 Literale. Vier abhaengige L1-Zugriffe, wo zwei
-genuegen.
+For a value that consists of exactly one block, all of that is on the critical
+path. 512 bytes of incompressible data is exactly that: a token, two extension
+bytes, 512 literals. Four dependent L1 accesses where two would do.
 
-Am Abbruchpunkt ist alles schon da: `rsi` hinter den Laengenbytes, `rdi` am
-Ausgang, `r10` die Laenge. Es fehlten die zwei Schranken, die der schnelle Pfad
-noch nicht geprueft hatte, und `r14` muss auf den Lauf statt aufs Token zeigen,
-weil `L(lit_done)` es um die Lauflaenge weiterschiebt. Acht Instruktionen statt
-etwa fuenfunddreissig und drei abhaengigen Loads.
+At the bail-out point everything is already there: `rsi` past the length bytes,
+`rdi` at the output, `r10` the length. What was missing were the two bounds the
+fast path had not yet checked, and `r14` has to point at the run rather than at
+the token, because `L(lit_done)` advances it by the run length. Eight
+instructions instead of about thirty-five and three dependent loads.
 
-### Gemessen, Xeon 8481C, vier Positionen in beiden Reihenfolgen
+### Measured, Xeon 8481C, four positions in both orders
 
-Position 1 ist verworfen: dieselbe Revision las dort `noise_512` mit 15.29 und
-in Position 3 mit 35.14 GiB/s. Der Kaltstart trifft, was zuerst gemessen wird,
-und der Skriptkopf sagt das seit Tagen.
+Position 1 is discarded: the same revision read `noise_512` at 15.29 there and
+at 35.14 GiB/s in position 3. The cold start hits whatever is measured first,
+and the script header has said so for days.
 
-| | alt | neu | delta | vs liblz4 vorher -> jetzt |
+| | old | new | delta | vs liblz4 before -> now |
 |---|---|---|---|---|
 | records_512 | 6.60 | 8.22 | **+24.7%** | -9.9% -> **+17.8%** |
 | noise_512 | 35.14 | 40.68 | **+15.8%** | -31.0% -> **-20.1%** |
@@ -1685,73 +1673,71 @@ und der Skriptkopf sagt das seit Tagen.
 | records_4k | 11.23 | 11.20 | -0.3% | +21.0% |
 | varied_4k | 5.57 | 5.53 | -0.8% | +10.2% |
 
-Sieben von neun vor liblz4. Die Aenderung kostet nirgends mehr als ein Prozent
-und ist auf genau den Formen gross, die aus wenigen langen Literallaeufen
-bestehen.
+Seven of nine ahead of liblz4. The change costs nowhere more than one percent,
+and is large on exactly the shapes made of a few long literal runs.
 
-### Was an noise_512 bleibt
+### What remains on noise_512
 
-40.68 GiB/s sind 31 Zyklen fuer 512 Bytes, liblz4 braucht 25. Sechs Zyklen, und
-die Kopie selbst ist davon keine -- acht Durchlaeufe zu je 64 Byte sind etwa
-zehn. Was bleibt, sind Rahmen und Zonenaufbau, also Kosten, die ein Wert aus
-einem einzigen Block nicht auf mehrere Bloecke verteilen kann.
+40.68 GiB/s is 31 cycles for 512 bytes; liblz4 needs 25. Six cycles, and the
+copy itself is none of them -- eight iterations of 64 bytes each is about ten.
+What remains is the frame and the zone setup, costs that a value made of a
+single block cannot spread across several blocks.
 
-aarch64 hat dieselbe Doppelung und ist ungemessen.
+aarch64 has the same duplication and is unmeasured.
 
-### Korrektur zum Eintrag darueber: records_512 zeigt nichts
+### Correction to the entry above: records_512 shows nothing
 
-Die +24.7% auf records_512 sind kein Ergebnis. Ueber alle Laeufe dieses Tages:
+The +24.7% on records_512 is not a result. Across every run of that day:
 
-    8746808 (alt)  8.06  8.50  6.78  6.60
-    023e1c5 (neu)  8.06  8.39
+    8746808 (old)  8.06  8.50  6.78  6.60
+    023e1c5 (new)  8.06  8.39
 
-Beide Revisionen liegen im selben Band von 6.6 bis 8.5 GiB/s, eine Spanne von
-29%. Dass in dem einen Lauf die alte Revision unten und die neue oben lag, ist
-die Zelle und nicht die Aenderung. Der Eintrag darueber liest +24.7%, und das
-ist falsch.
+Both revisions lie in the same band of 6.6 to 8.5 GiB/s, a spread of 29%. That
+the old revision happened to land at the bottom and the new one at the top in
+that one run is the cell, not the change. The entry above reads +24.7%, and
+that is wrong.
 
-Belastbar aus demselben Lauf ist nur, was sich ueber mehrere Messungen
-wiederholt:
+The only trustworthy part of that run is what repeats across several
+measurements:
 
-    noise_512   alt  35.23  35.20  35.14     neu  40.47  40.90   +15.6%
-    noise_64k   alt  34.16                   neu  35.17  35.59    +3.6%
-    noise_4k    alt  67.77  67.77            neu  70.61  67.77    +2.1%
+    noise_512   old  35.23  35.20  35.14     new  40.47  40.90   +15.6%
+    noise_64k   old  34.16                   new  35.17  35.59    +3.6%
+    noise_4k    old  67.77  67.77            new  70.61  67.77    +2.1%
 
-noise_512 ist damit von -31% auf -20% gegen liblz4, und das haelt. Die anderen
-sechs Zellen bewegen sich nicht.
+So noise_512 moves from -31% to -20% against liblz4, and that holds. The other
+six cells do not move.
 
-Dies ist das dritte Mal heute, dass eine 512-Byte-Zelle beinahe ein falsches
-Urteil gekauft hat. Fuer diese Groesse gilt: mindestens zwei Messungen je
-Revision, und wenn die Baender sich ueberlappen, ist das Ergebnis "nichts" und
-nicht der Mittelwert.
+This is the third time today that a 512-byte cell has nearly bought a wrong
+verdict. For that size the rule is: at least two measurements per revision, and
+where the bands overlap the result is "nothing" rather than the average.
 
-## 2026-09-22 — Die Polsterung auf x86: widerlegt, und eine falsche Praemisse dazu
+## 2026-09-22 — The padding on x86: refuted, and a false premise with it
 
-Die Frage war, wieso der Xeon-Kernel viele Zyklen braucht. Er braucht keine.
-Zyklen je Block, aus Durchsatz und Blockzahl gerechnet:
+The question was why the Xeon kernel needs so many cycles. It needs none.
+Cycles per block, computed from throughput and block count:
 
-| | Bloecke | Xeon | M2 |
+| | blocks | Xeon | M2 |
 |---|---|---|---|
 | records_64k | 1567 | **8.9** | 8.7 |
 | records_4k | 96 | **9.2** | 8.7 |
 | records_512 | 12 | 11.8 | 10.4 |
 | records_192 | 4 | 36.9 | 16.2 |
 
-Bei 1567 Bloecken liegt x86 zwei Prozent neben Apple Silicon, bei identischem
-Quelltext. Die Schleife ist nicht das Problem.
+At 1567 blocks, x86 is two percent off Apple silicon on identical source. The
+loop is not the problem.
 
-Der Ausreisser bei records_192 war eine einzelne Messung, und das Modell ging
-nicht auf: 148 Zyklen fuer vier Bloecke gegen 141 fuer zwoelf ist weniger Zeit
-fuer dreimal so viel Arbeit. Eine feste Grundlast plus Arbeit je Block kann das
-nicht erzeugen. Vier Positionen spaeter liest records_192 3.26 und 3.22 GiB/s --
-stabil, und der Ausreisser war die Messung.
+The outlier at records_192 was a single measurement, and the model did not
+close: 148 cycles for four blocks against 141 for twelve is less time for three
+times the work. A fixed base cost plus per-block work cannot produce that. Four
+positions later records_192 reads 3.26 and 3.22 GiB/s -- stable, and the
+outlier was the measurement.
 
-### Gebaut und zurueckgenommen
+### Built and reverted
 
-Die Polsterung des Eingaberests, auf aarch64 +8.1% auf genau dieser Form, nach
-x86 portiert. Vier Positionen, warm gegen warm:
+The padding of the input remainder, worth +8.1% on exactly this shape on
+aarch64, ported to x86. Four positions, warm against warm:
 
-| | alt | neu | delta |
+| | old | new | delta |
 |---|---|---|---|
 | same_bytes records_512 | 8.00 | 7.35 | **-8.1%** |
 | own_format records_512 | 9.32 | 8.65 | **-7.2%** |
@@ -1760,82 +1746,80 @@ x86 portiert. Vier Positionen, warm gegen warm:
 | same_bytes noise_64k | 35.39 | 34.25 | -3.2% |
 | own_format records_192 | 3.26 | 3.22 | -1.2% |
 
-Die Zelle, fuer die sie gebaut wurde, bewegt sich nicht, und records_512
-verliert acht Prozent. Zurueckgenommen.
+The cell it was built for does not move, and records_512 loses eight percent.
+Reverted.
 
-**Ein Verdacht, der nicht aufgeklaert ist.** own_format records_32 las 1.40 und
-1.18 GiB/s -- sauber getrennt nach Revision -- obwohl diese Zelle den Kernel
-ueberhaupt nicht anfasst: bei 32 Bytes weigert sich der Packer, der Wert wird
-roh gespeichert, und der Benchmark macht dort ein `copy_from_slice`. Eine
-Aenderung am Assembler kann diese Zahl nicht bewegen. Sie bewegt sich trotzdem,
-also verschiebt die geaenderte Objektgroesse etwas im Binary. Damit ist ein Teil
-der -7% und -8% oben moeglicherweise Platzierung und nicht Mechanik -- fuer das
-Urteil egal, weil die Aenderung so oder so nichts eintraegt, aber es heisst,
-dass Deltas dieser Groesse hier nicht allein der Logik zuzuschreiben sind.
+**A suspicion that is not resolved.** own_format records_32 read 1.40 and 1.18
+GiB/s -- cleanly separated by revision -- even though that cell does not touch
+the kernel at all: at 32 bytes the packer refuses, the value is stored raw, and
+the benchmark does a `copy_from_slice` there. A change to the assembly cannot
+move that number. It moves anyway, so the changed object size shifts something
+in the binary. That means part of the -7% and -8% above may be placement rather
+than mechanics -- irrelevant to the verdict, since the change earns nothing
+either way, but it does mean deltas of that size here cannot be attributed to
+the logic alone.
 
-### Wo die beiden Kernel inzwischen auseinanderlaufen
+### Where the two kernels have diverged
 
-Gleich: zwei Token-Aufteilungen als getrennte Bodies, eigener LZ4-Body,
-Zonenschleife plus geprueft, Shuffle-Tabellen fuer kurze Ueberlappungen,
-COPY_MAX-Leiter, memcpy fuer den letzten Literallauf.
+The same: two token splits as separate bodies, a dedicated LZ4 body, a zone
+loop plus a checked one, shuffle tables for short overlaps, the COPY_MAX
+ladder, memcpy for the last literal run.
 
-Verschieden, jedes Mal gemessen:
+Different, measured every time:
 
 | | aarch64 | x86_64 |
 |---|---|---|
-| Weiche fuer literallose Bloecke | `cbnz w5`, nur das Literal-Nibble | `cmp $0x0F`, das ganze Token |
-| memcpy-Schwelle | ab 8192 B | ab 128 B |
-| Matchschleife | zwei Formen | eine |
-| Teilelinien | keine | Xeon, EPYC, SSSE3 |
-| Eingaberest gepolstert | ja (+8.1%) | nein (-8.1%) |
+| test for literal-less blocks | `cbnz w5`, the literal nibble only | `cmp $0x0F`, the whole token |
+| memcpy threshold | from 8192 B | from 128 B |
+| match loop | two forms | one |
+| part lines | none | Xeon, EPYC, SSSE3 |
+| input remainder padded | yes (+8.1%) | no (-8.1%) |
 
-Die ersten beiden widersprechen sich offen. Der Test aufs Literal-Nibble war auf
-ARM ein Gewinn und hat auf Xeon records_512 neun Prozent gekostet, weil er dort
-ein Muenzwurf ist. Und memcpy war auf ARM bei 512 Bytes 10.4% schlechter als die
-eigene Schleife, auf Xeon 14.2% besser -- Apples memcpy verliert dort, glibcs
-gewinnt. Vier Ideen wurden heute von einer Plattform auf die andere portiert,
-und zwei davon haben das Vorzeichen gewechselt.
+The first two contradict each other outright. The test on the literal nibble
+was a gain on ARM and cost records_512 nine percent on Xeon, because there it
+is a coin flip. And memcpy was 10.4% worse than the hand loop at 512 bytes on
+ARM and 14.2% better on Xeon -- Apple's memcpy loses there, glibc's wins. Four
+ideas were ported from one platform to the other today, and two of them changed
+sign.
 
-## 2026-09-22 — Vier Zellen, die nie einen Decoder gemessen haben
+## 2026-09-22 — Four cells that never measured a decoder
 
-Die Frage war, wieso records_32 im eigenen Format auf Xeon 50% hinten liegt,
-wo unser Decoder dort gar nicht laufen kann. Er lief auch nicht.
+The question was why records_32 in our own format sits 50% behind on Xeon,
+when our decoder cannot run there at all. It did not run.
 
-Bei 32 Bytes lehnt der Packer ab -- `worth_storing` verlangt acht gesparte
-Bytes und 12.5%, LZ4 holt aus 32 Byte JSON zwei -- und der Wert wird roh
-gespeichert. Der Benchmark hat dafuer
+At 32 bytes the packer refuses -- `worth_storing` wants eight bytes saved and
+12.5%, and LZ4 gets two out of 32 bytes of JSON -- and the value is stored raw.
+For that case the benchmark measured
 
     mine[..data.len()].copy_from_slice(&data);
 
-gemessen und das "den Lesepfad" genannt. Der Store tut das nicht:
+and called it "the read path". The store does not do that:
 
     if flags.compressed { pack::unpack(...); Cow::Owned(out) }
     else                { Cow::Borrowed(bytes) }
 
-Ein roh gespeicherter Wert wird **ausgeliehen, nicht kopiert** -- ein
-Arena-Slice, null Bytes. Die Zelle hat also eine Kopie gegen einen echten
-Decode gestellt, die in Wirklichkeit nicht stattfindet.
+A raw-stored value is **borrowed, not copied** -- an arena slice, zero bytes.
+So the cell put a copy that does not actually happen up against a real decode.
 
-Dass die Zahl absurd war, stand in ihr selbst: 1.40 GiB/s fuer 32 Bytes sind
-57 Zyklen, und dieselbe Zeile misst auf M2 17.5. Identischer Rust, Vorzeichen
-gedreht -- +87% dort, -50% hier.
+That the number was absurd was visible in the number itself: 1.40 GiB/s for 32
+bytes is 57 cycles, and the same line measures 17.5 on M2. Identical Rust, sign
+reversed -- +87% there, -50% here.
 
-**Und es betrifft nicht nur die schlechte Zelle.** Der Packer lehnt vier Formen
-ab: records_32, noise_512, noise_4k, noise_64k. Alle vier haben in `own_format`
-ein memcpy gemessen, und **drei davon haben wir gross "gewonnen"**: +76.6%,
-+34.2%, +3.5% auf Xeon. Von den bisher gemeldeten 22 Zellen waren acht keine
-Decoder-Vergleiche.
+**And it does not affect only the bad cell.** The packer refuses four shapes:
+records_32, noise_512, noise_4k, noise_64k. All four measured a memcpy in
+`own_format`, and **three of them we "won" by a lot**: +76.6%, +34.2%, +3.5%
+on Xeon. Of the 22 cells reported so far, eight were not decoder comparisons.
 
-Der Benchmark ueberspringt diese Formen jetzt und sagt es:
+The benchmark now skips those shapes and says so:
 
     own_format records_32: packer refused, stored raw -- no decode to time
 
-Sie bleiben in `pack/sizes` und `compress3`, wo "roh gespeichert" das Ergebnis
-ist und kein Artefakt.
+They stay in `pack/sizes` and `compress3`, where "stored raw" is the result
+rather than an artefact.
 
-### Eigenes Format danach, M2 Max, Mediane aus drei
+### Our own format afterwards, M2 Max, medians of three
 
-| | keva | liblz4 | flex | vs liblz4 | vs flex |
+| | lzvolt | liblz4 | flex | vs liblz4 | vs flex |
 |---|---|---|---|---|---|
 | varied_64k | 9.72 | 5.08 | 7.83 | **+91.3%** | +24.1% |
 | records_192 | 9.78 | 6.34 | 7.70 | +54.3% | +27.0% |
@@ -1845,22 +1829,22 @@ ist und kein Artefakt.
 | varied_512 | 10.31 | 8.75 | 9.11 | +17.8% | +13.1% |
 | records_512 | 13.01 | 11.12 | 10.76 | +17.0% | +21.0% |
 
-14 von 14, und jede davon ist ein Decode gegen einen Decode.
+14 of 14, and every one of them is a decode against a decode.
 
-## 2026-09-22 — Der letzte Literallauf byteweise: +119.5% auf records_192
+## 2026-09-22 — The last literal run, byte by byte: +119.5% on records_192
 
-Die Zelle hatte ich zweimal als unzuverlaessige Messung abgetan. Sie war stabil
-und hatte recht.
+I had dismissed this cell twice as an unreliable measurement. It was stable and
+it was right.
 
-Ein Kostenmodell aus records_512 und records_4k, je Plattform gefittet:
+A cost model fitted per platform from records_512 and records_4k:
 
-| | Zyklen je Block | fest je Aufruf | records_192 vorhergesagt | gemessen |
+| | cycles per block | fixed per call | records_192 predicted | measured |
 |---|---|---|---|---|
 | Xeon | 8.9 | 31 | 67 | **148** (2.22x) |
 | M2 | 8.4 | 28 | 61 | 64 (1.05x) |
 
-Dieselbe Form passt auf ARM ins Modell und kostet auf x86 das Doppelte. Das
-Profil zeigt in einer Zeile, warum:
+The same shape fits the model on ARM and costs twice as much on x86. The
+profile shows why in one line:
 
     26.39%  movzbl (%r9),%r14d
     10.87%  inc    %r9
@@ -1868,19 +1852,18 @@ Profil zeigt in einer Zeile, warum:
      6.08%  dec    %rax
      5.95%  mov    %r14b,(%rdx)
 
-55% des Kernels in einer Byte-fuer-Byte-Kopie. Erreicht wird sie, sobald ein
-Literallauf weniger als zweiunddreissig Bytes Luft bis zum Eingabeende hat --
-denn ein Block dieser Breite wuerde darueber hinauslesen. Eine Leiter tut das
-nicht, und eine steht seit jeher ein paar hundert Zeilen weiter in derselben
-Datei.
+55% of the kernel inside a byte-by-byte copy. It is reached as soon as a
+literal run has fewer than thirty-two bytes of room left before the end of the
+input -- because a block of that width would read past it. A ladder does not,
+and one has stood a few hundred lines further down in the same file all along.
 
-records_192 packt auf 134 Bytes in vier Bloecken, also kommt jeder Lauf, der
-hinter Byte 102 endet, dort an: die halbe Datei. records_512 packt auf 195 in
-zwoelf, und nur der letzte tut es. Daher 32 gegen 10 Zyklen je Block.
+records_192 packs to 134 bytes in four blocks, so every run ending past byte
+102 arrives there: half the file. records_512 packs to 195 in twelve, and only
+the last one does. Hence 32 against 10 cycles per block.
 
-### Gemessen, Xeon, vier Positionen
+### Measured, Xeon, four positions
 
-| unser Format | alt | neu | delta |
+| our format | old | new | delta |
 |---|---|---|---|
 | records_192 | 3.27 | 7.17 | **+119.5%** |
 | varied_512 | 7.48 | 8.16 | +9.1% |
@@ -1889,161 +1872,160 @@ zwoelf, und nur der letzte tut es. Daher 32 gegen 10 Zyklen je Block.
 | records_4k | 11.64 | 11.79 | +1.3% |
 | records_64k | 11.93 | 11.83 | -0.8% |
 
-| Standard LZ4 | alt | neu | delta |
+| standard LZ4 | old | new | delta |
 |---|---|---|---|
 | varied_512 | 6.03 | 6.31 | +4.6% |
 | records_4k | 11.03 | 11.12 | +0.8% |
 | noise_512 | 45.93 | 44.94 | **-2.2%** |
 
-7.17 gegen 7.17 in beiden neuen Positionen. records_192 geht damit von -23.0%
-auf **+69.1%** gegen liblz4.
+7.17 against 7.17 in both new positions. records_192 therefore moves from
+-23.0% to **+69.1%** against liblz4.
 
-Stand auf Xeon danach: unser Format **14 von 14**, Standard LZ4 **16 von 18**.
+Standing on Xeon afterwards: our format **14 of 14**, standard LZ4 **16 of 18**.
 
-### Was der Fund ueber den Tag sagt
+### What the find says about the day
 
-Die Zelle wurde zweimal falsch eingeordnet, beide Male von mir, beide Male mit
-einem Argument statt einer Messung: erst "512-Byte-Zellen schwanken", dann "der
-Benchmark misst den Messaufbau". Was sie aufgeklaert hat, war ein Kostenmodell
-aus zwei anderen Zellen -- 148 Zyklen fuer vier Bloecke gegen 138 fuer zwoelf
-ist arithmetisch unmoeglich, und das war schon sichtbar, bevor irgendeine
-Maschine lief.
+The cell was misfiled twice, both times by me, both times with an argument
+instead of a measurement: first "512-byte cells fluctuate", then "the benchmark
+is measuring its own harness". What settled it was a cost model built from two
+other cells -- 148 cycles for four blocks against 138 for twelve is
+arithmetically impossible, and that was visible before any machine ran.
 
-## 2026-09-23 — Der Schnellausgang im memcpy-Zweig: widerlegt
+## 2026-09-23 — The fast exit in the memcpy branch: refuted
 
-Wo der Literallauf den Wert abschliesst, braucht der Ruecksprung keine
-geretteten Register: acht statt vierundzwanzig Byte Stack, vier
-Speicherzugriffe weniger. Gemessen auf Xeon, vier Positionen, `noise`:
+Where the literal run finishes the value, the return needs no saved registers:
+eight bytes of stack instead of twenty-four, four memory accesses fewer.
+Measured on Xeon, four positions, `noise`:
 
-| | P1 alt | P2 neu | P3 alt | P4 neu | alt -> neu |
+| | P1 old | P2 new | P3 old | P4 new | old -> new |
 |---|---|---|---|---|---|
 | noise_512 | 45.28 | 43.42 | 45.17 | 43.27 | **-4.2%** |
 | noise_4k | 66.88 | 66.38 | 66.81 | 66.41 | -0.7% |
 | noise_64k | 36.59 | 34.04 | 34.87 | 34.12 | -3.6% |
 
-Sauber nach Revision getrennt. Das `lea`/`cmp`/`jne` vor jedem Aufruf kostet
-mehr als die zwei Stores und zwei Loads, die es spart, und der zusaetzliche
-Verzweigungspunkt zieht den Code auseinander. Zurueckgenommen.
+Cleanly separated by revision. The `lea`/`cmp`/`jne` before every call costs
+more than the two stores and two loads it saves, and the extra branch point
+pulls the code apart. Reverted.
 
-Damit bleibt noise_512 auf Xeon bei -11.9% gegen liblz4, und der Rueckstand ist
-weiterhin mit 3.4 Zyklen auf 28.7 beziffert. Auf M2 gewinnen wir dieselbe Zelle
-mit 34.3 gegen 34.7 Zyklen -- der Unterschied ist, dass glibcs memcpy auf x86
-27% schneller wird als auf ARM und unsere Fassung nur 16%.
+So noise_512 stays at -11.9% against liblz4 on Xeon, and the deficit is still
+put at 3.4 cycles out of 28.7. On M2 we win the same cell at 34.3 against 34.7
+cycles -- the difference being that glibc's memcpy gets 27% faster on x86 than
+on ARM while our own version gets only 16% faster.
 
-### Zum Ablauf, weil er Geld gekostet hat
+### On the procedure, because it cost money
 
-Der vorherige Anlauf dieser Messung ist um 00:25 haengen geblieben und wurde um
-09:49 gefunden: neun Stunden Instanzzeit. Jeder Statuscheck dazwischen hat
-gefragt, ob der Prozess lebt, statt wann die Logdatei zuletzt geschrieben
-wurde. Der Neuanlauf hat deshalb drei Bremsen -- eine Notabschaltung nach
-vierzig Minuten im Skript selbst, `timeout 300` je Messzelle, und einen
-Waechter auf den Zeitstempel der Logdatei.
+The previous attempt at this measurement hung at 00:25 and was found at 09:49:
+nine hours of instance time. Every status check in between asked whether the
+process was alive instead of when the log file was last written. The re-run
+therefore has three brakes -- a kill switch after forty minutes in the script
+itself, `timeout 300` per measured cell, and a watchdog on the log file's
+timestamp.
 
-## Alle sechzehn Entpackformen im Profil, auf EPYC und auf Axion
+## All sixteen unpack shapes profiled, on EPYC and on Axion
 
-`perf record` je Form, Symbol aus `perf report` gelesen statt geraten, dazu die
-zehn heissesten Instruktionen aus `perf annotate`. EPYC 9B14 (c3d-standard-4,
-europe-west4-a), Axion / Neoverse V2 (c4a-standard-4, europe-west4-c). Beide
-Maschinen je fuer diesen einen Lauf erzeugt und danach geloescht.
+`perf record` per shape, the symbol read out of `perf report` rather than
+guessed, plus the ten hottest instructions from `perf annotate`. EPYC 9B14
+(c3d-standard-4, europe-west4-a), Axion / Neoverse V2 (c4a-standard-4,
+europe-west4-c). Both machines created for this one run and deleted afterwards.
 
-Der erste Anlauf auf Axion hat gar nichts geliefert: c4a nimmt `pd-balanced`
-nicht und braucht `hyperdisk-balanced`, und das Image muss `debian-12-arm64`
-sein. Das Bench-Skript weiss beides, das Profilskript wusste es nicht.
+The first attempt on Axion produced nothing at all: c4a does not accept
+`pd-balanced` and needs `hyperdisk-balanced`, and the image has to be
+`debian-12-arm64`. The bench script knows both; the profile script did not.
 
-### Axion, eigenes Format
+### Axion, our own format
 
-| Form | Kernel | heisseste Instruktion | Anteil | was sie ist |
+| shape | kernel | hottest instruction | share | what it is |
 |---|---|---|---|---|
-| records_192 | 89.0% | `str q0, [x21, x24]` | 20.6% | die unbedingte 16-B-Literalkopie |
-| records_512 | 96.5% | `stp q0, q1, [x13], #32` | 14.0% | die Match-Kopie |
-| varied_512 | 94.6% | `stp q0, q1, [x13]` | **39.0%** | die Match-Kopie |
-| records_4k | 77.2% wide | `stp q0, q1, [x13]` | 20.2% | die Match-Kopie |
-| varied_4k | 99.4% | `stp q0, q1, [x13]` | **36.5%** | die Match-Kopie |
-| records_64k | 97.9% wide | `stp q0, q1, [x13]` | 27.4% | die Match-Kopie |
-| varied_64k | 99.0% | `stp q0, q1, [x13]` | **38.7%** | die Match-Kopie |
+| records_192 | 89.0% | `str q0, [x21, x24]` | 20.6% | the unconditional 16 B literal copy |
+| records_512 | 96.5% | `stp q0, q1, [x13], #32` | 14.0% | the match copy |
+| varied_512 | 94.6% | `stp q0, q1, [x13]` | **39.0%** | the match copy |
+| records_4k | 77.2% wide | `stp q0, q1, [x13]` | 20.2% | the match copy |
+| varied_4k | 99.4% | `stp q0, q1, [x13]` | **36.5%** | the match copy |
+| records_64k | 97.9% wide | `stp q0, q1, [x13]` | 27.4% | the match copy |
+| varied_64k | 99.0% | `stp q0, q1, [x13]` | **38.7%** | the match copy |
 
-### Axion, Fremdformat
+### Axion, foreign format
 
-| Form | Kernel | heisseste Instruktion | Anteil | was sie ist |
+| shape | kernel | hottest instruction | share | what it is |
 |---|---|---|---|---|
-| lz4_records_512 | 98.3% | `stp q0, q1, [x13]` | 20.4% | Match-Kopie |
-| lz4_varied_512 | 98.5% | `stp q0, q1, [x13]` | **43.1%** | Match-Kopie |
-| lz4_records_4k | 98.3% | `stp q0, q1, [x13]` | 26.2% | Match-Kopie |
-| lz4_varied_4k | 99.8% | `stp q0, q1, [x13]` | **43.8%** | Match-Kopie |
-| lz4_records_64k | 98.6% | `stp q0, q1, [x13]` | 17.5% | Match-Kopie |
-| lz4_varied_64k | 99.6% | `stp q0, q1, [x13]` | **45.7%** | Match-Kopie |
-| lz4_noise_512 | 91.8% | `stp q0, q1, [x0], #32` | 45.6% | **die eigene 32-B-Literalschleife** |
-| lz4_noise_4k | 98.5% | `stp q0, q1, [x0], #32` | 57.7% | **die eigene 32-B-Literalschleife** |
-| lz4_noise_64k | 14.9% | `0x9d3f8` u.a., 60% zusammen | | **glibc memcpy** |
+| lz4_records_512 | 98.3% | `stp q0, q1, [x13]` | 20.4% | match copy |
+| lz4_varied_512 | 98.5% | `stp q0, q1, [x13]` | **43.1%** | match copy |
+| lz4_records_4k | 98.3% | `stp q0, q1, [x13]` | 26.2% | match copy |
+| lz4_varied_4k | 99.8% | `stp q0, q1, [x13]` | **43.8%** | match copy |
+| lz4_records_64k | 98.6% | `stp q0, q1, [x13]` | 17.5% | match copy |
+| lz4_varied_64k | 99.6% | `stp q0, q1, [x13]` | **45.7%** | match copy |
+| lz4_noise_512 | 91.8% | `stp q0, q1, [x0], #32` | 45.6% | **our own 32 B literal loop** |
+| lz4_noise_4k | 98.5% | `stp q0, q1, [x0], #32` | 57.7% | **our own 32 B literal loop** |
+| lz4_noise_64k | 14.9% | `0x9d3f8` and others, 60% together | | **glibc memcpy** |
 
-### EPYC, eigenes Format
+### EPYC, our own format
 
-| Form | Kernel | heisseste Instruktion | Anteil | was sie ist |
+| shape | kernel | hottest instruction | share | what it is |
 |---|---|---|---|---|
-| records_192 | 77.9% | `shl $0x4,%ecx` | **23.4%** | Index in die Splat-Tabelle |
-| records_512 | 86.7% | `movdqu %xmm0,(%r8)` | 14.5% | Literalkopie; `shl $4` 11.8% |
-| varied_512 | 89.5% | `movdqu 0x10(%rsi),%xmm1` | 15.0% | Literalkopie |
-| records_4k | 82.3% wide | `add $0x20,%rsi` | 10.8% | Match-Kopie |
-| varied_4k | 98.6% | `movdqu %xmm1,0x10(%r8)` | 18.2% | Literalkopie |
-| records_64k | 97.8% wide | `add $0x20,%rsi` | 7.6% | Match-Kopie |
-| varied_64k | 98.2% | `movdqu 0x10(%rsi),%xmm1` | 16.5% | Literalkopie |
+| records_192 | 77.9% | `shl $0x4,%ecx` | **23.4%** | index into the splat table |
+| records_512 | 86.7% | `movdqu %xmm0,(%r8)` | 14.5% | literal copy; `shl $4` 11.8% |
+| varied_512 | 89.5% | `movdqu 0x10(%rsi),%xmm1` | 15.0% | literal copy |
+| records_4k | 82.3% wide | `add $0x20,%rsi` | 10.8% | match copy |
+| varied_4k | 98.6% | `movdqu %xmm1,0x10(%r8)` | 18.2% | literal copy |
+| records_64k | 97.8% wide | `add $0x20,%rsi` | 7.6% | match copy |
+| varied_64k | 98.2% | `movdqu 0x10(%rsi),%xmm1` | 16.5% | literal copy |
 
-### EPYC, Fremdformat
+### EPYC, foreign format
 
-| Form | Kernel | heisseste Instruktion | Anteil | was sie ist |
+| shape | kernel | hottest instruction | share | what it is |
 |---|---|---|---|---|
-| lz4_records_512 | 96.2% | `shl $0x4,%ecx` | **25.4%** | Index in die Splat-Tabelle |
-| lz4_varied_512 | 98.2% | `movdqu 0x10(%rsi),%xmm1` | 9.7% | Literalkopie; `shl $4` 8.5% |
-| lz4_records_4k | 98.0% | `movdqu 0x10(%rsi),%xmm1` | 9.9% | Literalkopie |
-| lz4_varied_4k | 99.3% | `movdqu %xmm1,0x10(%r8)` | 19.5% | Literalkopie |
-| lz4_records_64k | 98.4% | `movdqu 0x10(%rsi),%xmm1` | 29.2% | Literalkopie |
-| lz4_varied_64k | 98.9% | `movdqu 0x10(%rsi),%xmm1` | 27.2% | Literalkopie |
-| lz4_noise_512 | 33.3% | `pop %rbp` 18.5%, `push %rbp` 11.1% | | **Prolog und Epilog** |
+| lz4_records_512 | 96.2% | `shl $0x4,%ecx` | **25.4%** | index into the splat table |
+| lz4_varied_512 | 98.2% | `movdqu 0x10(%rsi),%xmm1` | 9.7% | literal copy; `shl $4` 8.5% |
+| lz4_records_4k | 98.0% | `movdqu 0x10(%rsi),%xmm1` | 9.9% | literal copy |
+| lz4_varied_4k | 99.3% | `movdqu %xmm1,0x10(%r8)` | 19.5% | literal copy |
+| lz4_records_64k | 98.4% | `movdqu 0x10(%rsi),%xmm1` | 29.2% | literal copy |
+| lz4_varied_64k | 98.9% | `movdqu 0x10(%rsi),%xmm1` | 27.2% | literal copy |
+| lz4_noise_512 | 33.3% | `pop %rbp` 18.5%, `push %rbp` 11.1% | | **prologue and epilogue** |
 | lz4_noise_4k | 2.0% | `0x16db20` | **98.1%** | **glibc memcpy** |
 | lz4_noise_64k | 8.1% | `0x16db75` | **89.4%** | **glibc memcpy** |
 
-### Was das Profil beweist
+### What the profile proves
 
-Der unbenannte Posten taucht auf beiden Maschinen genau dort auf, wo die
-jeweilige memcpy-Schwelle faellt -- auf EPYC ab 4k (`MEMCPY_MIN 128`), auf Axion
-erst bei 64k (`LIT_MEMCPY 8192`). Das identifiziert ihn: es ist glibc memcpy,
-dem nur die Symbole fehlen. Die beiden Maschinen bestaetigen sich gegenseitig.
+The unnamed entry appears on both machines exactly where that machine's memcpy
+threshold falls -- on EPYC from 4k (`MEMCPY_MIN 128`), on Axion not until 64k
+(`LIT_MEMCPY 8192`). That identifies it: it is glibc memcpy with the symbols
+missing. The two machines confirm each other.
 
-Damit sind alle `noise`-Zellen auf beiden Maschinen dieselbe Entscheidung, und
-sie faellt in **entgegengesetzte Richtungen**:
+So every `noise` cell on both machines is the same decision, and it falls in
+**opposite directions**:
 
-- **Axion, noise_4k -33.1% und noise_512 -16.7%:** wir kopieren dort mit der
-  eigenen 32-Byte-Schleife, weil `LIT_MEMCPY 8192` noch nicht greift. Die
-  Schleife kostet `ldp`, `stp`, `subs`, `cmp`, `cbz` je 32 Bytes; glibc auf
-  Neoverse V2 laeuft 64 Bytes je Durchgang ohne Vergleichskette. Bei 64k, wo
-  memcpy greift, ist der Rueckstand weg. Die Schwelle 8192 ist auf dem M2 Max
-  gemessen und fuer Neoverse V2 zu hoch.
-- **EPYC, noise_4k -7.9%:** dort ist bereits glibc memcpy zu 98% drin, und
-  glibc verliert gegen die Wildcopy in liblz4, die ueberlaufen darf und keinen
-  exakten Rest behandelt. **noise_512 -22.4%** ist gar keine Kopie: Prolog und
-  Epilog sind 30% der Kernelzeit, dazu der memcpy-Aufruf. Bei 512 Bytes ist der
-  feste Aufwand die Messung. `MEMCPY_MIN 128` ist auf Xeon gemessen und fuer
-  Zen 4 zu niedrig.
+- **Axion, noise_4k -33.1% and noise_512 -16.7%:** there we copy with our own
+  32-byte loop, because `LIT_MEMCPY 8192` has not kicked in. The loop costs
+  `ldp`, `stp`, `subs`, `cmp`, `cbz` per 32 bytes; glibc on Neoverse V2 runs 64
+  bytes per pass with no comparison chain. At 64k, where memcpy does kick in,
+  the deficit is gone. The 8192 threshold was measured on the M2 Max and is too
+  high for Neoverse V2.
+- **EPYC, noise_4k -7.9%:** glibc memcpy is already 98% of it there, and glibc
+  loses to liblz4's wildcopy, which is allowed to overrun and handles no exact
+  remainder. **noise_512 -22.4%** is not a copy at all: prologue and epilogue
+  are 30% of kernel time, plus the memcpy call. At 512 bytes the fixed cost is
+  the measurement. `MEMCPY_MIN 128` was measured on Xeon and is too low for
+  Zen 4.
 
-Das trifft sich guenstig: x86 hat eine eigene Teilelinie je Kern, `MEMCPY_MIN`
-laesst sich fuer EPYC anheben, ohne Xeon anzufassen. **aarch64 hat keine
-Teilelinien** -- ein Body je Split, geteilt zwischen M2 Max und Neoverse V2. Eine
-niedrigere `LIT_MEMCPY` trifft beide. Der erste Schritt ist deshalb eine
-Schwellenreihe lokal auf dem M2 Max, die nichts kostet: ist der M2 zwischen 512
-und 8192 gleichgueltig, faellt die Schwelle global und Axion bekommt seine 33%
-umsonst. Braucht der M2 die 8192, dann kostet es eine Teilelinie auf aarch64.
+That falls out conveniently: x86 has its own part line per core, so
+`MEMCPY_MIN` can be raised for EPYC without touching Xeon. **aarch64 has no
+part lines** -- one body per split, shared between M2 Max and Neoverse V2. A
+lower `LIT_MEMCPY` hits both. The first step is therefore a threshold series
+locally on the M2 Max, which costs nothing: if the M2 is indifferent between
+512 and 8192, the threshold falls globally and Axion gets its 33% for free. If
+the M2 needs the 8192, it costs a part line on aarch64.
 
-Der zweite Posten, den nur EPYC hat: `shl $0x4,%ecx` mit 23.4% bei records_192
-und 25.4% bei lz4_records_512, dazu das `lea` auf die Tabelle. Das ist der
-Splat fuer Matches mit Offset unter 16 -- ein von der Offsetgroesse abhaengiger
-Ladevorgang aus einer 512-Byte-Tabelle, der ein `pshufb` fuettert. Auf Zen 4 ist
-das eine Abhaengigkeitskette von rund sechs Zyklen dort, wo records fast jeder
-Block ist. Axion hat an derselben Stelle nichts Vergleichbares.
+The second entry, which only EPYC has: `shl $0x4,%ecx` at 23.4% on records_192
+and 25.4% on lz4_records_512, plus the `lea` onto the table. That is the splat
+for matches with an offset below 16 -- a load from a 512-byte table whose
+address depends on the offset, feeding a `pshufb`. On Zen 4 that is a
+dependency chain of about six cycles, in the place where records is nearly
+every block. Axion has nothing comparable at the same spot.
 
-## A1: die Literalschleife der LZ4-Linie auf 64 Byte, mit vorgespanntem Zaehler
+## A1: the LZ4 line's literal loop at 64 bytes, with a biased counter
 
-Das Profil auf Axion hat an einem incompressiblen 4-KiB-Block 77% der Zeit in
-fuenf Instruktionen gefunden, und zwei davon fragten dasselbe:
+The profile on Axion found 77% of the time on an incompressible 4 KiB block
+inside five instructions, two of which asked the same question:
 
     L(lz4_lit_blk):
         ldp     q0, q1, [x1], #32       5.4%
@@ -2052,87 +2034,85 @@ fuenf Instruktionen gefunden, und zwei davon fragten dasselbe:
         cmp     x2, #32                 8.5%
         b.hs    L(lz4_lit_blk)
 
-`subs` zieht ab und setzt Flaggen, `cmp` stellt danach dieselbe Frage an das
-Ergebnis. Zieht man die Rundenbreite einmal beim Eintritt ab, ist der `subs` am
-Fuss die Pruefung: der Borrow bedeutet genau "weniger als eine Runde uebrig".
-Das `adds` am Ausgang stellt den echten Rest wieder her und ist zugleich der
-Nulltest, den vorher ein `cbz` machte. Mit 64 statt 32 Byte je Runde werden aus
-fuenf Instruktionen je 32 Byte drei.
+`subs` subtracts and sets flags; `cmp` then asks the same question of the
+result. Subtract the round width once on entry and the `subs` at the foot *is*
+the test: the borrow means exactly "less than one round left". The `adds` on
+the way out restores the true remainder and is at the same time the zero test a
+`cbz` used to do. At 64 bytes per round instead of 32, five instructions per 32
+bytes become three.
 
-### M2 Max, vier Runden, abwechselnd gemessen
+### M2 Max, four rounds, measured alternating
 
-| Zelle | alt | neu | Delta | alle Laeufe (GiB/s) |
+| cell | old | new | delta | all runs (GiB/s) |
 |---|---|---|---|---|
-| keva/noise_512 | 46.54 | 49.78 | **+7.0%** | alt 46.7 46.4 25.6 48.3 / neu 49.7 49.9 50.4 49.7 |
-| keva/noise_4k | 64.15 | 69.20 | **+7.9%** | alt 65.4 63.6 63.1 64.8 / neu 69.1 68.5 69.3 69.5 |
-| keva/noise_64k | 55.54 | 55.69 | +0.3% | alt 55.2 57.7 53.6 55.9 / neu 57.6 56.6 54.3 54.8 |
-| liblz4/noise_512 | 46.70 | 45.77 | -2.0% | alt 47.2 47.5 26.4 46.2 / neu 45.7 45.9 46.4 45.6 |
-| liblz4/noise_4k | 64.10 | 63.79 | -0.5% | alt 64.7 64.6 63.6 63.6 / neu 62.0 64.7 64.1 63.5 |
-| liblz4/noise_64k | 56.03 | 56.11 | +0.2% | alt 55.1 56.5 55.5 58.7 / neu 55.5 57.4 56.7 54.7 |
+| lzvolt/noise_512 | 46.54 | 49.78 | **+7.0%** | old 46.7 46.4 25.6 48.3 / new 49.7 49.9 50.4 49.7 |
+| lzvolt/noise_4k | 64.15 | 69.20 | **+7.9%** | old 65.4 63.6 63.1 64.8 / new 69.1 68.5 69.3 69.5 |
+| lzvolt/noise_64k | 55.54 | 55.69 | +0.3% | old 55.2 57.7 53.6 55.9 / new 57.6 56.6 54.3 54.8 |
+| liblz4/noise_512 | 46.70 | 45.77 | -2.0% | old 47.2 47.5 26.4 46.2 / new 45.7 45.9 46.4 45.6 |
+| liblz4/noise_4k | 64.10 | 63.79 | -0.5% | old 64.7 64.6 63.6 63.6 / new 62.0 64.7 64.1 63.5 |
+| liblz4/noise_64k | 56.03 | 56.11 | +0.2% | old 55.1 56.5 55.5 58.7 / new 55.5 57.4 56.7 54.7 |
 
-Runde 3 hat beide Seiten gleichzeitig getroffen (25.6 und 26.4) -- eine
-Stoerung der Maschine, kein Effekt der Revision. Ohne sie steht noise_512 bei
-+6.4% gegen einen Kontrollabfall von 2.0%, also real aber schwaecher als der
-Median sagt. noise_4k ist eindeutig: die Verteilungen ueberlappen nicht.
+Round 3 hit both sides at once (25.6 and 26.4) -- a disturbance on the machine,
+not an effect of the revision. Without it noise_512 stands at +6.4% against a
+control drop of 2.0%, so real but weaker than the median says. noise_4k is
+unambiguous: the distributions do not overlap.
 
-**noise_64k bei +0.3% ist die Gegenprobe.** Dort greift `LIT_MEMCPY 8192`, die
-Schleife wird gar nicht betreten, und die Zelle bewegt sich nicht. Der Gewinn
-liegt genau dort, wo die Theorie ihn hinlegt.
+**noise_64k at +0.3% is the control.** `LIT_MEMCPY 8192` applies there, the
+loop is never entered, and the cell does not move. The gain sits exactly where
+the theory puts it.
 
-### Dass das eigene Format sich nicht bewegen kann
+### That our own format cannot move
 
-Die Schleife steht unter `#ifdef KEVA_LZ4`. Beide Revisionen mit `clang -c`
-assembliert und die Objekte verglichen:
+The loop sits under `#ifdef KEVA_LZ4`. Both revisions assembled with `clang -c`
+and the objects compared:
 
-| Body | |
+| body | |
 |---|---|
-| `unpack.o` (even) | **identisch**, 3320 B |
-| `unpack_wide.o` | **identisch**, 3400 B |
-| `unpack_lz4.o` | geaendert, 4248 B |
+| `unpack.o` (even) | **identical**, 3320 B |
+| `unpack_wide.o` | **identical**, 3400 B |
+| `unpack_lz4.o` | changed, 4248 B |
 
-### Was der Mutationstest gefunden hat
+### What the mutation test found
 
-Vier Verfaelschungen gegen den Soak, jede einzeln:
+Four corruptions against the soak, each on its own:
 
-| Mutation | Soak |
+| mutation | soak |
 |---|---|
-| zweites `ldp`/`stp` weg -- halbe Kopie je Runde | **rot** |
-| `adds x2, x2, #48` statt `#64` -- Rest um 16 zu klein | **rot** |
-| Eintrittsbias `#32` statt `#64` | gruen |
-| `b.hs` -> `b.hi` | gruen |
+| second `ldp`/`stp` removed -- half the copy per round | **red** |
+| `adds x2, x2, #48` instead of `#64` -- remainder 16 too small | **red** |
+| entry bias `#32` instead of `#64` | green |
+| `b.hs` -> `b.hi` | green |
 
-`b.hi` ist kein Fehler: bei genau 64 Rest faellt die Schleife heraus und
-`L(exact)` kopiert die 64 exakt. Richtige Ausgabe, nur langsamer.
+`b.hi` is not a bug: at exactly 64 remaining the loop falls out and `L(exact)`
+copies the 64 exactly. Correct output, only slower.
 
-Der Eintrittsbias ist einer. Mit `#32` betritt die Schleife ihren Rumpf schon
-bei vierzig verbleibenden Bytes und kopiert dann vierundsechzig -- **bis zu 63
-Bytes ueber den Eingabepuffer hinaus gelesen**. Die Ausgabe bleibt trotzdem
-korrekt, weil die Extrabytes in den Ueberlaufschlupf fallen, den der Aufrufer
-ohnehin abschneidet. Der Soak prueft, was herauskommt, und kann das deshalb
-nicht sehen.
+The entry bias is a bug. With `#32` the loop enters its body with forty bytes
+remaining and then copies sixty-four -- **reading up to 63 bytes past the input
+buffer**. The output stays correct anyway, because the extra bytes land in the
+overrun slack the caller truncates regardless. The soak checks what comes out
+and therefore cannot see it.
 
-Die abgelieferte Fassung ist auf dieser Grenze sauber -- eine Runde laeuft nur
-mit vierundsechzig Bytes in der Hand und liest vierundsechzig. Aber die
-Abdeckung dafuer fehlt, und sie fehlt fuer jeden Pfad in dieser Datei, nicht nur
-fuer diesen. Ein Test, der den gepackten Block ans Ende einer Seite legt und die
-naechste nicht abbildet, wuerde jeden Uebergriff sofort mit SIGSEGV melden. Das
-ist die naechste Luecke, die zugeht.
+The version shipped is clean on that boundary -- a round runs only with
+sixty-four bytes in hand and reads sixty-four. But the coverage for it is
+missing, and it is missing for every path in this file, not just this one. A
+test that places the packed block at the end of a page and leaves the next page
+unmapped would report any overrun immediately with SIGSEGV. That is the next
+gap to close.
 
-## E1, E2a und A1 auf gemieteter Hardware
+## E1, E2a and A1 on rented hardware
 
-Drei Maschinen gleichzeitig, jede fuer diesen Lauf erzeugt und danach geloescht:
-zwei c3d-standard-4, weil das Skript fuer diese Teile eine Positionsstrafe von
-11% auf den 512-Byte-Zellen dokumentiert und ein Paar deshalb in beiden
-Reihenfolgen laufen muss, und ein c4a-standard-4 fuer A1. Drei Laeufe je
-Revision, Mediane.
+Three machines at once, each created for this run and deleted afterwards: two
+c3d-standard-4, because the script documents an 11% position penalty on the
+512-byte cells for these parts and a pair therefore has to run in both orders,
+and one c4a-standard-4 for A1. Three runs per revision, medians.
 
     A_amd_fwd   e227cfa  dann  91f5505
     A_amd_rev   91f5505  dann  e227cfa
     A_arm       280d5c7  dann  91f5505
 
-### A1 auf Axion: nichts
+### A1 on Axion: nothing
 
-| Zelle | vor A1 | nach A1 | Delta | liblz4 Delta |
+| cell | before A1 | after A1 | delta | liblz4 delta |
 |---|---|---|---|---|
 | noise_512 | 30.69 | 30.37 | -1.0% | -0.2% |
 | noise_4k | 44.03 | 43.40 | **-1.4%** | -0.3% |
@@ -2144,82 +2124,79 @@ Revision, Mediane.
 | records_64k | 14.22 | 14.28 | +0.4% | +0.2% |
 | varied_64k | 6.50 | 6.46 | -0.6% | +0.5% |
 
-Kontrollen innerhalb 1.5%, die meisten unter 0.6%. **Der M2 Max gewinnt 7.9% an
-derselben Schleife, Neoverse V2 nichts.** Die Theorie -- ein ueberfluessiges
-`cmp` je Runde -- war fuer den M2 richtig und fuer V2 falsch.
+Controls within 1.5%, most under 0.6%. **The M2 Max gains 7.9% on that same
+loop, Neoverse V2 nothing.** The theory -- one redundant `cmp` per round -- was
+right for the M2 and wrong for V2.
 
-Und sie war aus dem falschen Grund falsch. V2 schreibt 32 B/Zyklus; bei 44
-GiB/s auf 4096 Bytes stehen wir bei rund 15.7 B/Zyklus, also der Haelfte davon,
-und liblz4 bei 24. Weder store-gebunden noch issue-gebunden -- zwei von fuenf
-Instruktionen zu streichen hat null bewegt. Was bleibt, ist die
-**post-indizierte Adressierung**: jedes `stp q0, q1, [x0], #32` haengt am
-Zeiger-Writeback der vorigen Runde, und die Runden koennen deshalb nicht
-uebereinander laufen. glibc adressiert aarch64 stattdessen mit Offsets von
-einer Basis und einem `add` je Runde -- was der x86-Body in `L(lit_l32)` seit
-laengerem tut, mit einem negativen Index, der gegen null zaehlt. Das ist die
-naechste Hypothese, und sie hat einen Mechanismus statt einer Instruktionszahl.
+And it was wrong for the wrong reason. V2 writes 32 B/cycle; at 44 GiB/s on
+4096 bytes we are at roughly 15.7 B/cycle, half of that, and liblz4 at 24.
+Neither store-bound nor issue-bound -- striking two of five instructions moved
+nothing. What remains is the **post-indexed addressing**: every `stp q0, q1,
+[x0], #32` depends on the previous round's pointer writeback, so the rounds
+cannot overlap. glibc addresses aarch64 with offsets from a base and one `add`
+per round instead -- which is what the x86 body has done in `L(lit_l32)` for a
+while, with a negative index counting towards zero. That is the next
+hypothesis, and it has a mechanism rather than an instruction count.
 
-A1 bleibt: +7.9% auf einer Maschine, -1.4% auf der anderen bei -0.3% Kontrolle.
+A1 stays: +7.9% on one machine, -1.4% on the other against a -0.3% control.
 
-### E1 auf EPYC: noise_4k geht auf Paritaet
+### E1 on EPYC: noise_4k reaches parity
 
-Positionsgleich gelesen und zusaetzlich auf liblz4 normiert, was die Maschine
-herauskuerzt:
+Read at equal positions and additionally normalised against liblz4, which
+cancels the machine out:
 
-| noise_4k | keva | liblz4 | Verhaeltnis |
+| noise_4k | lzvolt | liblz4 | ratio |
 |---|---|---|---|
-| Position 1, vor E1 | 59.50 | 64.20 | 0.927 |
-| Position 1, nach E1 | 64.01 | 65.48 | **0.978** |
-| Position 2, vor E1 | 61.02 | 65.06 | 0.938 |
-| Position 2, nach E1 | 65.63 | 64.20 | **1.022** |
+| position 1, before E1 | 59.50 | 64.20 | 0.927 |
+| position 1, after E1 | 64.01 | 65.48 | **0.978** |
+| position 2, before E1 | 61.02 | 65.06 | 0.938 |
+| position 2, after E1 | 65.63 | 64.20 | **1.022** |
 
-Beide Positionen stimmen in Richtung und Groesse ueberein: **von rund 7% hinter
-liblz4 auf Paritaet.** Das ist die groesste Luecke, die dieser Lauf schliesst,
-und sie kam daher, eine Schleife *zu benutzen*, die auf dieser Teilelinie
-laengst existierte und von einer auf Xeon gemessenen Schwelle uebersprungen
-wurde.
+Both positions agree in direction and magnitude: **from roughly 7% behind
+liblz4 to parity.** That is the largest gap this run closes, and it came from
+*using* a loop that had existed on this part line all along and was skipped by
+a threshold measured on Xeon.
 
-### E1 bei noise_512: nicht lesbar
+### E1 at noise_512: unreadable
 
-| noise_512 | keva | liblz4 | Verhaeltnis |
+| noise_512 | lzvolt | liblz4 | ratio |
 |---|---|---|---|
-| Position 1, vor E1 | 31.69 | 42.01 | 0.754 |
-| Position 1, nach E1 | 34.10 | 44.79 | 0.761 |
-| Position 2, vor E1 | 31.71 | 42.05 | 0.754 |
-| Position 2, nach E1 | 28.15 | 39.87 | 0.706 |
+| position 1, before E1 | 31.69 | 42.01 | 0.754 |
+| position 1, after E1 | 34.10 | 44.79 | 0.761 |
+| position 2, before E1 | 31.71 | 42.05 | 0.754 |
+| position 2, after E1 | 28.15 | 39.87 | 0.706 |
 
-Position 1 sagt nichts, Position 2 sagt -4.8 Prozentpunkte. Genau diese Zelle
-ist die, fuer die das Skript die 11%-Positionsstrafe dokumentiert, und die
-liblz4-Kontrolle bewegt sich zwischen den beiden Maschinen selbst um 12%. Die
-Zelle ist aus diesem Lauf nicht zu beantworten und braucht einen eigenen, in
-beiden Reihenfolgen und ueber mehrere Runden.
+Position 1 says nothing, position 2 says -4.8 percentage points. This is
+exactly the cell the script documents the 11% position penalty for, and the
+liblz4 control itself moves 12% between the two machines. The cell cannot be
+answered from this run and needs one of its own, in both orders and over
+several rounds.
 
-noise_64k steht bei 0.995 bzw. 0.998 und ruehrt sich nicht -- richtig, denn
-65536 liegt weiter ueber der neuen Schwelle und geht nach wie vor an memcpy.
-Betroffen sind genau 512 und 4096, und genau dort steht auch die Bewegung.
+noise_64k sits at 0.995 and 0.998 and does not budge -- correctly, since 65536
+is still well above the new threshold and still goes to memcpy. Exactly 512 and
+4096 are affected, and that is exactly where the movement is.
 
-### E2a, das gefaltete `lea`: null
+### E2a, the folded `lea`: nothing
 
-| Fremdformat, Position 1 | vor | nach | Delta |
+| foreign format, position 1 | before | after | delta |
 |---|---|---|---|
 | records_512 | 9.27 | 9.28 | +0.1% |
 | records_4k | 12.82 | 12.85 | +0.2% |
 | records_64k | 13.15 | 13.05 | -0.8% |
 
-Die 4.5% aus dem Profil sind nicht in Durchsatz uebergegangen. Das reiht sich
-ein: eine Abhaengigkeitskette um eine Instruktion zu kuerzen kauft in diesem
-Kernel nichts, solange die Schleife nicht issue-gebunden ist -- dasselbe hat der
-verschobene Register-Add, das `tbnz` auf den Token und die
-zusammengezogene Offsetpruefung schon gesagt. Die Aenderung bleibt, weil sie
-streng weniger Instruktionen ist und nichts kostet, aber sie ist **kein
-Gewinn**, und die Begruendung, mit der sie gebaut wurde, ist widerlegt.
+The 4.5% from the profile did not turn into throughput. That fits the pattern:
+shortening a dependency chain by one instruction buys nothing in this kernel as
+long as the loop is not issue-bound -- the moved register add, the `tbnz` on
+the token and the merged offset check all said the same. The change stays,
+because it is strictly fewer instructions and costs nothing, but it is **not a
+gain**, and the reasoning it was built on is refuted.
 
-### Und was sie nicht getan hat: das eigene Format bewegen
+### And what it did not do: move our own format
 
-E2a sitzt unter `KEVA_SSSE3` und veraendert damit auch `unpack_epyc.o` und
-`unpack_xeon.o`. Positionsgleich gemessen:
+E2a sits under `KEVA_SSSE3` and therefore also changes `unpack_epyc.o` and
+`unpack_xeon.o`. Measured at equal positions:
 
-| Eigenes Format, Position 1 | vor | nach | Delta | liblz4 Delta |
+| own format, position 1 | before | after | delta | liblz4 delta |
 |---|---|---|---|---|
 | records_512 | 10.68 | 10.68 | 0.0% | +0.9% |
 | varied_512 | 9.06 | 9.12 | +0.7% | +0.7% |
@@ -2228,44 +2205,44 @@ E2a sitzt unter `KEVA_SSSE3` und veraendert damit auch `unpack_epyc.o` und
 | records_64k | 12.06 | 12.17 | +0.9% | -0.2% |
 | varied_64k | 8.40 | 8.34 | -0.7% | -0.4% |
 
-Alles innerhalb 1.4% gegen Kontrollen, die sich um bis zu 3.0% bewegen. Das
-eigene Format steht.
+Everything within 1.4% against controls that move by up to 3.0%. Our own format
+holds.
 
-## Der Ausrichtungskopf, und wohin er gehoert
+## The alignment head, and where it belongs
 
-Zwei c3d in umgekehrter Reihenfolge, drei Laeufe je Revision, dazu ein c4a.
+Two c3d in reversed order, three runs per revision, plus one c4a.
 
-### Die Zerlegung, die den Rest dieses Abschnitts erklaert
+### The decomposition that explains the rest of this section
 
-Zwei Groessen auf derselben Maschine trennen Festkosten von Durchsatz, ohne
-dass man den Takt kennen muss: `t = F + n/B`, geloest ueber 512 und 4096 Bytes.
+Two sizes on the same machine separate fixed cost from throughput without
+needing to know the clock: `t = F + n/B`, solved over 512 and 4096 bytes.
 
-| | Festkosten | Kopierstrom |
+| | fixed cost | copy rate |
 |---|---|---|
-| EPYC keva, ohne Kopf | 8.84 ns | 86.4 GB/s |
-| EPYC keva, mit Kopf | 12.45 ns | **99.2 GB/s** |
+| EPYC lzvolt, without head | 8.84 ns | 86.4 GB/s |
+| EPYC lzvolt, with head | 12.45 ns | **99.2 GB/s** |
 | EPYC liblz4 | **4.51 ns** | 74.6 GB/s |
-| Axion keva | **5.36 ns** | 50.6 GB/s |
+| Axion lzvolt | **5.36 ns** | 50.6 GB/s |
 | Axion liblz4 | 6.75 ns | **81.4 GB/s** |
 
-**Die zwei Teile haben entgegengesetzte Probleme.** Auf EPYC ist unser Strom 16%
-besser und der Eintritt doppelt so teuer; auf Axion ist der Eintritt 20%
-billiger und der Strom 38% schlechter. Das ist der Grund, warum dieselbe
-Aenderung auf diesen Maschinen seit Wochen andere Vorzeichen misst, und es ist
-kein Rauschen, sondern zwei verschiedene Wetten auf die Wertgroesse.
+**The two parts have opposite problems.** On EPYC our stream is 16% better and
+our entry twice as expensive; on Axion the entry is 20% cheaper and the stream
+38% worse. That is why the same change has been measuring opposite signs on
+these machines for weeks, and it is not noise but two different bets on the
+size of the value.
 
-Daraus folgt der Umschlagpunkt gegen liblz4 auf EPYC: **2365 Bytes**. Darunter
-gewinnt liblz4 konstruktionsbedingt, weil es die Grenzpruefungen in der Schleife
-laesst, die wir einmal beim Eintritt ausrechnen. Das Modell trifft beide
-Messpunkte auf ein Zehntel Prozent -- -23.0% bei 512 gegen gemessene -23.4%,
-+5.6% bei 4096 gegen gemessene +5.7%.
+From that follows the crossover against liblz4 on EPYC: **2365 bytes**. Below
+it liblz4 wins by construction, because it leaves the bounds checks inside the
+loop that we compute once on entry. The model hits both measured points to a
+tenth of a percent -- -23.0% at 512 against a measured -23.4%, +5.6% at 4096
+against a measured +5.7%.
 
-### Die Schwelle des Kopfes
+### The head's threshold
 
-Der Kopf kostet 3.6 ns Festkosten und hebt den Strom um 15%, zahlt sich also
-erst ab **2417 Bytes** zurueck:
+The head costs 3.6 ns of fixed cost and raises the rate by 15%, so it only pays
+for itself from **2417 bytes** upwards:
 
-| Lauflaenge | ohne Kopf | mit Kopf | |
+| run length | without head | with head | |
 |---|---|---|---|
 | 512 B | 14.77 ns | 17.61 ns | -16.2% |
 | 1024 B | 20.69 ns | 22.77 ns | -9.1% |
@@ -2273,327 +2250,323 @@ erst ab **2417 Bytes** zurueck:
 | 2560 B | 38.47 ns | 38.26 ns | +0.6% |
 | 4096 B | 56.25 ns | 53.74 ns | +4.7% |
 
-128 war geraten und hat jeden 512-Byte-Wert 16% gekostet. 3072 statt 2417, weil
-`noise_64k` sich in beiden Positionen um 3% bewegt hat, obwohl der Kopf dort
-nicht laufen kann -- ein Teil der 3.6 ns ist Code-Platzierung, also ist der
-Umschlagpunkt eine Untergrenze.
+128 was a guess and cost every 512-byte value 16%. 3072 rather than 2417,
+because `noise_64k` moved 3% in both positions even though the head cannot run
+there -- part of the 3.6 ns is code placement, so the crossover is a lower
+bound.
 
-### Gemessen, Schwelle 128 gegen 3072
+### Measured, threshold 128 against 3072
 
-| | alt | neu | roh | Kontrolle | zu liblz4 |
+| | old | new | raw | control | vs liblz4 |
 |---|---|---|---|---|---|
-| noise_512, Pos 1 | 27.79 | 32.79 | **+18.0%** | +5.7% | 0.687 -> **0.767** |
-| noise_512, Pos 2 | 27.56 | 32.77 | **+18.9%** | +10.5% | 0.710 -> **0.764** |
-| noise_4k, Pos 1 | 72.86 | 72.06 | -1.1% | +0.0% | 1.118 -> 1.105 |
-| noise_4k, Pos 2 | 70.69 | 68.71 | -2.8% | +3.4% | 1.130 -> 1.062 |
-| noise_64k | 42.07 | 41.83 | -0.6% | +0.2% | unveraendert |
+| noise_512, pos 1 | 27.79 | 32.79 | **+18.0%** | +5.7% | 0.687 -> **0.767** |
+| noise_512, pos 2 | 27.56 | 32.77 | **+18.9%** | +10.5% | 0.710 -> **0.764** |
+| noise_4k, pos 1 | 72.86 | 72.06 | -1.1% | +0.0% | 1.118 -> 1.105 |
+| noise_4k, pos 2 | 70.69 | 68.71 | -2.8% | +3.4% | 1.130 -> 1.062 |
+| noise_64k | 42.07 | 41.83 | -0.6% | +0.2% | unchanged |
 
-Die liblz4-Kontrolle wandert bei noise_512 selbst um 5-10%, deshalb zaehlt die
-letzte Spalte. 0.69 auf 0.766 in beiden Positionen, und das ist der Stand vor
-dem Kopf (0.771 / 0.783): die Schwelle holt zurueck, was er dort gekostet hat,
-und laesst ihn bei 4 KiB laufen, wo er gewinnt.
+The liblz4 control itself wanders by 5-10% on noise_512, which is why the last
+column counts. 0.69 to 0.766 in both positions, and that is where it stood
+before the head (0.771 / 0.783): the threshold recovers what the head cost
+there and still lets it run at 4 KiB, where it wins.
 
-**EPYC steht damit bei -23.4% / +10.5% / +2.3% gegen liblz4 auf den drei
-noise-Zellen -- und die -23.4% sind exakt der Modellwert. Dort ist an der Kopie
-nichts mehr zu holen; der naechste Zentimeter kommt aus der Eintrittsgebuehr.**
+**EPYC therefore stands at -23.4% / +10.5% / +2.3% against liblz4 on the three
+noise cells -- and the -23.4% is exactly the model's value. There is nothing
+left to win on the copy there; the next inch comes out of the entry fee.**
 
-### Auf Neoverse V2 widerlegt
+### Refuted on Neoverse V2
 
-Derselbe Kopf, auf dem Teil, aus dessen Zahlen die Theorie hergeleitet war:
-noise_4k **-3.3%**, noise_512 **-7.1%**, Kontrollen innerhalb 0.5%, alles
-uebrige innerhalb 1.1%. Zurueckgenommen. Die beiden AArch64-Bodies
-disassemblieren seither 556 Instruktionen Zeile fuer Zeile identisch.
+The same head, on the part whose numbers the theory was derived from: noise_4k
+**-3.3%**, noise_512 **-7.1%**, controls within 0.5%, everything else within
+1.1%. Reverted. The two AArch64 bodies have disassembled to 556 identical
+instructions line for line ever since.
 
-Die Zerlegung sagt auch, warum die Theorie dort falsch war: Axion streamt mit
-50.6 GB/s gegen glibcs 81.4, waehrend die Festkosten unter liblz4s liegen. Das
-Problem ist die Kopie selbst und nicht ihre Ausrichtung.
+The decomposition also says why the theory was wrong there: Axion streams at
+50.6 GB/s against glibc's 81.4, while its fixed cost is below liblz4's. The
+problem is the copy itself and not its alignment.
 
-## Ein Urteil in sieben Sekunden, und was es gekostet hat, eines zu bekommen
+## A verdict in seven seconds, and what getting one used to cost
 
-Die Frage "hat das geholfen" wurde bis hierher mit dem Instrument beantwortet,
-das fuer "was sind die Zahlen" gebaut ist: criterion, kompletter Packer-Report,
-drei Laeufe, gemietete Hardware, vierzig Minuten je Revision. So ist ein
-achtzigminuetiger Lauf entstanden, um herauszufinden, ob eine Assemblerschleife
-schneller geworden ist.
+Up to this point, "did that help" was answered with the instrument built for
+"what are the numbers": criterion, the full packer report, three runs, rented
+hardware, forty minutes per revision. That is how an eighty-minute run came
+about to find out whether one assembly loop had got faster.
 
-`examples/quick.rs` beantwortet nur diese eine Frage. Kein Framework zwischen
-Uhr und Aufruf: eine Schleife, zwei Zeitmessungen, Nanosekunden je Aufruf --
-die Einheit, in der das Kostenmodell ohnehin geschrieben ist.
+`examples/quick.rs` answers only that one question. No framework between the
+clock and the call: one loop, two time readings, nanoseconds per call -- the
+unit the cost model is written in anyway.
 
-### Vier Fehler, bis es nicht mehr gelogen hat
+### Four bugs, until it stopped lying
 
-Der erste Entwurf meldete auf unveraendertem Code "BESSER" auf fuenf Zellen.
-Jeder der vier folgenden Befunde war ein echter Messfehler, keiner davon
-Statistik:
+The first draft reported "BETTER" on five cells with unchanged code. Each of
+the four findings below was a real measurement error; none of them was
+statistics:
 
-1. **Absolute Nanosekunden ueber Prozessgrenzen verglichen.** Frequenz und
-   Kernzuweisung verschieben sie um 5-8%. Gegen liblz4 normiert, im selben
-   Prozess gemessen.
-2. **Nacheinander statt verschraenkt gemessen.** Dreihundert Millisekunden
-   unsere Zelle, dann dreihundert liblz4 -- dazwischen passt ein Frequenzschritt,
-   und das Verhaeltnis beschreibt dann den Schritt. Jetzt abwechselnd, Median
-   aus fuenf Paaren.
-3. **Die Rundenzahl war auf Viererpotenzen quantisiert.** Eine Zelle nahe der
-   Grenze landet in einem Lauf bei 4^6 und im naechsten bei 4^7 Runden: vierfache
-   Schleifenlaenge, vierfacher Cache-Druck. Innerhalb eines Laufs konstant,
-   zwischen Laeufen verschieden -- genau die Form der Phantomregressionen.
-   Jetzt aus einer Probemessung gerechnet.
-4. **4K-Aliasing.** Quelle und Ziel auf 64 Byte auszurichten genuegte nicht; was
-   ebenfalls zaehlt, ist ihr Abstand modulo 4096. Getrennte `Vec` legen den
-   dorthin, wo der Allokator gerade steht -- stabil im Prozess, anders im
-   naechsten. Dieselbe Binaerdatei mass `lz4/varied_512` **32% auseinander**,
-   fuenfmal hintereinander. Jetzt eine Arena mit festen Versaetzen und 1088 Byte
-   Versatz, damit keine zwei Regionen denselben 4-KiB-Offset teilen.
+1. **Absolute nanoseconds compared across process boundaries.** Frequency and
+   core assignment shift them by 5-8%. Now normalised against liblz4, measured
+   in the same process.
+2. **Measured one after the other instead of interleaved.** Three hundred
+   milliseconds of our cell, then three hundred of liblz4 -- a frequency step
+   fits in between, and the ratio then describes the step. Now alternating,
+   median of five pairs.
+3. **The round count was quantised to powers of four.** A cell near the
+   boundary lands at 4^6 rounds in one run and 4^7 in the next: four times the
+   loop length, four times the cache pressure. Constant within a run, different
+   between runs -- exactly the shape of the phantom regressions. Now computed
+   from a probe measurement.
+4. **4K aliasing.** Aligning source and destination to 64 bytes was not enough;
+   what also matters is their distance modulo 4096. Separate `Vec`s put that
+   wherever the allocator happens to be -- stable within a process, different
+   in the next. The same binary measured `lz4/varied_512` **32% apart**, five
+   times in a row. Now one arena with fixed offsets and a 1088-byte stagger, so
+   no two regions share a 4 KiB offset.
 
-Punkt 4 ist derselbe Effekt, dessen Untersuchung dieses Werkzeug dienen soll --
-die Messapparatur litt an dem Problem, das sie messen sollte.
+Point 4 is the same effect this tool exists to investigate -- the measuring
+apparatus suffered from the problem it was built to measure.
 
-### Was es kann, gegengeprueft in beide Richtungen
+### What it can do, cross-checked in both directions
 
 | | |
 |---|---|
-| acht Laeufe, Code unveraendert | **8x `= unveraendert`** |
-| A1 chirurgisch rueckgaengig | **3x `v SCHLECHTER`**: noise_512 -7.0 bis -8.0%, noise_4k -6.7 bis -7.2% |
-| zurueck auf HEAD | wieder `= unveraendert` |
-| Laufzeit | **7 Sekunden** |
+| eight runs, code unchanged | **8x `= UNCHANGED`** |
+| A1 surgically reverted | **3x `v WORSE`**: noise_512 -7.0 to -8.0%, noise_4k -6.7 to -7.2% |
+| back to HEAD | `= UNCHANGED` again |
+| runtime | **7 seconds** |
 
-Die Vierzig-Minuten-Messung hatte fuer A1 **+7.0%** und **+7.9%** ergeben. Das
-Werkzeug liest fuer die Umkehrung -7.0 bis -8.0% und -6.7 bis -7.2%.
+The forty-minute measurement had given A1 **+7.0%** and **+7.9%**. The tool
+reads -7.0 to -8.0% and -6.7 to -7.2% for the reversal.
 
-Die Aufloesung ist je Zelle gemessen und nie besser als 6% angesetzt, weil das
-ist, was auf einem Laptop uebrig bleibt. Nichts, was dieses Projekt tatsaechlich
-gewonnen hat, war kleiner als 8%.
+The resolution is measured per cell and never assumed better than 6%, because
+that is what is left on a laptop. Nothing this project has actually won was
+smaller than 8%.
 
-## Die Quelle ausrichten, auf Neoverse V2: +49%
+## Aligning the source, on Neoverse V2: +49%
 
-Eine c4a, sieben Minuten, und getauscht wurde nur `unpack.S` zwischen `12741c5`
-und `9883466` -- alles andere identisch, beide Revisionen auf derselben Maschine
-im selben Zustand, gemessen mit `examples/quick`.
+One c4a, seven minutes, and the only thing swapped was `unpack.S` between
+`12741c5` and `9883466` -- everything else identical, both revisions on the
+same machine in the same state, measured with `examples/quick`.
 
-| Zelle | Basis | neu | Delta (drei Laeufe) | GB/s |
+| cell | baseline | new | delta (three runs) | GB/s |
 |---|---|---|---|---|
 | lz4/noise_4k | 84.4 ns | **56.9 ns** | **+48.6 / +49.9 / +49.4%** | 48.5 -> **72.0** |
 | lz4/noise_512 | 13.1 ns | **11.1 ns** | **+17.9 / +17.6 / +18.2%** | 39.0 -> **46.2** |
-| lz4/noise_64k | 871 ns | 869 ns | +0.5% | unveraendert |
+| lz4/noise_64k | 871 ns | 869 ns | +0.5% | unchanged |
 
-Aufloesung je Zelle 0.1 bis 0.6%. Gegen liblz4:
+Resolution 0.1 to 0.6% per cell. Against liblz4:
 
-| | vorher | nachher |
+| | before | after |
 |---|---|---|
 | noise_4k | **-34.9%** | -3.2 / -2.3 / -2.7% |
 | noise_512 | **-19.3%** | -4.8 / -5.1 / -4.6% |
 | noise_64k | -3.3% | -2.8% |
 
-Von fuenfunddreissig Prozent hinten auf drei. noise_64k ruehrt sich nicht, was
-die Gegenprobe ist: dort greift `LIT_MEMCPY 8192`, der Kopf wird nie betreten,
-und die Zelle bleibt stehen. Records und varied im Fremdformat innerhalb 1.3%,
-Eigenformat innerhalb 1.8%.
+From thirty-five percent behind to three. noise_64k does not move, which is the
+control: `LIT_MEMCPY 8192` applies there, the head is never entered, and the
+cell stays put. records and varied in the foreign format within 1.3%, our own
+format within 1.8%.
 
-**`own/varied_512` liest +5.0 bis +7.0% und ist kein Gewinn.** Der
-Eigenformat-Body ist zwischen den beiden Revisionen byteidentisch; was sich
-bewegt hat, ist das Layout der Textsektion, weil `unpack_lz4_neoverse.o`
-gewachsen ist. Real gemessen, nicht verdient -- und ein Beispiel dafuer, wieviel
-Code-Platzierung auf dieser Groesse wert ist.
+**`own/varied_512` reads +5.0 to +7.0% and is not a gain.** The own-format body
+is byte-identical between the two revisions; what moved is the layout of the
+text section, because `unpack_lz4_neoverse.o` grew. Really measured, not
+earned -- and an example of how much code placement is worth at this size.
 
-### Was daran das Verfahren betrifft
+### What that says about the method
 
-Die PMU-Zaehler haben das vorhergesagt: unsere Loads zu 100% unausgerichtet
-(44.7 Mrd. gegen 1830 unausgerichtete Stores), glibcs genau umgekehrt, und
-glibc liest dieselben Bytes 60% schneller. Gemessen sind 49%.
+The PMU counters predicted it: our loads 100% unaligned (44.7 billion against
+1830 unaligned stores), glibc's exactly the other way round, and glibc reads
+the same bytes 60% faster. Measured: 49%.
 
-Das ist an diesem Tag die erste Aenderung, bei der eine Theorie vorher gesagt
-hat, was hinterher herauskam. Die davor -- der Ausrichtungskopf auf dem Ziel,
-das gefaltete `lea`, die 64-Byte-Schleife auf V2 -- waren aus denselben Zahlen
-*erschlossen* und haben null bis negativ gemessen. Der Unterschied ist nicht
-mehr Nachdenken, sondern dass hier ein Zaehler die Frage beantwortet hat, statt
-dass ich sie mir hergeleitet habe. Der Zaehler war die ganze Zeit verfuegbar und
-brauchte nur `--performance-monitoring-unit=standard` beim Erzeugen der Instanz.
+This is the day's first change where a theory said in advance what came out
+afterwards. The ones before it -- the alignment head on the destination, the
+folded `lea`, the 64-byte loop on V2 -- were *inferred* from the same numbers
+and measured zero to negative. The difference is not more thinking; it is that
+here a counter answered the question instead of my deriving it. The counter was
+available the whole time and needed nothing but
+`--performance-monitoring-unit=standard` when creating the instance.
 
-### Und die Teilelinie
+### And the part line
 
-Sie traegt damit. Vor dieser Messung war `keva_unpack_lz4_neoverse` 556
-Instruktionen byteidentisch zum generischen Body und reines Gewicht; jetzt ist
-sie der Grund, dass ein Neoverse-Teil eine andere Seite ausrichtet als ein
-Apple-Teil -- und der M2-Body ist unangetastet, was gegen HEAD geprueft ist und
-nicht behauptet.
+It earns its keep now. Before this measurement `keva_unpack_lz4_neoverse` was
+556 instructions byte-identical to the generic body and pure weight; now it is
+the reason a Neoverse part aligns a different side than an Apple part does --
+and the M2 body is untouched, which is checked against HEAD rather than
+asserted.
 
-## Der leichte Eintritt auf EPYC: +61%, nach einem Fehlschlag mit Diagnose
+## The light entry on EPYC: +61%, after a failure with a diagnosis
 
-Ein inkompressibler Wert ist ein Token mit leerem Match-Nibble, eine
-Laengenkette und die Bytes. Der Body erkennt diese Form laengst -- aber erst
-hinter sechs Pushes und fuenf `lea`, die Zonengrenzen und Raender berechnen, die
-ein Ein-Block-Wert nie liest, und er zahlt sechs Pops beim Verlassen.
+An incompressible value is a token with an empty match nibble, a length chain
+and the bytes. The body has recognised that shape all along -- but only behind
+six pushes and five `lea`s that compute zone boundaries and margins a
+single-block value never reads, and it pays six pops on the way out.
 
-### Erster Versuch: -20.8%
+### First attempt: -20.8%
 
-| lz4/noise_512 | Basis | leichter Eintritt |
+| lz4/noise_512 | baseline | light entry |
 |---|---|---|
 | ns | 10.1 | 12.6 |
-| drei Laeufe | | **-20.9 / -20.8 / -20.6%** |
+| three runs | | **-20.9 / -20.8 / -20.6%** |
 
-Die Zerlegung sagte, dass darin zwei gegenlaeufige Posten stecken: der Eintritt
-sparte rund drei Nanosekunden, und die 32-Byte-Schleife mit Vergleich und
-Sprung, die ich statt `L(lit_last)`s Kopie geschrieben hatte, gab mehr als das
-Doppelte zurueck.
+The decomposition said two opposing items were inside that: the entry saved
+about three nanoseconds, and the 32-byte loop with a comparison and a branch,
+which I had written instead of `L(lit_last)`'s copy, gave back more than twice
+as much.
 
-### Zweiter Versuch, mit derselben Kopie: +61%
+### Second attempt, with that same copy: +61%
 
-| lz4/noise_512 | Basis | leichter Eintritt |
+| lz4/noise_512 | baseline | light entry |
 |---|---|---|
 | ns | 10.0 | **6.4 - 6.7** |
 | GB/s | 51.1 | **76.8 - 80.3** |
-| gegen liblz4 | **-8.0%** | **+39.2 / +43.1 / +48.1%** |
-| Delta | | **+61.0 / +55.5 / +51.3%** |
+| vs liblz4 | **-8.0%** | **+39.2 / +43.1 / +48.1%** |
+| delta | | **+61.0 / +55.5 / +51.3%** |
 
-noise_4k ruehrt sich um 0.7%, noise_64k um 0.5%, records_512 um 0.6% -- alle
-drei liegen ueber der 3072er-Grenze und nehmen den Pfad nicht. Das ist die
-Gegenprobe, dass der Gewinn aus der angefassten Stelle kommt.
+noise_4k moves 0.7%, noise_64k 0.5%, records_512 0.6% -- all three are above
+the 3072 boundary and do not take the path. That is the control showing the
+gain comes from the place that was touched.
 
-Auf dem Teil selbst geprueft, weil er hier nicht laeuft: Rosetta hat kein AVX2,
-`Lz4Body::all()` haelt die EPYC-Bodies zurueck, und der lokale Soak erreicht
-diesen Code nicht. Auf der c3d: **5760 Faelle, 0 falsch**, 106 Tests. Und nur
-`unpack_lz4_epyc.o` bewegt sich -- `unpack_epyc`, `unpack_wide_epyc`,
-`unpack_xeon`, `unpack_lz4_xeon` und `unpack_ssse3` sind byteidentisch.
+Checked on the part itself, because it does not run here: Rosetta has no AVX2,
+`Lz4Body::all()` holds the EPYC bodies back, and the local soak never reaches
+this code. On the c3d: **5760 cases, 0 wrong**, 106 tests. And only
+`unpack_lz4_epyc.o` moves -- `unpack_epyc`, `unpack_wide_epyc`, `unpack_xeon`,
+`unpack_lz4_xeon` and `unpack_ssse3` are byte-identical.
 
-### Und eine Korrektur an einer frueheren Zahl
+### And a correction to an earlier number
 
-Die Basis liest hier **-8.0%** gegen liblz4, wo criterion **-23.4%** gemessen
-hatte. Der Unterschied ist die Pufferlage: `examples/quick` legt Quelle und Ziel
-in eine Arena mit festen Versaetzen, criterion nimmt, was der Allokator gibt.
-Ein Drittel dessen, was den ganzen Tag als struktureller Rueckstand galt, war
-die Messapparatur.
+The baseline here reads **-8.0%** against liblz4 where criterion had measured
+**-23.4%**. The difference is buffer placement: `examples/quick` puts source
+and destination in an arena at fixed offsets, criterion takes what the
+allocator gives. A third of what counted all day as a structural deficit was
+the measuring apparatus.
 
-Damit ist auch die Rechnung von heute Vormittag zu relativieren: dort stand, die
-Zelle sitze bei -23.4% auf dem Boden des Entwurfs, weil das Zwei-Parameter-
-Modell -23.0% vorhersagt. Das Modell war fuer *jene* Messung richtig. Der Boden
-lag woanders.
+That also puts this morning's arithmetic in perspective: it said the cell sat
+at -23.4% on the design's floor, because the two-parameter model predicts
+-23.0%. The model was right for *that* measurement. The floor was somewhere
+else.
 
-## Der leichte Eintritt auf allen vier Teilen
+## The light entry on all four parts
 
-Ein Wert, der aus einem einzigen Literallauf besteht, beantwortet vor dem
-Prolog. Gemessen mit `examples/quick`, drei Laeufe je Teil, nur `unpack.S`
-zwischen den Revisionen getauscht.
+A value consisting of a single literal run is answered before the prologue.
+Measured with `examples/quick`, three runs per part, only `unpack.S` swapped
+between the revisions.
 
-| Teil | vorher | nachher | Delta | gegen liblz4 |
+| part | before | after | delta | vs liblz4 |
 |---|---|---|---|---|
-| EPYC | 10.0 ns | 6.4-6.7 | **+61 / +56 / +51%** | -8.0% -> **+39 bis +48%** |
-| Xeon | 9.3 ns | 7.1-7.2 | **+29.2 / +30.1 / +29.9%** | -2.8% -> **+25.6 bis +26.5%** |
-| M2 Max | 9.1 ns | 7.3 | **+26.1 / +25.5 / +25.3%** | +4.2% -> **+30.5 bis +31.4%** |
-| Axion | 11.6 ns | 10.9-11.1 | +5.9 / +5.8 / +6.6% | -8.3% -> -2.2 bis -2.9% |
+| EPYC | 10.0 ns | 6.4-6.7 | **+61 / +56 / +51%** | -8.0% -> **+39 to +48%** |
+| Xeon | 9.3 ns | 7.1-7.2 | **+29.2 / +30.1 / +29.9%** | -2.8% -> **+25.6 to +26.5%** |
+| M2 Max | 9.1 ns | 7.3 | **+26.1 / +25.5 / +25.3%** | +4.2% -> **+30.5 to +31.4%** |
+| Axion | 11.6 ns | 10.9-11.1 | +5.9 / +5.8 / +6.6% | -8.3% -> -2.2 to -2.9% |
 
-noise_4k und noise_64k bewegen sich auf allen vier unter 1.2%: sie liegen ueber
-der 3072er-Grenze und nehmen den Pfad nicht. Korrektheit auf Xeon und EPYC je
-5760 Soak-Faelle, 0 falsch, 106 Tests. Alle zehn Eigenformat-Bodies sind auf
-beiden Architekturen byteidentisch.
+noise_4k and noise_64k move by under 1.2% on all four: they are above the 3072
+boundary and do not take the path. Correctness on Xeon and EPYC, 5760 soak
+cases each, 0 wrong, 106 tests. All ten own-format bodies are byte-identical on
+both architectures.
 
-### Warum Axion so viel weniger bekommt
+### Why Axion gets so much less
 
-Dort traegt die Basis bereits den Quell-Ausrichtungskopf, und der ist selbst
-Festkosten. Der leichte Eintritt spart den Prolog, richtet aber nicht aus -- er
-tauscht also einen Gewinn gegen den anderen, und uebrig bleiben sechs Prozent
-auf einer Aufloesung von sechs. Zwei der drei Laeufe sagen deshalb
-"unveraendert". Den Quell-Kopf in den leichten Eintritt zu ziehen statt ihn zu
-umgehen waere die Behebung.
+There the baseline already carries the source-alignment head, and that is
+fixed cost in itself. The light entry saves the prologue but does not align --
+so it trades one gain against the other, and six percent is left on a
+resolution of six. Two of the three runs therefore say "unchanged". Pulling the
+source head *into* the light entry instead of bypassing it would be the fix.
 
-### Was hier methodisch falsch lief
+### What went wrong here methodologically
 
-Ich hatte M2 und Axion mit der Begruendung ausgeschlossen, ihre Festkosten seien
-schon so niedrig wie liblz4s. Das war die falsche Frage. Richtig ist: wieviel
-von einem 512-Byte-Aufruf ist Festkosten, die eine Abkuerzung entfernen kann --
-EPYC 48%, Axion 41%, M2 30%. Auf EPYC waren wir beim Eintritt sogar *billiger*
-als liblz4 und haben trotzdem 61% gewonnen.
+I had excluded M2 and Axion on the grounds that their fixed cost was already as
+low as liblz4's. That was the wrong question. The right one is: how much of a
+512-byte call is fixed cost that a shortcut can remove -- EPYC 48%, Axion 41%,
+M2 30%. On EPYC we were actually *cheaper* than liblz4 on entry and still won
+61%.
 
-Und die Zahl, auf die ich die Begruendung gestuetzt hatte (EPYC F = 8.84 ns),
-stammte aus den criterion-Daten, deren Pufferlage sich am selben Tag als
-verfaelschend erwiesen hatte. Mit festgenagelten Puffern sind es 4.76 ns, und
-nach dem leichten Eintritt 0.71.
+And the number the reasoning rested on (EPYC F = 8.84 ns) came from the
+criterion data, whose buffer placement had been shown to distort on that same
+day. With pinned buffers it is 4.76 ns, and after the light entry 0.71.
 
-Der Einwand kam von ihm: der Code ist auf allen Architekturen derselbe, also
-muesse das Problem ueberall dasselbe sein. Das stimmte.
+The objection came from him: the code is the same on every architecture, so the
+problem must be the same everywhere. He was right.
 
-### Ein Fehler beim Einbau, und wie er auffiel
+### A mistake while building it, and how it surfaced
 
-Die erste Einfuegung auf AArch64 ging still daneben -- eine Textersetzung ohne
-Treffer, weil zwischen Label und Prolog Kommentarzeilen stehen. Tests und Soak
-liefen gruen, aber ueber unveraenderten Code. Vier Mutationen ueberlebten, was
-schon der Hinweis war; ein `brk` an der Stelle feuerte nicht, was es bewies.
-Danach mit einem Werkzeug eingefuegt, das bei Nichttreffer abbricht.
+The first insertion on AArch64 silently missed -- a text replacement with no
+match, because there are comment lines between the label and the prologue.
+Tests and soak ran green, but over unchanged code. Four mutations survived,
+which was already the hint; a `brk` at the spot never fired, which proved it.
+Inserted afterwards with a tool that fails loudly on a miss.
 
-## Axion, der letzte Test: die beiden Gewinne addieren statt kuerzen
+## Axion, the last test: making the two gains add instead of cancel
 
-Der leichte Eintritt sprang ueber den Prolog und damit auch ueber den
-Quell-Ausrichtungskopf, der in der Literalschleife des vollen Pfades sitzt --
-ein Wert, der kurz genug fuer den Eintritt ist, erreicht ihn nie. Deshalb
-brachte er auf Axion 6%, wo Xeon und M2 26 bis 30% bekamen. Jetzt macht der
-Eintritt beides.
+The light entry jumped over the prologue and therefore also over the
+source-alignment head, which sits in the full path's literal loop -- a value
+short enough for the entry never reaches it. That is why it brought 6% on Axion
+where Xeon and M2 got 26 to 30%. Now the entry does both.
 
-| lz4/noise_512 | ohne leichten Eintritt | mit beidem |
+| lz4/noise_512 | without light entry | with both |
 |---|---|---|
 | ns | 11.1 | **7.7 - 7.8** |
 | GB/s | 46.2 | **65.5 - 66.1** |
-| gegen liblz4 | -4.7% | **+35.4 bis +36.2%** |
-| Delta | | **+42.1 / +42.9 / +42.4%** |
+| vs liblz4 | -4.7% | **+35.4 to +36.2%** |
+| delta | | **+42.1 / +42.9 / +42.4%** |
 
-noise_4k und noise_64k bewegen sich unter 1.2%, beide liegen ueber der Grenze.
+noise_4k and noise_64k move by under 1.2%; both are above the boundary.
 
-Der generische AArch64-Body ist dabei unangetastet: sein Instruktionsstrom ist
-identisch, das Objekt unterscheidet sich um ein lokales Label im Symboltisch.
+The generic AArch64 body is untouched by this: its instruction stream is
+identical, and the object differs by one local label in the symbol table.
 
-## Wo der Entpacker nach diesem Tag steht
+## Where the decoder stands after this day
 
-`lz4/noise_512`, die Zelle, die morgens auf drei von vier Teilen hinten lag:
+`lz4/noise_512`, the cell that was behind on three of four parts in the
+morning:
 
-| Teil | morgens | abends |
+| part | morning | evening |
 |---|---|---|
-| EPYC | -8.0% | **+39 bis +48%** |
-| Xeon | -2.8% | **+25.6 bis +26.5%** |
-| M2 Max | +4.2% | **+30.5 bis +31.4%** |
-| Axion | -15.9% | **+35.4 bis +36.2%** |
+| EPYC | -8.0% | **+39 to +48%** |
+| Xeon | -2.8% | **+25.6 to +26.5%** |
+| M2 Max | +4.2% | **+30.5 to +31.4%** |
+| Axion | -15.9% | **+35.4 to +36.2%** |
 
-Axions `noise_4k` ging am selben Tag von **-34.9% auf -2.3%**, EPYCs von -7% auf
-+23.8%.
+Axion's `noise_4k` went from **-34.9% to -2.3%** on the same day, EPYC's from
+-7% to +23.8%.
 
-### Und das Produkt
+### And the product
 
-Fuer einen Cache sind Kapazitaet und Durchsatz unabhaengige Achsen: mehr Werte
-je GB RAM, und jeder Wert schneller gelesen. Eigenes Format gegen liblz4 auf
-seinem:
+For a cache, capacity and throughput are independent axes: more values per GB
+of RAM, and every value read faster. Our own format against liblz4 on its own:
 
-| Form | Kapazitaet | M2 Max | Xeon | EPYC | Axion |
+| shape | capacity | M2 Max | Xeon | EPYC | Axion |
 |---|---|---|---|---|---|
 | records_4k | +35.1% | +67.4% | +58.1% | +48.6% | +75.4% |
 | **records_64k** | **+44.7%** | **+101.5%** | **+96.3%** | +79.1% | **+106.6%** |
 | varied_4k | +4.7% | +58.6% | +46.9% | +42.1% | +60.3% |
 | varied_64k | -1.4% | +89.1% | +71.4% | +62.6% | +83.4% |
 
-Auf records_64k das Doppelte an logischen Bytes je Sekunde je GB RAM.
+On records_64k, twice the logical bytes per second per GB of RAM.
 
-## Der standardisierte Lauf auf `ad7d338`
+## The standardised run on `ad7d338`
 
-Drei Maschinen, drei Laeufe je Maschine, volle Testmatrix vor der Messung,
-voller Filter. 46 Minuten. Mediane aus drei.
+Three machines, three runs per machine, the full test matrix before measuring,
+the full filter. 46 minutes. Medians of three.
 
-### Zuerst: ein roter Test, seit einem Tag
+### First: a test that had been red for a day
 
-Auf ARM schlug `the_kernel_itself_reads_what_liblz4_wrote` fehl -- kein
-Kernelfehler, sondern die Waechterpruefung darin:
+On ARM, `the_kernel_itself_reads_what_liblz4_wrote` failed -- not a kernel bug
+but the guard check inside it:
 
     assertion `left == right` failed: a body was added or removed
     without this test noticing.   left: 2   right: 1
 
-Der Test zaehlt die LZ4-Bodies und war auf AArch64 auf eins festgenagelt. Die
-Neoverse-Teilelinie machte zwei daraus. **Er war seit `3bf7bb4` rot, also seit
-dem Vormittag, und ist einen ganzen Arbeitstag lang nicht aufgefallen** -- weil
-die Pruefschleife nach jeder Aenderung `cargo test -p keva-core` ohne
-`--features liblz4` lief und die vier Interop-Tests damit nie ausfuehrte.
+The test counts the LZ4 bodies and was pinned to one on AArch64. The Neoverse
+part line made it two. **It had been red since `3bf7bb4`, so since that
+morning, and went unnoticed for a full working day** -- because the check loop
+after every change ran `cargo test` without `--features liblz4` and therefore
+never executed the four interop tests.
 
-Genau dafuer existiert der lange Lauf: vier Konfigurationen statt einer.
+That is exactly what the long run exists for: four configurations instead of
+one.
 
-### Packen, GiB/s
+### Packing, GiB/s
 
-| Form | Xeon | | EPYC | | Neoverse V2 | |
+| shape | Xeon | | EPYC | | Neoverse V2 | |
 |---|---|---|---|---|---|---|
-| | keva | vs | keva | vs | keva | vs |
+| | lzvolt | vs | lzvolt | vs | lzvolt | vs |
 | records_512 | 2.00 | **+55%** | 2.62 | **+122%** | 2.23 | **+54%** |
 | varied_512 | 1.25 | **+58%** | 1.55 | **+89%** | 1.22 | +28% |
 | noise_512 | 2.43 | **+81%** | 2.95 | **+134%** | 2.87 | **+77%** |
@@ -2604,9 +2577,9 @@ Genau dafuer existiert der lange Lauf: vier Konfigurationen statt einer.
 | varied_64k | 1.25 | **+92%** | 1.08 | +0% | 1.08 | +4% |
 | noise_64k | 114.6 | **+859%** | 125.6 | **+820%** | 165.1 | **+837%** |
 
-### Dekodieren, eigenes Format, GiB/s
+### Decoding, our own format, GiB/s
 
-| Form | Xeon | | EPYC | | Neoverse V2 | |
+| shape | Xeon | | EPYC | | Neoverse V2 | |
 |---|---|---|---|---|---|---|
 | records_512 | 9.44 | **+29%** | 10.78 | **+33%** | 10.60 | **+22%** |
 | varied_512 | 8.24 | **+29%** | 9.10 | **+28%** | 8.47 | **+27%** |
@@ -2615,11 +2588,11 @@ Genau dafuer existiert der lange Lauf: vier Konfigurationen statt einer.
 | records_64k | 11.86 | **+36%** | 12.25 | **+23%** | 12.93 | **+45%** |
 | varied_64k | 7.01 | **+72%** | 8.40 | **+64%** | 8.15 | **+83%** |
 
-**Achtzehn von achtzehn Zellen vorn, +14% bis +83%.**
+**Eighteen of eighteen cells ahead, +14% to +83%.**
 
-### Dekodieren, identische LZ4-Bloecke, GiB/s
+### Decoding, identical LZ4 blocks, GiB/s
 
-| Form | Xeon | | EPYC | | Neoverse V2 | |
+| shape | Xeon | | EPYC | | Neoverse V2 | |
 |---|---|---|---|---|---|---|
 | records_512 | 8.49 | **+25%** | 9.22 | **+28%** | 10.00 | +18% |
 | varied_512 | 6.21 | -3% | 6.94 | -3% | 7.01 | +5% |
@@ -2631,17 +2604,18 @@ Genau dafuer existiert der lange Lauf: vier Konfigurationen statt einer.
 | varied_64k | 4.67 | +15% | 5.85 | +15% | 6.51 | **+46%** |
 | noise_64k | 35.07 | +2% | 41.39 | +1% | 68.92 | -4% |
 
-### Und wo dieser Lauf dem Kurzwerkzeug widerspricht
+### And where this run contradicts the short tool
 
-`noise_512` im Fremdformat liest hier -15% / -12% / +4%, wo `examples/quick`
-+26% / +39% / +36% gemessen hat. Der Unterschied ist die Pufferlage, und er ist
-schon dokumentiert: `quick` legt Quelle und Ziel in eine Arena mit festen
-Versaetzen, criterion nimmt, was der Allokator gibt. Bei neun Nanosekunden je
-Aufruf sind dreissig Prozent Spanne allein aus 4K-Aliasing gemessen worden.
+`noise_512` in the foreign format reads -15% / -12% / +4% here, where
+`examples/quick` measured +26% / +39% / +36%. The difference is buffer
+placement, and it is already documented: `quick` puts source and destination in
+an arena at fixed offsets, criterion takes what the allocator gives. At nine
+nanoseconds per call, a thirty percent spread has been measured from 4K
+aliasing alone.
 
-Beide Zahlen sind fuer ihr Regime richtig, und die Folgerung ist unbequem:
-**unser Kernel ist auf dieser Zelle deutlich lagenempfindlicher als liblz4.**
-Der leichte Eintritt richtet auf x86 naemlich *nicht* aus -- nur der
-Neoverse-Body tut das, und genau der ist im Fremdformat bei noise_512 als
-einziger nicht negativ. Das ist ein Hinweis mit einem Mechanismus dahinter und
-der naechste Schritt, falls hier weitergearbeitet wird.
+Both numbers are right for their regime, and the conclusion is uncomfortable:
+**our kernel is far more placement-sensitive than liblz4 on this cell.** The
+light entry does *not* align on x86 -- only the Neoverse body does, and that is
+precisely the one body that is not negative on noise_512 in the foreign format.
+That is a hint with a mechanism behind it, and the next step if work continues
+here.

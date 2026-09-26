@@ -7,8 +7,7 @@
 //! every other block if it does not, so the switch rate is counted here next to
 //! the rate itself.
 //!
-//!   RUSTFLAGS="-L/opt/homebrew/lib" cargo run --release -p keva-core \
-//!     --features liblz4 --example lz4_census
+//!   cargo run --release --features liblz4 --example census
 
 fn varied(total: usize) -> Vec<u8> {
     let mut state = 0x2545_F491_4F6C_DD1Du64;
@@ -149,7 +148,7 @@ fn main() {
 
         println!("\n=== {name}   {} B -> {} B  ({:.2}x)", data.len(), block.len(),
                  data.len() as f64 / block.len() as f64);
-        println!("   {blocks} Bloecke, {:.1} Bytes je Block  (Literale {:.1} + Match {:.1})",
+        println!("   {blocks} blocks, {:.1} bytes per block  (literals {:.1} + match {:.1})",
                  data.len() as f64 / blocks as f64,
                  lit_total as f64 / blocks as f64,
                  mat_total as f64 / blocks as f64);

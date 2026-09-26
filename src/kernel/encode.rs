@@ -40,27 +40,27 @@ pub struct PackState {
     pub misses: u32,
 }
 
-/// Shortest run worth encoding. Must agree with `keva_core::store::pack`.
+/// Shortest run worth encoding. Must agree with [`crate::format`].
 pub const MIN_MATCH: usize = 4;
-/// Longest backward reference. Must agree with `keva_core::store::pack`.
+/// Longest backward reference. Must agree with [`crate::format`].
 pub const MAX_OFFSET: usize = 65_535;
 /// Table size as a power of two, and how much of it a small value uses. Must
-/// agree with `keva_core::store::pack`.
+/// agree with [`crate::format`].
 pub const HASH_BITS: u32 = 12;
 /// How much of the table a value above [`NARROW_TABLE_ABOVE`] uses. The table is
 /// still allocated in full; a large value simply touches less of it, and touched
 /// lines are what the cache charges for.
 pub const HASH_BITS_LARGE: u32 = 11;
 /// Length above which the packer narrows the table. Must agree with
-/// `keva_core::store::pack`.
+/// [`crate::format`].
 pub const NARROW_TABLE_ABOVE: usize = 8192;
-/// Misses before the stride widens. Must agree with `keva_core::store::pack`.
+/// Misses before the stride widens. Must agree with [`crate::format`].
 pub const SKIP_TRIGGER: u32 = 6;
 
 /// Entries the table must hold.
 pub const TABLE_SIZE: usize = 1 << HASH_BITS;
 
-/// A slot that has never been written. Must agree with `keva_core::store::pack`.
+/// A slot that has never been written. Must agree with [`crate::format`].
 ///
 /// Not zero, and that is load-bearing rather than stylistic. The kernel decides
 /// whether a candidate is usable with a single unsigned compare of `at -

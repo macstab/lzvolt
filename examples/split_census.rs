@@ -1,9 +1,10 @@
-//! Was drei Literalbits im even-Split kosten und was das Repeat-Bit spart.
+//! What three literal bits in the even split would cost, and what the repeat
+//! bit would save.
 //!
-//! Beides sind Zaehlungen, keine Messungen. Der Preis von 3/4/1 sind die
-//! Bloecke, deren Literallauf sieben erreicht und deshalb eine Laengenkette
-//! braucht, wo heute erst fuenfzehn eine ausloest. Der Gewinn sind die
-//! Bloecke, deren Offset der vorige schon war.
+//! Both are counts, not measurements. The price of a 3/4/1 split is the blocks
+//! whose literal run reaches seven and therefore needs a length chain, where
+//! today only fifteen triggers one. The gain is the blocks whose offset is the
+//! one the previous block already used.
 
 use lzvolt::format;
 
@@ -59,7 +60,7 @@ fn varied(total: usize) -> Vec<u8> {
 fn main() {
     println!(
         "{:13}{:>7}{:>8}{:>9}{:>9}{:>10}{:>10}",
-        "", "Bloecke", "lit>=15", "lit>=7", "neu", "Repeats", "Bilanz"
+        "", "blocks", "lit>=15", "lit>=7", "new", "repeats", "net"
     );
     for (name, data) in [
         ("records_192", records(192)),
@@ -70,14 +71,14 @@ fn main() {
     ] {
         let mut packed = Vec::new();
         if !format::pack(&data, &mut packed) {
-            println!("  {name}: roh gespeichert");
+            println!("  {name}: stored raw");
             continue;
         }
-        // Der Kopf: zwei Bits Klasse, dann die Laenge. Danach beginnen die Bloecke.
+        // The header: two class bits, then the length. The blocks start after it.
         let klass = (packed[0] >> 6) as usize + 1;
         let hybrid = klass > 1 && packed[0] & 0x20 != 0;
         if hybrid {
-            println!("  {name}: wechselt den Split, nicht rein even -- ausgelassen");
+            println!("  {name}: switches split, not purely even -- skipped");
             continue;
         }
         let body = &packed[klass..];
@@ -116,7 +117,7 @@ fn main() {
                 }
             }
         }
-        // 3/4/1: jeder Repeat spart zwei Offsetbytes, jede neue Kette kostet eines.
+        // 3/4/1: every repeat saves two offset bytes, every new chain costs one.
         let saved = repeats * 2;
         let cost = chain_then.saturating_sub(chain_now);
         println!(
@@ -125,7 +126,7 @@ fn main() {
             format!("{:+} B", cost as isize - saved as isize)
         );
         println!(
-            "               gepackt {} B -> {} B   ({:+.1}%)",
+            "               packed {} B -> {} B   ({:+.1}%)",
             packed.len(),
             packed.len() + cost - saved,
             100.0 * ((packed.len() + cost - saved) as f64 / packed.len() as f64 - 1.0)

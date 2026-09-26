@@ -65,7 +65,7 @@
 //! never packed at all, and all of it run under Miri, which reports
 //! out-of-bounds access and uninitialised reads that a passing test would not.
 //!
-//! `cargo +nightly miri test -p keva-core --lib store::pack`
+//! `cargo +nightly miri test --lib format`
 //!
 //! That belongs in CI. A change here that keeps the tests green but drops a
 //! bounds check is exactly the failure this module is shaped to prevent.
@@ -1051,7 +1051,7 @@ fn pack_pass<const SHIFT: u32, S: Slot>(
         // Which is where the real gap is, and it is not this. Profiling both
         // packers over the same 4 KiB of noise:
         //
-        //     keva     0.740 cycles/byte   IPC 3.13   2.3 instr/byte   16.5% mispredicts
+        //     lzvolt   0.740 cycles/byte   IPC 3.13   2.3 instr/byte   16.5% mispredicts
         //     liblz4   0.539               IPC 6.12   3.3             2.1%
         //
         // liblz4 executes half again as many instructions per byte and is 27%
@@ -2390,7 +2390,7 @@ mod tests {
     /// decoder-against-decoder measurement has no format difference left in it.
     ///
     /// Off by default because it links a C library:
-    ///   RUSTFLAGS="-L/opt/homebrew/lib" cargo test -p keva-core --features liblz4
+    ///   cargo test --features liblz4
     #[cfg(feature = "liblz4")]
     #[test]
     fn our_decoder_reads_what_liblz4_wrote() {
@@ -2827,7 +2827,7 @@ mod tests {
             // failure rather than a silent gap, which is what it did: the
             // Neoverse body went in and this assertion has been red ever since,
             // unseen for a day because the loop that checked every change ran
-            // `cargo test -p keva-core` without `--features liblz4` and never
+            // `cargo test` without `--features liblz4` and never
             // reached the four tests that need it. The standardised run found
             // it, which is what the standardised run is for.
             let want = if cfg!(target_arch = "x86_64") {
