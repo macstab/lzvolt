@@ -1,9 +1,13 @@
 # The lzvolt stream format
 
 Version 1. This document is normative: where it and any implementation
-disagree, the implementation is wrong. It was written by reading the encoder
-and the decoders, and writing it found two places where the source comments no
-longer described what the code did — both are noted where they occur.
+disagree, the implementation is wrong.
+
+It was written by reading the encoder and the decoders, and writing it was worth
+it for more than the document. It found three source comments that no longer
+described the code — noted where they occur — three tests still building headers
+in a format two revisions old, and two decoder guards that cannot fire. None of
+that was visible from a green test run, because every one of them was green.
 
 A stream is self-contained. It carries its own uncompressed length, and nothing
 outside it is needed to decode it.
@@ -184,7 +188,14 @@ w = 4  otherwise
 `out_at` is the number of output bytes produced before the switch.
 
 The width follows from *declared* alone, so a decoder knows it before reading
-the trailer.
+the trailer. That both fields fit in the narrow case is worth spelling out,
+because the bound is exactly tight and an implementer who writes `<` where this
+says `<=` will get it wrong at one length:
+
+- `out_at` is strictly below *declared*, so at the boundary *declared* = 65 536
+  its largest value is 65 535 — the last value two bytes hold.
+- `in_at` is below the body length, and the body is shorter than *declared*
+  (see below), so it is smaller still.
 
 A decoder **MUST** reject a trailer with `in_at > body length`, with
 `out_at == 0`, or with `out_at >= declared`.
@@ -203,6 +214,13 @@ the wide section may reach back across the boundary.
 | Maximum literal run | bounded only by *declared* |
 | Maximum match length | bounded only by *declared* |
 
+The maximum length is the header's, not a separately chosen ceiling: four bytes
+of header hold 29 bits and there is no fifth class. A decoder therefore cannot
+be handed a stream declaring more than this, whatever it does about it — and the
+reference decoder's own 512 MiB buffer guard sits just above 2²⁹ − 1, so on the
+`decompress` path that guard cannot fire. It is live only on `decompress_lz4`,
+where the length is an argument rather than something read from the bytes.
+
 ## What an encoder is free to choose
 
 Everything not named above. In particular the following are **implementation
@@ -220,6 +238,22 @@ That last one is worth stating plainly: **an encoder may refuse.** `lzvolt`'s
 does, for data that does not compress, and returns the input to the caller
 untouched rather than wrapping it. A stream is therefore never larger than its
 input, because a stream that would be is never produced.
+
+`lzvolt`'s encoder refuses on two rules that are **not** part of this format, and
+a decoder **MUST NOT** infer either of them from the streams it happens to see:
+
+- it refuses inputs shorter than 8 bytes, and
+- it refuses a result that does not save at least an eighth of the input and at
+  least 8 bytes — the bar is space, because a packed value costs four to five
+  times a stored one to read, so saving a single byte is a bad trade.
+
+The second rule is what bounds the body: every stream this encoder writes is at
+most ⅞ of its input, which is what the trailer's two-byte case rests on. Another
+conforming encoder may keep a stream that saves one byte, and a decoder has to
+read it. Both rules are also why no stream from this encoder declares a length
+below 8 — and `a_length_the_encoder_would_never_emit_still_decodes` in
+`src/format.rs` hand-builds every one of those lengths to hold the decoder to
+the format rather than to its own encoder's habits.
 
 Thresholds in the reference implementation — when the decoder calls `memcpy`,
 how wide its copy loop is, where it aligns — are not part of this format. They

@@ -1250,38 +1250,6 @@ fn pack_pass<const SHIFT: u32, S: Slot>(
     let _ = (blocks, saturated);
 }
 
-/// The length prefix: seven bits a byte, high bit meaning "one more".
-///
-/// Carried over from the store this codec was extracted from, where it encoded
-/// entry lengths. It was the codec's only reference reaching outside itself, and
-/// it reached out only from the tests -- twenty lines were cheaper to copy than
-/// a dependency to keep.
-#[cfg(test)]
-fn put_varint(buf: &mut [u8], mut value: u64) -> usize {
-    let mut written = 0;
-    loop {
-        let mut byte = (value & 0x7F) as u8;
-        value >>= 7;
-        if value != 0 {
-            byte |= 0x80;
-        }
-        buf[written] = byte;
-        written += 1;
-        if value == 0 {
-            return written;
-        }
-    }
-}
-
-/// A LEB128 varint into a `Vec`. Only the tests use it now -- the header stopped
-/// being one -- and they need it to build streams the decoder must reject.
-#[cfg(test)]
-fn put_varint_into(value: u64, out: &mut Vec<u8>) {
-    let mut buf = [0u8; 10];
-    let used = put_varint(&mut buf, value);
-    out.extend_from_slice(&buf[..used]);
-}
-
 /// The block header: a two-bit class, one flag, and the length.
 ///
 /// ```text
@@ -2268,14 +2236,21 @@ mod tests {
             }
         }
 
-        // A declared length nobody could hold.
+        // The largest length the header can express, over a body holding
+        // nothing like it.
+        //
+        // Note what this deliberately does *not* assert. The four-byte class
+        // tops out at 2^29-1, which is below `MAX_UNPACKED`, so no stream can
+        // declare a length this decoder calls too large: the two
+        // `declared > MAX_UNPACKED` guards on the unpack paths are unreachable
+        // from a stream and earn their keep only on the LZ4 entry, where the
+        // length comes from the caller instead of the bytes. This used to build
+        // its header with a LEB128 varint of `u64::MAX` and accept either error,
+        // which passed while testing neither. See docs/FORMAT.md, "Limits".
         let mut absurd = Vec::new();
-        put_varint_into(u64::MAX, &mut absurd);
+        put_header(0x1FFF_FFFF, false, &mut absurd);
         absurd.push(0);
-        assert!(matches!(
-            unpack(&absurd, &mut out),
-            Err(PackError::TooLarge | PackError::Truncated)
-        ));
+        assert_eq!(unpack(&absurd, &mut out), Err(PackError::Truncated));
     }
 
     /// The copies in `unpack` are unchecked, so the checks that precede them
@@ -2316,14 +2291,20 @@ mod tests {
             let _ = unpack(&broken, &mut out);
         }
 
-        // A believable declared length in front of noise, in every combination
-        // of the two header flags -- a stream claiming a second section it does
-        // not have has to be refused like any other corruption.
-        for len in [0u64, 1, 64, 4096, 1 << 20] {
-            for flags in 0u64..4 {
+        // A believable declared length in front of noise, in every header class
+        // and with the hybrid flag both ways -- a stream claiming a second
+        // section it does not have has to be refused like any other corruption.
+        //
+        // The lengths straddle all three class boundaries, because the class is
+        // what decides how many bytes the decoder consumes before it has looked
+        // at any of them. This built its headers as `varint(len << 2 | flags)`
+        // until the spec pass caught it: a header format two revisions old, so
+        // the classes it actually produced had nothing to do with the list here.
+        for len in [0usize, 1, 63, 64, 8191, 8192, 1 << 20, 2_097_151, 2_097_152] {
+            for hybrid in [false, true] {
                 for _ in 0..200 {
                     let mut stream = Vec::new();
-                    put_varint_into((len << 2) | flags, &mut stream);
+                    put_header(len, hybrid, &mut stream);
                     for _ in 0..(next() % 200) {
                         stream.push(next() as u8);
                     }
@@ -3576,12 +3557,58 @@ mod tests {
         // Declared length 8, one literal, then a match reaching back further
         // than anything produced.
         let mut stream = Vec::new();
-        put_varint_into(8 << 2, &mut stream); // declared 8, even split, one section
+        // Declared 8, not hybrid. Written as `varint(8 << 2)` before the spec
+        // pass, which in the class encoding is a one-byte header declaring 32 --
+        // the test passed, for a value it did not name.
+        put_header(8, false, &mut stream);
         stream.push(1 << 4); // one literal, and a match-length nibble of zero
         stream.push(b'a');
         stream.extend_from_slice(&99u16.to_le_bytes()); // offset far too large
 
         let mut out = Vec::new();
         assert_eq!(unpack(&stream, &mut out), Err(PackError::BadOffset));
+    }
+
+    /// The encoder's floors are not the format's floors.
+    ///
+    /// `pack` refuses anything under eight bytes, and `worth_storing` refuses
+    /// anything it cannot shrink by an eighth, so no stream this encoder writes
+    /// ever declares a tiny length. Neither rule is in the format, and a decoder
+    /// that inferred them from the streams it happens to see would reject valid
+    /// input from a conforming encoder that made other choices.
+    ///
+    /// So: every length the one-byte class can express, hand-built, all
+    /// literals, no match. Zero included -- an empty value is a header and a
+    /// token, and it decodes to nothing rather than to an error.
+    #[test]
+    fn a_length_the_encoder_would_never_emit_still_decodes() {
+        for declared in 0usize..=63 {
+            let mut stream = Vec::new();
+            put_header(declared, false, &mut stream);
+            // One final block: literals only. The token's nibble saturates at
+            // fifteen and the rest continues in an extension chain.
+            let lit_max = EVEN.lit_max();
+            if declared < lit_max {
+                stream.push((declared as u8) << 4);
+            } else {
+                stream.push((lit_max as u8) << 4);
+                let mut rest = declared - lit_max;
+                while rest >= 255 {
+                    stream.push(255);
+                    rest -= 255;
+                }
+                stream.push(rest as u8);
+            }
+            let literals: Vec<u8> = (0..declared).map(|i| b'a' + (i % 26) as u8).collect();
+            stream.extend_from_slice(&literals);
+
+            let mut out = Vec::new();
+            assert_eq!(
+                unpack(&stream, &mut out),
+                Ok(()),
+                "declared {declared} was refused"
+            );
+            assert_eq!(out, literals, "declared {declared}");
+        }
     }
 }
