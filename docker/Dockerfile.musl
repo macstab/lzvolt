@@ -15,6 +15,11 @@ COPY src ./src
 COPY asm ./asm
 COPY build.rs ./
 COPY include ./include
+# Cargo parses the whole manifest before it builds anything, and this
+# one declares example and bench targets. Without their sources the
+# manifest does not parse, so the build fails before it starts.
+COPY examples ./examples
+COPY benches ./benches
 
 # musl targets default to a static crt, which is what makes the result
 # portable across distributions.
@@ -32,5 +37,9 @@ RUN test -f /out/liblzvolt.a || (echo "no static library was produced" && exit 1
       echo "note: no shared object for this musl target; shipping the archive"; \
     fi
 
+# Exported with `--output type=local`, so the artifacts land at the root
+# of the export rather than inside it. Nothing is ever run from this
+# image -- `docker create` cannot instantiate a scratch image with no
+# command, which is how the first version of this failed.
 FROM scratch
-COPY --from=build /out /out
+COPY --from=build /out/ /

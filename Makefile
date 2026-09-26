@@ -141,7 +141,8 @@ docker-build-all: $(addprefix docker-build-,$(VARIANTS)) ## Build every released
 .PHONY: docker-build-%
 docker-build-%: ## Build one variant, e.g. docker-build-musl-arm64
 	@set -e; \
-	libc=$${*%%-*}; arch=$${*##*-}; \
+	variant='$*'; \
+	libc=$${variant%%-*}; arch=$${variant##*-}; \
 	case "$$arch" in \
 	  amd64) triple=x86_64; platform=linux/amd64 ;; \
 	  arm64) triple=aarch64; platform=linux/arm64 ;; \
@@ -154,16 +155,22 @@ docker-build-%: ## Build one variant, e.g. docker-build-musl-arm64
 	esac; \
 	mkdir -p $(DIST); \
 	echo "==> $$libc-$$arch ($$target)"; \
+	out=$(DIST)/.export-$$libc-$$arch; rm -rf $$out; \
 	$(DOCKER) build --platform $$platform -f $$file \
-	  --build-arg TARGET=$$target -t lzvolt-build:$$libc-$$arch .; \
-	cid=$$($(DOCKER) create --platform $$platform lzvolt-build:$$libc-$$arch); \
-	$(DOCKER) cp $$cid:/out/liblzvolt.so $(DIST)/liblzvolt-$$libc-$$arch.so; \
-	$(DOCKER) cp $$cid:/out/liblzvolt.a  $(DIST)/liblzvolt-$$libc-$$arch.a; \
-	$(DOCKER) rm -f $$cid > /dev/null
+	  --build-arg TARGET=$$target --output type=local,dest=$$out .; \
+	mv $$out/liblzvolt.a $(DIST)/liblzvolt-$$libc-$$arch.a; \
+	if [ -f $$out/liblzvolt.so ]; then \
+	  mv $$out/liblzvolt.so $(DIST)/liblzvolt-$$libc-$$arch.so; \
+	else \
+	  echo "    (no shared object for this target; the archive is the artifact)"; \
+	fi; \
+	rm -rf $$out
 
 .PHONY: checksums
 checksums: ## SHA256SUMS over everything in dist/
-	@cd $(DIST) && sha256sum liblzvolt-* lzvolt.h 2>/dev/null > SHA256SUMS && cat SHA256SUMS
+	@cd $(DIST) && { command -v sha256sum > /dev/null \
+	  && sha256sum liblzvolt-* lzvolt.h \
+	  || shasum -a 256 liblzvolt-* lzvolt.h; } > SHA256SUMS && cat SHA256SUMS
 
 .PHONY: dist
 dist: docker-build-all ## Build every variant, add the header, and checksum it

@@ -9,11 +9,11 @@ ARG TARGET=x86_64-unknown-linux-gnu
 
 WORKDIR /src
 
-# The assembly goes through the C preprocessor, so an assembler is needed
-# even though nothing here is C.
-RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential \
- && rm -rf /var/lib/apt/lists/*
+# No apt step. The assembly goes through the C preprocessor, so a C toolchain
+# is needed -- and the official Rust images are built on buildpack-deps, which
+# already has one. Installing build-essential on top of that fetched nothing
+# and cost a network round trip, and it broke the build outright under QEMU,
+# where gpg verification fails and apt refuses the repository.
 
 RUN rustup target add "$TARGET"
 
@@ -23,6 +23,11 @@ COPY src ./src
 COPY asm ./asm
 COPY build.rs ./
 COPY include ./include
+# Cargo parses the whole manifest before it builds anything, and this
+# one declares example and bench targets. Without their sources the
+# manifest does not parse, so the build fails before it starts.
+COPY examples ./examples
+COPY benches ./benches
 
 RUN cargo build --release --target "$TARGET" \
  && mkdir -p /out \
@@ -36,5 +41,9 @@ RUN echo 'int main(void){return 0;}' > /tmp/t.c \
  && gcc /tmp/t.c -L/out -llzvolt -o /tmp/t \
  && ldd /out/liblzvolt.so
 
+# Exported with `--output type=local`, so the artifacts land at the root
+# of the export rather than inside it. Nothing is ever run from this
+# image -- `docker create` cannot instantiate a scratch image with no
+# command, which is how the first version of this failed.
 FROM scratch
-COPY --from=build /out /out
+COPY --from=build /out/ /
