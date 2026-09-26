@@ -560,11 +560,6 @@ pub fn unpack_asm_hybrid(
 
     #[cfg(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
-        let (in_at, out_at) = switch;
-        if declared == 0 || out_at == 0 || out_at >= declared || in_at > body.len() {
-            return false;
-        }
-
         out.clear();
         // `Vec::reserve` is a call whose body handles growth, and the caller
         // reuses its buffer, so growth is the case that never happens. Asking
@@ -574,33 +569,71 @@ pub fn unpack_asm_hybrid(
             out.reserve(want);
         }
         let cap = out.capacity();
-
-        // SAFETY: `cap` is the real capacity and is at least `declared + 64`,
-        // which the kernel re-checks. The first call is given `out_at` as its
-        // declared length, so it writes below `out_at + 64 <= declared + 64`;
-        // the second starts at `out_at` and stops at `declared`. Nothing reads
-        // the slack: the length is only ever set to `declared`.
-        let ok = unsafe {
-            let dst = out.as_mut_ptr();
-            let first_len = run(first, body.as_ptr(), in_at, dst, cap, out_at, 0) as usize;
-            if first_len != out_at {
-                false
-            } else {
-                let tail = body.as_ptr().add(in_at);
-                let tail_len = body.len() - in_at;
-                let total = run(second, tail, tail_len, dst, cap, declared, out_at) as usize;
-                total == declared
-            }
-        };
-
-        if !ok {
+        // SAFETY: `cap` is this allocation's real capacity, so the slice
+        // covers memory we own. None of it is read as initialised: the length
+        // is set only once, below, and only to what the kernels wrote.
+        let dst = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr(), cap) };
+        if !unpack_hybrid_into_slice(body, dst, declared, switch, first, second) {
             out.clear();
             return false;
         }
-        // SAFETY: both calls reported reaching their targets, so every byte
+        // SAFETY: both sections reported reaching their targets, so every byte
         // below `declared` was written by one of them.
         unsafe { out.set_len(declared) };
         true
+    }
+}
+
+/// The same two calls, writing into a buffer the caller already owns.
+///
+/// This is the shape a C caller needs, and [`unpack_asm_hybrid`] is written
+/// over it: a `Vec` is a buffer plus a length, and the length is the only part
+/// the kernels do not deal in.
+///
+/// `dst` **should** be at least `declared + UNPACK_SLACK` so the kernels can
+/// take their wide paths. A shorter buffer is not unsafe — each kernel
+/// re-checks the bound it was handed — it only declines more often, and a
+/// decline means the portable decoder runs instead.
+pub fn unpack_hybrid_into_slice(
+    body: &[u8],
+    dst: &mut [u8],
+    declared: usize,
+    switch: (usize, usize),
+    first: Split,
+    second: Split,
+) -> bool {
+    #[cfg(not(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    {
+        let _ = (body, dst, declared, switch, first, second);
+        false
+    }
+
+    #[cfg(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        let (in_at, out_at) = switch;
+        if declared == 0 || out_at == 0 || out_at >= declared || in_at > body.len() {
+            return false;
+        }
+        if dst.len() < declared {
+            return false;
+        }
+
+        // SAFETY: `dst.len()` is the true length of the buffer. The first call
+        // is given `out_at` as its declared length and the second starts there
+        // and stops at `declared`; both are at most `dst.len()`, and each
+        // kernel checks that bound before taking any path that writes wide.
+        unsafe {
+            let cap = dst.len();
+            let base = dst.as_mut_ptr();
+            let first_len = run(first, body.as_ptr(), in_at, base, cap, out_at, 0) as usize;
+            if first_len != out_at {
+                return false;
+            }
+            let tail = body.as_ptr().add(in_at);
+            let tail_len = body.len() - in_at;
+            let total = run(second, tail, tail_len, base, cap, declared, out_at) as usize;
+            total == declared
+        }
     }
 }
 

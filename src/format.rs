@@ -422,6 +422,11 @@ pub enum PackError {
     LengthMismatch,
     /// The declared length was larger than any value may be.
     TooLarge,
+    /// The buffer handed in cannot hold the length the stream declares.
+    ///
+    /// Only [`unpack_into_slice`] can produce this. The `Vec` entry points
+    /// grow their own output and never run out.
+    OutputTooSmall,
     /// The header used a longer class than its length needs.
     ///
     /// Decoding such a stream would work — the length reads back correctly —
@@ -440,6 +445,7 @@ impl std::fmt::Display for PackError {
             PackError::LengthMismatch => "packed value does not produce its declared length",
             PackError::TooLarge => "packed value declares an implausible length",
             PackError::NonCanonicalHeader => "packed value's header is longer than its length needs",
+            PackError::OutputTooSmall => "output buffer is smaller than the declared length",
         })
     }
 }
@@ -1813,6 +1819,66 @@ pub fn unpack(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
     unpack_portable(input, out)
 }
 
+/// Decode into a buffer the caller owns, returning how many bytes were written.
+///
+/// The same decoder [`unpack`] runs — the assembled kernels first, the
+/// portable one where they decline — writing straight into `out` instead of
+/// into a `Vec`. Nothing is copied afterwards, which is the whole point: this
+/// is what the C ABI is built on, and a codec that reads at 13 GiB/s cannot
+/// afford to hand its output through a `memcpy`.
+///
+/// `out` must hold at least the declared length, or this is
+/// [`PackError::OutputTooSmall`] and nothing is written. It **should** hold
+/// [`decompressed_bound`] of it: both decoders copy in wide blocks and both
+/// check for that much room before they do. A tight buffer decodes the same
+/// bytes, only block by block.
+pub fn unpack_into_slice(input: &[u8], out: &mut [u8]) -> Result<usize, PackError> {
+    let f = frame(input)?;
+    if out.len() < f.declared {
+        return Err(PackError::OutputTooSmall);
+    }
+    if crate::kernel::decode::asm_available() {
+        let ok = match f.switch {
+            None => {
+                crate::kernel::decode::unpack_into_slice(f.body, out, f.declared, f.split.kernel())
+            }
+            Some(switch) => crate::kernel::decode::unpack_hybrid_into_slice(
+                f.body,
+                out,
+                f.declared,
+                switch,
+                f.split.kernel(),
+                f.split.other().kernel(),
+            ),
+        };
+        if ok {
+            return Ok(f.declared);
+        }
+    }
+    // SAFETY: `out` is a live slice and is therefore writable for its length.
+    unsafe { unpack_framed(f, out.as_mut_ptr(), out.len()) }
+}
+
+/// The uncompressed length a stream declares, without decoding it.
+///
+/// Reads the header and validates it — length, class and, for a hybrid stream,
+/// the trailer — so a caller can size a buffer before committing to the
+/// decode. The same checks run again inside [`unpack_into_slice`]; they are a
+/// handful of compares on a path that is once per value.
+pub fn declared_len(input: &[u8]) -> Result<usize, PackError> {
+    Ok(frame(input)?.declared)
+}
+
+/// How much room [`unpack_into_slice`] wants for a value of `declared` bytes.
+///
+/// The decoders write past the end of the last block rather than trimming it,
+/// so this slack is what buys the wide copies. It is not required — a buffer
+/// of exactly `declared` produces the same bytes — but on `noise_4k` the
+/// difference between copying wide and not was 34%.
+pub const fn decompressed_bound(declared: usize) -> usize {
+    declared + crate::kernel::decode::UNPACK_SLACK
+}
+
 /// Unpack a block whose uncompressed length the caller already knows.
 ///
 /// This is the shape LZ4's own API has -- `LZ4_decompress_safe` is handed the
@@ -1923,15 +1989,40 @@ fn frame(input: &[u8]) -> Result<Frame<'_>, PackError> {
 /// given a name.
 fn unpack_portable(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
     out.clear();
-
     let f = frame(input)?;
+    let declared = f.declared;
+    out.reserve(declared + OVERRUN);
+    // SAFETY: the reserve above is what the writes below assume, and
+    // `capacity()` is this allocation's true size. The length is set only
+    // after the decode reports having filled `declared` bytes.
+    let produced = unsafe { unpack_framed(f, out.as_mut_ptr(), out.capacity())? };
+    debug_assert_eq!(produced, declared);
+    // Set once, to the declared size: the overrun inside may have written past
+    // it, and those bytes are not part of the value.
+    unsafe { out.set_len(produced) };
+    Ok(())
+}
+
+/// The body of the portable decoder, writing into memory rather than a `Vec`.
+///
+/// Split out so a caller holding its own buffer — the C ABI, above all — gets
+/// the same decoder rather than a copy of its output. The `Vec` above is this
+/// function plus a `reserve` and a `set_len`, which is all a `Vec` ever added.
+///
+/// # Safety
+///
+/// `base` must be writable for `capacity` bytes. `capacity` **should** be at
+/// least `declared + OVERRUN`; less is safe but turns off the wide copies,
+/// which check it.
+unsafe fn unpack_framed(
+    f: Frame<'_>,
+    base: *mut u8,
+    capacity: usize,
+) -> Result<usize, PackError> {
     let (declared, body) = (f.declared, f.body);
     let mut split = f.split;
     let switch_at = f.switch.map(|(_, out_at)| out_at);
-    out.reserve(declared + OVERRUN);
 
-    let capacity = out.capacity();
-    let base = out.as_mut_ptr();
     let mut produced = 0usize;
     let mut at = 0usize;
     // The offset a repeat block reuses. Cleared at the switch, where the layout
@@ -2100,10 +2191,7 @@ fn unpack_portable(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
     if produced != declared {
         return Err(PackError::LengthMismatch);
     }
-    // Set once, to the declared size: the overrun above may have written past
-    // it, and those bytes are not part of the value.
-    unsafe { out.set_len(declared) };
-    Ok(())
+    Ok(produced)
 }
 
 #[cfg(test)]
@@ -3595,6 +3683,92 @@ mod tests {
 
         let mut out = Vec::new();
         assert_eq!(unpack(&stream, &mut out), Err(PackError::BadOffset));
+    }
+
+    /// Decoding into a caller's buffer produces what decoding into a `Vec` does.
+    ///
+    /// The two share `unpack_framed` but not the path above it: the slice
+    /// version drives the kernels itself, and the hybrid case drives them
+    /// twice. Both are exercised here, and both buffer sizes are, because the
+    /// slack is what decides whether the wide copies are allowed to run — a
+    /// tight buffer takes a different path through the same decoder and has to
+    /// produce the same bytes.
+    #[test]
+    fn decoding_into_a_slice_agrees_with_decoding_into_a_vec() {
+        let mut seen_hybrid = 0usize;
+        let mut seen_plain = 0usize;
+
+        // The second shape exists to reach the switch: `records` repeats too
+        // regularly to make the packer change split, and the two-kernel path
+        // is the half of this function that the first shape cannot reach.
+        let varied = |total: usize| -> Vec<u8> {
+            let mut state = 0x2545_F491_4F6C_DD1Du64;
+            let mut next = move || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state
+            };
+            let mut out = Vec::with_capacity(total);
+            while out.len() < total {
+                let r = next();
+                out.extend_from_slice(
+                    format!(
+                        "{{\"id\":\"{:016x}\",\"tenant\":\"{:08x}\",\"score\":{}}}",
+                        r,
+                        next() as u32,
+                        next() % 100_000
+                    )
+                    .as_bytes(),
+                );
+            }
+            out.truncate(total);
+            out
+        };
+
+        for len in [8usize, 64, 517, 4096, 9000, 65_536] {
+            for (which, data) in [("records", records(len)), ("varied", varied(len))] {
+                let mut packed = Vec::new();
+                if !pack(&data, &mut packed) {
+                    continue;
+                }
+                if get_header(&packed).unwrap().1 {
+                    seen_hybrid += 1;
+                } else {
+                    seen_plain += 1;
+                }
+
+                let mut want = Vec::new();
+                unpack(&packed, &mut want).expect("the vec path decodes");
+                assert_eq!(want, data, "{which}_{len}");
+
+                // With the slack, which is what the kernels ask for.
+                let mut roomy = vec![0u8; decompressed_bound(data.len())];
+                let n = unpack_into_slice(&packed, &mut roomy).expect("roomy");
+                assert_eq!(n, data.len(), "{which}_{len} roomy length");
+                assert_eq!(&roomy[..n], &data[..], "{which}_{len} roomy bytes");
+
+                // And exactly the declared length, which turns them off.
+                let mut tight = vec![0u8; data.len()];
+                let n = unpack_into_slice(&packed, &mut tight).expect("tight");
+                assert_eq!(n, data.len(), "{which}_{len} tight length");
+                assert_eq!(tight, data, "{which}_{len} tight bytes");
+
+                // One byte short is refused, and refused before anything runs.
+                if !data.is_empty() {
+                    let mut short = vec![0xAAu8; data.len() - 1];
+                    assert_eq!(
+                        unpack_into_slice(&packed, &mut short),
+                        Err(PackError::OutputTooSmall),
+                        "{which}_{len} short"
+                    );
+                    assert!(short.iter().all(|&b| b == 0xAA), "short buffer was written");
+                }
+            }
+        }
+
+        assert!(seen_plain > 0, "no single-section case");
+        assert!(seen_hybrid > 0, "no hybrid case -- the two-kernel path is untested");
     }
 
     /// The published vectors are what this decoder actually does.

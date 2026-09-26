@@ -58,6 +58,13 @@ pub mod cpu;
 pub mod format;
 pub mod kernel;
 
+/// The C ABI, for callers that are not Rust. See `include/lzvolt.h`.
+///
+/// Always present: the symbols cost a Rust caller nothing in an `rlib`, and
+/// putting them behind a feature would let the published shared library and
+/// the published crate disagree about what exists.
+pub mod ffi;
+
 pub use format::PackError as Error;
 
 /// Compress `input` into `out`, appending nothing if it is not worth it.
@@ -82,6 +89,37 @@ pub fn compress(input: &[u8], out: &mut Vec<u8>) -> bool {
 #[inline]
 pub fn decompress(input: &[u8], out: &mut Vec<u8>) -> Result<(), Error> {
     format::unpack(input, out)
+}
+
+/// Decompress into a buffer you already have, returning the bytes written.
+///
+/// The same decoder [`decompress`] runs, writing straight into `out` with no
+/// copy afterwards. Use it when the destination is already allocated — an
+/// arena, a page, a slot in a cache — which is the case this codec was built
+/// for.
+///
+/// `out` must be at least [`decompressed_size`] of the stream, and should be
+/// [`decompressed_bound`] of that for the wide copies.
+#[inline]
+pub fn decompress_into(input: &[u8], out: &mut [u8]) -> Result<usize, Error> {
+    format::unpack_into_slice(input, out)
+}
+
+/// The uncompressed length a stream declares, without decoding it.
+///
+/// Validates the header, so what this rejects [`decompress`] would reject too.
+#[inline]
+pub fn decompressed_size(input: &[u8]) -> Result<usize, Error> {
+    format::declared_len(input)
+}
+
+/// How much room [`decompress_into`] wants for a value of `declared` bytes.
+///
+/// Exactly `declared` decodes the same bytes; this much lets the decoders copy
+/// in wide blocks, which on incompressible 4 KiB was worth 34%.
+#[inline]
+pub const fn decompressed_bound(declared: usize) -> usize {
+    format::decompressed_bound(declared)
 }
 
 /// Decompress an LZ4 block, with the length known from somewhere else.
