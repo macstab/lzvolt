@@ -1,0 +1,40 @@
+# A released glibc shared object, built where the oldest supported glibc is.
+#
+# Debian 12 (glibc 2.36) rather than the newest available: a shared object
+# links against the glibc it was built on and runs on that version or newer,
+# so building on something current would quietly exclude every older host.
+FROM rust:1.85-bookworm AS build
+
+ARG TARGET=x86_64-unknown-linux-gnu
+
+WORKDIR /src
+
+# The assembly goes through the C preprocessor, so an assembler is needed
+# even though nothing here is C.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN rustup target add "$TARGET"
+
+# Manifests first, so a source-only change does not refetch the index.
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY asm ./asm
+COPY build.rs ./
+COPY include ./include
+
+RUN cargo build --release --target "$TARGET" \
+ && mkdir -p /out \
+ && cp "target/$TARGET/release/liblzvolt.so" /out/ \
+ && cp "target/$TARGET/release/liblzvolt.a"  /out/
+
+# Prove it loads and resolves before it is called a release artifact. A
+# shared object that builds but will not link is a worse outcome than a
+# failed build, because it fails at the user instead of here.
+RUN echo 'int main(void){return 0;}' > /tmp/t.c \
+ && gcc /tmp/t.c -L/out -llzvolt -o /tmp/t \
+ && ldd /out/liblzvolt.so
+
+FROM scratch
+COPY --from=build /out /out

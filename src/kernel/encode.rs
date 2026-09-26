@@ -287,10 +287,7 @@ pub fn pack_asm_on(
     // The `return` is not needless, whatever clippy sees: this is a statement
     // block, not the function's tail, and the tail belongs to the other `cfg`.
     // Dropping it would evaluate `None` and discard it.
-    #[cfg(not(all(
-        lzvolt_asm,
-        any(target_arch = "aarch64", target_arch = "x86_64")
-    )))]
+    #[cfg(not(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
     #[allow(clippy::needless_return)]
     {
         let _ = (input, out, table);
@@ -333,7 +330,10 @@ pub fn pack_asm_on(
         if written == 0 {
             return None;
         }
-        assert!(written <= cap, "the kernel reported writing past the buffer");
+        assert!(
+            written <= cap,
+            "the kernel reported writing past the buffer"
+        );
         // SAFETY: the kernel wrote `written` bytes from the pointer, and
         // `written <= cap` was just checked.
         unsafe { out.set_len(written) };

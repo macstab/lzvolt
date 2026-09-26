@@ -223,15 +223,21 @@ unsafe fn run(
         let f = crate::cpu::features();
         if f.ssse3 {
             return match (f.xeon, f.epyc, split) {
-                (true, _, Split::Even) => keva_unpack_xeon(src, src_len, dst, dst_cap, declared, start),
+                (true, _, Split::Even) => {
+                    keva_unpack_xeon(src, src_len, dst, dst_cap, declared, start)
+                }
                 (true, _, Split::WideMatch) => {
                     keva_unpack_wide_xeon(src, src_len, dst, dst_cap, declared, start)
                 }
-                (_, true, Split::Even) => keva_unpack_epyc(src, src_len, dst, dst_cap, declared, start),
+                (_, true, Split::Even) => {
+                    keva_unpack_epyc(src, src_len, dst, dst_cap, declared, start)
+                }
                 (_, true, Split::WideMatch) => {
                     keva_unpack_wide_epyc(src, src_len, dst, dst_cap, declared, start)
                 }
-                (_, _, Split::Even) => keva_unpack_ssse3(src, src_len, dst, dst_cap, declared, start),
+                (_, _, Split::Even) => {
+                    keva_unpack_ssse3(src, src_len, dst, dst_cap, declared, start)
+                }
                 (_, _, Split::WideMatch) => {
                     keva_unpack_wide_ssse3(src, src_len, dst, dst_cap, declared, start)
                 }
@@ -379,7 +385,9 @@ unsafe fn run_lz4(
     match body {
         Lz4Body::Xeon => return keva_unpack_lz4_xeon(src, src_len, dst, dst_cap, declared, start),
         Lz4Body::Epyc => return keva_unpack_lz4_epyc(src, src_len, dst, dst_cap, declared, start),
-        Lz4Body::Ssse3 => return keva_unpack_lz4_ssse3(src, src_len, dst, dst_cap, declared, start),
+        Lz4Body::Ssse3 => {
+            return keva_unpack_lz4_ssse3(src, src_len, dst, dst_cap, declared, start)
+        }
         Lz4Body::Baseline | Lz4Body::NeoverseV2 => {}
     }
     #[cfg(target_arch = "aarch64")]

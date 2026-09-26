@@ -1,0 +1,48 @@
+# Supply chain and advisories.
+#
+# Not CodeQL: its Rust support is a preview, and a scanner that cannot read
+# the assembly or the `unsafe` blocks would be checking the least interesting
+# third of this repository while reporting a green tick. The `unsafe` here is
+# held to Miri and the sanitisers in ci.yml, which do read it, and to mutation
+# testing, which no scanner does. This job covers the part a scanner is
+# genuinely good at: knowing which dependency was found to be vulnerable
+# yesterday.
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Advisories arrive whether or not anyone pushes.
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: advisories and licences
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+
+  unsafe-inventory:
+    name: unsafe inventory
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Not a gate — this crate is full of deliberate `unsafe` and always
+      # will be. It prints the inventory into the log so that a review can
+      # see when it grows, which is the question worth asking.
+      - run: cargo install cargo-geiger --locked || true
+      - run: cargo geiger --output-format GitHubMarkdown >> "$GITHUB_STEP_SUMMARY" || true

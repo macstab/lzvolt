@@ -81,7 +81,15 @@ fn main() {
                 || lz4_decompress(block, &mut dst_b[..len + 64], len),
             );
             reference = theirs;
-            report(&format!("lz4/{name}"), len, ours, theirs, spread, &old, &mut now);
+            report(
+                &format!("lz4/{name}"),
+                len,
+                ours,
+                theirs,
+                spread,
+                &old,
+                &mut now,
+            );
         }
 
         // Our own format, where the packer accepts the value at all.
@@ -91,7 +99,15 @@ fn main() {
             let (ours, spread) = time(CELL_MS, || {
                 format::unpack(&packed, &mut out).unwrap();
             });
-            report(&format!("own/{name}"), data.len(), ours, reference, spread, &old, &mut now);
+            report(
+                &format!("own/{name}"),
+                data.len(),
+                ours,
+                reference,
+                spread,
+                &old,
+                &mut now,
+            );
         }
     }
 
@@ -348,7 +364,10 @@ fn report(
         Some(_) => String::from("--"),
         None => String::from("neu"),
     };
-    println!("{name:<22}{ours:>10.1}{gbs:>11.2}{vs_lib:>12}{vs_base:>10}{:>9}", format!("+-{spread:.1}%"));
+    println!(
+        "{name:<22}{ours:>10.1}{gbs:>11.2}{vs_lib:>12}{vs_base:>10}{:>9}",
+        format!("+-{spread:.1}%")
+    );
     now.push((name.to_string(), ours, theirs, spread));
 }
 
@@ -478,7 +497,11 @@ fn machine() -> String {
                 .map(|(_, v)| v.trim().to_owned());
             if let Some(part) = part {
                 // 0xd4f is Neoverse V2, which is the one this project tunes for.
-                let named = if part == "0xd4f" { " (Neoverse V2)" } else { "" };
+                let named = if part == "0xd4f" {
+                    " (Neoverse V2)"
+                } else {
+                    ""
+                };
                 return format!("ARM part {part}{named}");
             }
         }

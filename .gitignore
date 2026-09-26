@@ -22,3 +22,4 @@ flamegraph.svg
 # in case the same command is ever run by hand.
 /bench-results/
 /packer-report*.txt
+/dist/

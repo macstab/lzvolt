@@ -117,9 +117,14 @@ fn main() {
 
     // ---- The hybrid switch, which LZ4 has no equivalent for -------------
 
-    // Even section: 64 literals. Wide section: one match covering the rest.
-    let mut body = vec![0xF0, 64 - 15];
-    body.extend_from_slice(&[b'c'; 64]);
+    // Even section: 60 literals and a match of 4, reaching out_at = 64 on a
+    // block that carries a match. That last part is not decoration -- a
+    // section other than the last may not end on a literals-only block, and
+    // the first draft of this vector did, which is how the rule was found.
+    // See docs/FORMAT.md, "Across the boundary".
+    let mut body = vec![0xF0, 60 - 15];
+    body.extend_from_slice(&[b'c'; 60]);
+    body.extend_from_slice(&1u16.to_le_bytes()); // offset 1: four more 'c'
     let in_at = body.len();
     // Wide token: LL MMMMM R. No literals, match length 36 -> 32 saturates the
     // five-bit field at 31, so a chain of 1 follows the offset.
@@ -134,9 +139,10 @@ fn main() {
     v.push(Vector {
         name: "hybrid stream, even then wide",
         note: "The hybrid flag is set, so a trailer follows the body: in_at then \
-               out_at, two bytes each because declared is under 65536. The wide \
-               section's match reaches back across the switch into what the even \
-               section produced.",
+               out_at, two bytes each because declared is under 65536. The even \
+               section ends on a block that carries a match, which it must. The \
+               wide section's match then reaches back across the switch into \
+               what the even section produced.",
         stream: s,
         expect: Expect::Repeat(b"c".to_vec(), 100),
     });
@@ -144,7 +150,10 @@ fn main() {
     // ---- Every header class ---------------------------------------------
 
     for (declared, label) in [
-        (64usize, "class 1, the shortest length that needs two header bytes"),
+        (
+            64usize,
+            "class 1, the shortest length that needs two header bytes",
+        ),
         (8192, "class 2, three header bytes"),
         (2_097_152, "class 3, four header bytes"),
     ] {
@@ -258,7 +267,12 @@ fn check(v: &Vector) {
         }
         Expect::Repeat(unit, count) => {
             assert_eq!(result, Ok(()), "{}: refused", v.name);
-            let want: Vec<u8> = unit.iter().cycle().take(unit.len() * count).copied().collect();
+            let want: Vec<u8> = unit
+                .iter()
+                .cycle()
+                .take(unit.len() * count)
+                .copied()
+                .collect();
             assert_eq!(got.len(), want.len(), "{}: length", v.name);
             assert_eq!(got, want, "{}", v.name);
         }

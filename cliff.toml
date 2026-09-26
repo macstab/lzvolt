@@ -1,0 +1,67 @@
+# git-cliff, configured for the commit style this project actually uses.
+#
+# The usual setup assumes Conventional Commits and drops anything that does
+# not parse. This repository writes prose: a subject line that says what
+# changed, then paragraphs explaining why, with the numbers. Every commit here
+# would be "unconventional" and the changelog would come out empty.
+#
+# So: parsing is off, nothing is filtered, and commits are grouped by reading
+# their subject line. A commit that matches nothing still appears, under
+# "Changes" — silently dropping work from a changelog is worse than filing it
+# imprecisely.
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this project are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
+adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+**The stream format is versioned separately and independently.** A major
+version of this library may change its API; it will not change what
+`docs/FORMAT.md` specifies. Streams outlive releases.
+
+"""
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}] — {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## [Unreleased]
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {{ commit.message | split(pat="\n") | first | upper_first }} \
+([{{ commit.id | truncate(length=7, end="") }}](https://github.com/macstab/lzvolt/commit/{{ commit.id }}))\
+{% endfor %}
+{% endfor %}\n
+"""
+footer = ""
+trim = true
+
+[git]
+conventional_commits = false
+filter_unconventional = false
+split_commits = false
+protect_breaking_commits = false
+filter_commits = false
+topo_order = false
+sort_commits = "oldest"
+tag_pattern = "v?[0-9]*.[0-9]*.[0-9]*"
+
+commit_preprocessors = [
+  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/macstab/lzvolt/issues/${1}))" },
+]
+
+# Read in order; the first match wins. The catch-all at the end is deliberate.
+commit_parsers = [
+  { message = "^[Mm]erge ", skip = true },
+  { message = "(?i)^(fix|repair|correct)", group = "Fixed" },
+  { message = "(?i)(faster|speed|throughput|\\+[0-9]+%|cycles)", group = "Performance" },
+  { message = "(?i)(measur|benchmark|profil|refut|census)", group = "Measurements" },
+  { message = "(?i)(document|spec|readme|comment|english|wording)", group = "Documentation" },
+  { message = "(?i)(test|mutation|soak|fuzz|vector)", group = "Testing" },
+  { message = "(?i)(ci|workflow|pipeline|makefile|docker|release)", group = "Build and CI" },
+  { message = ".*", group = "Changes" },
+]

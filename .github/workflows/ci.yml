@@ -1,0 +1,110 @@
+name: ci
+
+on:
+  push:
+    branches: [main, 'feat/**', 'fix/**', 'perf/**', 'docs/**', 'chore/**']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint:
+    name: format, clippy, docs
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends liblz4-dev
+      - run: make fmt-check
+      - run: make clippy
+      - run: make doc
+
+  test:
+    name: tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both architectures, because the assembly is different code on each
+        # and a test that passes on one says nothing about the other.
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-14]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install liblz4
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then brew install lz4;
+          else sudo apt-get update && sudo apt-get install -y --no-install-recommends liblz4-dev; fi
+      # Runs the suite twice: with the assembly, and on the portable
+      # reference. The second is what the first is diffed against.
+      - run: make test
+      - name: Which kernel ran
+        run: cargo run --release --example quick -- --entry || true
+
+  c-abi:
+    name: C ABI
+    runs-on: ubuntu-24.04
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The header is a claim about symbols; the linker is what checks it.
+      - run: make header-check
+      - run: make c-example
+
+  miri:
+    name: miri
+    runs-on: ubuntu-24.04
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      # On the portable decoder: Miri cannot execute the assembly, and the
+      # portable one is what the assembly is diffed against anyway.
+      - run: make miri
+
+  sanitizers:
+    name: asan and ubsan
+    runs-on: ubuntu-24.04
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+      # These *do* cover the assembly, which is the half Miri cannot reach.
+      - run: make sanitize
+
+  benchmark-gate:
+    name: benchmark gate
+    runs-on: ubuntu-24.04
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends liblz4-dev
+      # A shared runner cannot resolve a few percent, so this is not a
+      # regression gate. It is here to prove the harness still runs and to
+      # print the numbers into the log, where a human can look at them.
+      - run: make quick

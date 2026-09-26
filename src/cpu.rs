@@ -198,7 +198,10 @@ fn detect() -> Features {
         // SAFETY: extended leaves; the maximum is checked first.
         let max_ext = unsafe { std::arch::x86_64::__cpuid(0x8000_0000).eax };
         if max_ext >= 0x8000_0004 {
-            for (i, leaf) in [0x8000_0002u32, 0x8000_0003, 0x8000_0004].iter().enumerate() {
+            for (i, leaf) in [0x8000_0002u32, 0x8000_0003, 0x8000_0004]
+                .iter()
+                .enumerate()
+            {
                 // SAFETY: leaf is at or below the maximum reported above.
                 let c = unsafe { std::arch::x86_64::__cpuid(*leaf) };
                 for (j, r) in [c.eax, c.ebx, c.ecx, c.edx].iter().enumerate() {
@@ -277,7 +280,6 @@ mod tests {
         }
     }
 
-
     /// The two spellings of the same word, from two real parts.
     ///
     /// `8481C` is what a `c3` instance reports and `8581C` what a `c4` does.
@@ -299,7 +301,10 @@ mod tests {
         // A part nobody has measured, and a translator that writes its own
         // name: neither line matches and the generic kernel runs, which is the
         // right answer.
-        for other in ["12th Gen Intel(R) Core(TM) i7-1260P", "VirtualApple @ 2.50GHz"] {
+        for other in [
+            "12th Gen Intel(R) Core(TM) i7-1260P",
+            "VirtualApple @ 2.50GHz",
+        ] {
             assert!(!super::brand_says(other, "XEON"));
             assert!(!super::brand_says(other, "EPYC"));
         }

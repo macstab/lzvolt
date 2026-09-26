@@ -1,0 +1,36 @@
+# A released musl shared object: statically self-contained, so it runs on
+# Alpine and on anything else without a glibc to match.
+FROM rust:1.85-alpine AS build
+
+ARG TARGET=x86_64-unknown-linux-musl
+
+WORKDIR /src
+
+RUN apk add --no-cache musl-dev gcc make
+
+RUN rustup target add "$TARGET"
+
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY asm ./asm
+COPY build.rs ./
+COPY include ./include
+
+# musl targets default to a static crt, which is what makes the result
+# portable across distributions.
+RUN RUSTFLAGS="-C target-feature=+crt-static" \
+    cargo build --release --target "$TARGET" \
+ && mkdir -p /out \
+ && cp "target/$TARGET/release/liblzvolt.so" /out/ 2>/dev/null || true \
+ && cp "target/$TARGET/release/liblzvolt.a"  /out/
+
+# The static archive is the artifact that always exists for musl; the shared
+# object depends on the target's crt settings. Fail loudly if neither is here
+# rather than shipping an empty release.
+RUN test -f /out/liblzvolt.a || (echo "no static library was produced" && exit 1) \
+ && if [ ! -f /out/liblzvolt.so ]; then \
+      echo "note: no shared object for this musl target; shipping the archive"; \
+    fi
+
+FROM scratch
+COPY --from=build /out /out

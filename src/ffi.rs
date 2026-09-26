@@ -311,7 +311,9 @@ mod tests {
             .collect();
 
         let mut packed = vec![0u8; lzvolt_compress_bound(data.len())];
-        let n = unsafe { lzvolt_compress(data.as_ptr(), data.len(), packed.as_mut_ptr(), packed.len()) };
+        let n = unsafe {
+            lzvolt_compress(data.as_ptr(), data.len(), packed.as_mut_ptr(), packed.len())
+        };
         assert!(n > 0, "compress returned {n}");
         let n = n as usize;
 
@@ -365,7 +367,12 @@ mod tests {
         let mut cramped = [0u8; 4];
         assert_eq!(
             unsafe {
-                lzvolt_compress(data.as_ptr(), data.len(), cramped.as_mut_ptr(), cramped.len())
+                lzvolt_compress(
+                    data.as_ptr(),
+                    data.len(),
+                    cramped.as_mut_ptr(),
+                    cramped.len(),
+                )
             },
             LZVOLT_E_OUTPUT_TOO_SMALL
         );

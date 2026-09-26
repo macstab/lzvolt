@@ -146,21 +146,29 @@ fn main() {
             blocks += 1;
         }
 
-        println!("\n=== {name}   {} B -> {} B  ({:.2}x)", data.len(), block.len(),
-                 data.len() as f64 / block.len() as f64);
-        println!("   {blocks} blocks, {:.1} bytes per block  (literals {:.1} + match {:.1})",
-                 data.len() as f64 / blocks as f64,
-                 lit_total as f64 / blocks as f64,
-                 mat_total as f64 / blocks as f64);
+        println!(
+            "\n=== {name}   {} B -> {} B  ({:.2}x)",
+            data.len(),
+            block.len(),
+            data.len() as f64 / block.len() as f64
+        );
+        println!(
+            "   {blocks} blocks, {:.1} bytes per block  (literals {:.1} + match {:.1})",
+            data.len() as f64 / blocks as f64,
+            lit_total as f64 / blocks as f64,
+            mat_total as f64 / blocks as f64
+        );
         for (label, q) in [
             ("Literalnibble gesaettigt (-> fast_litlong)", &lit_sat),
             ("Matchnibble gesaettigt   (-> fast_long)", &mat_sat),
             ("Offset kurz              (-> fast_near)", &near),
         ] {
             let n = blocks.max(1);
-            println!("   {label:42} {:5.1}% ja, {:5.1}% Wechsel",
-                     100.0 * q.yes as f64 / n as f64,
-                     100.0 * q.switches as f64 / n as f64);
+            println!(
+                "   {label:42} {:5.1}% ja, {:5.1}% Wechsel",
+                100.0 * q.yes as f64 / n as f64,
+                100.0 * q.switches as f64 / n as f64
+            );
         }
         println!("   Literallaengen {}", hist(&lit_len_hist));
         println!("   Matchlaengen   {}", hist(&mat_len_hist));

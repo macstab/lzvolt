@@ -71,13 +71,14 @@ stream: 41 2c 4f 61 62 63 64 04 00 ff 16
 output-repeat: 61 62 63 64 * 75
 
 # The hybrid flag is set, so a trailer follows the body: in_at then out_at,
-# two bytes each because declared is under 65536. The wide section's match
+# two bytes each because declared is under 65536. The even section ends on a
+# block that carries a match, which it must. The wide section's match then
 # reaches back across the switch into what the even section produced.
 name: hybrid stream, even then wide
-stream: 60 64 f0 31 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63
+stream: 60 64 f0 2d 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63
   63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63
-  63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 3e 40 00 01
-  42 00 40 00
+  63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 63 01 00 3e 40 00 01 40 00
+  40 00
 output-repeat: 63 * 100
 
 # The class is the shortest that holds the length, which is the only

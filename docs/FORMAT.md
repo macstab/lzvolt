@@ -166,6 +166,23 @@ at the boundary, not the output.
 One thing does reset. The remembered offset that `R` refers to (below) belongs
 to the section, so the second section starts without one.
 
+And one rule is easy to miss, because it only bites at the boundary. **The
+first section's last block MUST carry a match.** A block with literals and no
+match is how a *stream* ends (see "Where a stream ends"); it is not how a
+section ends. A first section that finishes on one is malformed.
+
+> This was found by disagreement rather than by design, which is the reason it
+> is spelled out. A decoder may implement the switch two ways — running each
+> section to its own length, or running one loop and changing the split when
+> *produced* reaches `out_at` — and the two treat a literals-only block at the
+> boundary differently: the first stops, the second reads on and takes the
+> next section's token for an offset. This repository's two decoders happen to
+> take one approach each, and a hand-built test vector that ended the first
+> section on literals decoded under one and was refused by the other. No
+> encoder produces that shape, so nothing in practice depended on it — but a
+> specification that leaves it open has two conforming decoders that disagree,
+> which is the thing a specification exists to prevent.
+
 ## Blocks
 
 A section is a sequence of blocks with no count in front of them. Blocks are

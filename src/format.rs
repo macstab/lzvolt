@@ -76,7 +76,6 @@
 //! several times the CPU on both sides. If a namespace needs archival density
 //! it wants a different tool, not a slower version of this one.
 
-
 /// Shortest run worth encoding as a reference rather than as literals.
 ///
 /// Below four bytes a match costs more than it saves: the token plus a two-byte
@@ -444,7 +443,9 @@ impl std::fmt::Display for PackError {
             PackError::BadOffset => "backward reference points before the output",
             PackError::LengthMismatch => "packed value does not produce its declared length",
             PackError::TooLarge => "packed value declares an implausible length",
-            PackError::NonCanonicalHeader => "packed value's header is longer than its length needs",
+            PackError::NonCanonicalHeader => {
+                "packed value's header is longer than its length needs"
+            }
             PackError::OutputTooSmall => "output buffer is smaller than the declared length",
         })
     }
@@ -1397,7 +1398,6 @@ fn get_switch(bytes: &[u8]) -> usize {
     }
 }
 
-
 /// Length of the shared prefix, eight bytes at a time.
 ///
 /// A byte-wise loop costs a load, a compare and a branch per byte; a 64-bit
@@ -1801,7 +1801,9 @@ pub fn unpack(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
     if crate::kernel::decode::asm_available() {
         if let Ok(f) = frame(input) {
             let ok = match f.switch {
-                None => crate::kernel::decode::unpack_asm(f.body, out, f.declared, f.split.kernel()),
+                None => {
+                    crate::kernel::decode::unpack_asm(f.body, out, f.declared, f.split.kernel())
+                }
                 Some(switch) => crate::kernel::decode::unpack_asm_hybrid(
                     f.body,
                     out,
@@ -1907,7 +1909,9 @@ pub fn unpack_into(block: &[u8], out: &mut Vec<u8>, declared: usize) -> Result<(
     // nowhere else, by the shape of the call rather than by looking at the
     // bytes: a caller who has to hand over a length is holding a block that
     // does not carry one, and only LZ4 blocks do not carry one.
-    if crate::kernel::decode::asm_available() && crate::kernel::decode::unpack_lz4_asm(block, out, declared) {
+    if crate::kernel::decode::asm_available()
+        && crate::kernel::decode::unpack_lz4_asm(block, out, declared)
+    {
         return Ok(());
     }
     // The portable decoder wants the header, so give it one.
@@ -2014,11 +2018,7 @@ fn unpack_portable(input: &[u8], out: &mut Vec<u8>) -> Result<(), PackError> {
 /// `base` must be writable for `capacity` bytes. `capacity` **should** be at
 /// least `declared + OVERRUN`; less is safe but turns off the wide copies,
 /// which check it.
-unsafe fn unpack_framed(
-    f: Frame<'_>,
-    base: *mut u8,
-    capacity: usize,
-) -> Result<usize, PackError> {
+unsafe fn unpack_framed(f: Frame<'_>, base: *mut u8, capacity: usize) -> Result<usize, PackError> {
     let (declared, body) = (f.declared, f.body);
     let mut split = f.split;
     let switch_at = f.switch.map(|(_, out_at)| out_at);
@@ -2684,11 +2684,20 @@ mod tests {
     /// would be checked on one architecture only.
     #[test]
     fn the_kernel_reads_blocks_with_no_literals() {
+        // There is no kernel to test in a build without the assembly, and
+        // "the kernel refused all of them" is the correct answer there rather
+        // than a failure. Asserting otherwise made `--no-default-features`
+        // red the first time anyone ran it.
+        if !crate::kernel::decode::asm_available() {
+            return;
+        }
         let mut failed = Vec::new();
         let (mut decided, mut refused) = (0usize, 0usize);
 
         for offset in [1usize, 2, 7, 15, 16, 17, 31, 32, 33, 64, 255, 256, 1000] {
-            for mat in [4usize, 5, 14, 18, 19, 20, 31, 32, 33, 66, 200, 268, 269, 270, 271, 600] {
+            for mat in [
+                4usize, 5, 14, 18, 19, 20, 31, 32, 33, 66, 200, 268, 269, 270, 271, 600,
+            ] {
                 let seed: Vec<u8> = (0..offset.max(16) + 8)
                     .map(|i| (i as u8).wrapping_mul(31).wrapping_add(11))
                     .collect();
@@ -2737,14 +2746,18 @@ mod tests {
             }
         }
 
-        assert!(failed.is_empty(), "a block with no literals decoded wrong: {failed:?}");
+        assert!(
+            failed.is_empty(),
+            "a block with no literals decoded wrong: {failed:?}"
+        );
         // A refusal is a legitimate answer -- the caller falls back -- but it
         // is also how a broken fast path hides: it mis-frames the stream, the
         // next block fails a guard, and a test that only compares decoded
         // bytes stays green. Every one of these blocks is well formed and the
         // kernel decodes all of them today, so anything less is a regression.
         assert_eq!(
-            refused, 0,
+            refused,
+            0,
             "the kernel refused {refused} of {} well-formed blocks",
             decided + refused
         );
@@ -2943,10 +2956,7 @@ mod tests {
                     data.len(),
                 );
                 if !ok {
-                    refused.push(format!(
-                        "{label} on {body:?} ({} block bytes)",
-                        block.len()
-                    ));
+                    refused.push(format!("{label} on {body:?} ({} block bytes)", block.len()));
                     continue;
                 }
                 assert_eq!(
@@ -3229,9 +3239,12 @@ mod tests {
                 }
                 let f = frame(&packed).expect("the packer wrote a header");
                 let took = match f.switch {
-                    None => {
-                        crate::kernel::decode::unpack_asm(f.body, &mut out, f.declared, f.split.kernel())
-                    }
+                    None => crate::kernel::decode::unpack_asm(
+                        f.body,
+                        &mut out,
+                        f.declared,
+                        f.split.kernel(),
+                    ),
                     Some(switch) => crate::kernel::decode::unpack_asm_hybrid(
                         f.body,
                         &mut out,
@@ -3319,9 +3332,12 @@ mod tests {
             }
             let f = frame(&packed).expect("the packer wrote a header");
             let took = match f.switch {
-                None => {
-                    crate::kernel::decode::unpack_asm(f.body, &mut asm_out, f.declared, f.split.kernel())
-                }
+                None => crate::kernel::decode::unpack_asm(
+                    f.body,
+                    &mut asm_out,
+                    f.declared,
+                    f.split.kernel(),
+                ),
                 Some(switch) => crate::kernel::decode::unpack_asm_hybrid(
                     f.body,
                     &mut asm_out,
@@ -3395,9 +3411,12 @@ mod tests {
                 continue;
             };
             let took = match f.switch {
-                None => {
-                    crate::kernel::decode::unpack_asm(f.body, &mut asm_out, f.declared, f.split.kernel())
-                }
+                None => crate::kernel::decode::unpack_asm(
+                    f.body,
+                    &mut asm_out,
+                    f.declared,
+                    f.split.kernel(),
+                ),
                 Some(switch) => crate::kernel::decode::unpack_asm_hybrid(
                     f.body,
                     &mut asm_out,
@@ -3768,7 +3787,10 @@ mod tests {
         }
 
         assert!(seen_plain > 0, "no single-section case");
-        assert!(seen_hybrid > 0, "no hybrid case -- the two-kernel path is untested");
+        assert!(
+            seen_hybrid > 0,
+            "no hybrid case -- the two-kernel path is untested"
+        );
     }
 
     /// The published vectors are what this decoder actually does.

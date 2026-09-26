@@ -10,8 +10,10 @@ fn main() {
     let mut cases = 0usize;
 
     for seed in 0..64u64 {
-        for &len in &[1usize, 2, 15, 16, 17, 31, 32, 63, 64, 127, 269, 270, 271,
-                      512, 1000, 4096, 9000, 65_536] {
+        for &len in &[
+            1usize, 2, 15, 16, 17, 31, 32, 63, 64, 127, 269, 270, 271, 512, 1000, 4096, 9000,
+            65_536,
+        ] {
             for kind in 0..5 {
                 let data = make(kind, len, seed);
                 let block = lz4_block(&data);
@@ -24,11 +26,9 @@ fn main() {
                 // and EPYC ones -- which is where the AVX literal loop lives --
                 // went unexercised until a deliberate corruption in that loop
                 // failed to turn this red.
-                let ok = lzvolt::raw::Lz4Body::all()
-                    .iter()
-                    .all(|&body| {
-                        lzvolt::raw::unpack_lz4_into_slice_on(body, &block, &mut out, data.len())
-                    });
+                let ok = lzvolt::raw::Lz4Body::all().iter().all(|&body| {
+                    lzvolt::raw::unpack_lz4_into_slice_on(body, &block, &mut out, data.len())
+                });
                 cases += 1;
                 if !ok {
                     // A refusal is allowed -- the caller falls back -- but it
@@ -61,7 +61,9 @@ fn make(kind: u32, len: usize, seed: u64) -> Vec<u8> {
         // One enormous match: every extension byte the format has.
         0 => vec![0x41u8; len],
         // Long matches broken by single literals.
-        1 => (0..len).map(|i| if i % 400 == 0 { (i / 400) as u8 } else { 0x42 }).collect(),
+        1 => (0..len)
+            .map(|i| if i % 400 == 0 { (i / 400) as u8 } else { 0x42 })
+            .collect(),
         // Incompressible: one literal run over the whole value.
         2 => (0..len).map(|_| next() as u8).collect(),
         // Literal runs just past the nibble, matches just under it.

@@ -96,16 +96,24 @@ fn main() {
                     let b = body[at];
                     at += 1;
                     lit += b as usize;
-                    if b != 255 { break; }
+                    if b != 255 {
+                        break;
+                    }
                 }
             }
-            if lit >= 7 { chain_then += 1; }
+            if lit >= 7 {
+                chain_then += 1;
+            }
             at += lit;
             blocks += 1;
-            if at + 1 >= body.len() { break; }
+            if at + 1 >= body.len() {
+                break;
+            }
             let offset = u16::from_le_bytes([body[at], body[at + 1]]) as usize;
             at += 2;
-            if offset == last_offset { repeats += 1; }
+            if offset == last_offset {
+                repeats += 1;
+            }
             last_offset = offset;
             let mut mat = (token & 0x0F) as usize;
             if mat == 15 {
@@ -113,7 +121,9 @@ fn main() {
                     let b = body[at];
                     at += 1;
                     mat += b as usize;
-                    if b != 255 { break; }
+                    if b != 255 {
+                        break;
+                    }
                 }
             }
         }

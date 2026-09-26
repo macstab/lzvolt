@@ -10,7 +10,14 @@ use lzvolt::format;
 /// format work landed. Pass "varied" on the command line for the other one.
 fn noise(total: usize) -> Vec<u8> {
     let mut st = 0x2545_F491_4F6C_DD1Du64;
-    (0..total).map(|_| { st ^= st << 13; st ^= st >> 7; st ^= st << 17; st as u8 }).collect()
+    (0..total)
+        .map(|_| {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            st as u8
+        })
+        .collect()
 }
 
 fn records(total: usize) -> Vec<u8> {
@@ -104,10 +111,17 @@ fn main() {
         };
         block.truncate(n as usize);
         let mut out = vec![0u8; data.len() + 64];
-        let rounds: u64 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(u64::MAX);
+        let rounds: u64 = std::env::args()
+            .nth(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(u64::MAX);
         let mut sink = 0u64;
         for _ in 0..rounds {
-            assert!(lzvolt::raw::unpack_lz4_into_slice(&block, &mut out, data.len()));
+            assert!(lzvolt::raw::unpack_lz4_into_slice(
+                &block,
+                &mut out,
+                data.len()
+            ));
             sink = sink.wrapping_add(out[0] as u64);
         }
         println!("{sink}");

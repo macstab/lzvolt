@@ -557,13 +557,7 @@ fn own_format(c: &mut Criterion) {
             None => lzvolt::raw::unpack_into_slice(body, mine, data.len(), split),
             Some((in_at, out_at)) => {
                 lzvolt::raw::unpack_section(&body[..in_at], mine, out_at, 0, split)
-                    && lzvolt::raw::unpack_section(
-                        &body[in_at..],
-                        mine,
-                        data.len(),
-                        out_at,
-                        other,
-                    )
+                    && lzvolt::raw::unpack_section(&body[in_at..], mine, data.len(), out_at, other)
             }
         };
         assert!(decode(&body, &mut mine));
