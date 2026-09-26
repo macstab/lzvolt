@@ -1,10 +1,12 @@
 //! Runtime CPU feature detection.
 //!
-//! [`ctrl_match`](crate::ctrl_match) does not use this: SSE2 and NEON are
-//! architectural baselines, so its kernel is selected at compile time with no
-//! branch. Dispatch exists for the *wide* kernels that are coming next -- the
-//! expiry sweep and eviction sampling, which stream over millions of entries
-//! and where 256- or 512-bit vectors genuinely pay.
+//! The codec dispatches on two things and not one. The instruction set says
+//! what a body *may* execute -- the Xeon and EPYC decoders copy 256 bits at a
+//! time, so calling one on a part without AVX2 is an illegal instruction rather
+//! than a slow answer. The part line says which body is *worth* running, and
+//! that is a separate question with a measured answer: the same source has come
+//! back with opposite signs on two parts often enough that "x86" stopped being
+//! one target here.
 //!
 //! Two things worth knowing before reaching for AVX-512:
 //!

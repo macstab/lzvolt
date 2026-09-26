@@ -2,7 +2,7 @@ use std::env;
 
 fn main() {
     println!("cargo:rerun-if-changed=asm");
-    println!("cargo:rustc-check-cfg=cfg(lzv_asm)");
+    println!("cargo:rustc-check-cfg=cfg(lzvolt_asm)");
 
     if env::var_os("CARGO_FEATURE_ASM").is_none() {
         return;
@@ -47,7 +47,7 @@ fn main() {
     // The `.S` extension means the assembler runs the C preprocessor first,
     // which is how the files pick the right symbol decoration for Mach-O
     // versus ELF.
-    build.compile("lzv_asm_kernels");
+    build.compile("lzvolt_asm_kernels");
 
-    println!("cargo:rustc-cfg=lzv_asm");
+    println!("cargo:rustc-cfg=lzvolt_asm");
 }

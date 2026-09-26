@@ -10,7 +10,7 @@
 //! The length header and every error message. The kernel is handed a body and a
 //! length and answers one question: did it decode. On anything else — a
 //! malformed stream, a buffer without the slack the checks assume — it returns
-//! zero and [`unpack_asm`] reports that the caller should run the portable
+//! zero and `unpack_asm` reports that the caller should run the portable
 //! decoder, which produces the precise error. A stream only fails when it is
 //! corrupt, so decoding it twice costs nothing that matters, and there is one
 //! definition of every error rather than two that can drift.
@@ -29,7 +29,7 @@
 /// size at the end, so nothing ever reads what they wrote past it.
 pub const UNPACK_SLACK: usize = 64;
 
-#[cfg(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[cfg(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
 extern "C" {
     fn keva_unpack(
         src: *const u8,
@@ -54,7 +54,7 @@ extern "C" {
 
 // One pair per part line, picked at run time. Declared only where they exist:
 // nothing outside x86-64 links them.
-#[cfg(all(lzv_asm, target_arch = "x86_64"))]
+#[cfg(all(lzvolt_asm, target_arch = "x86_64"))]
 extern "C" {
     /// Even split, any SSSE3 part whose brand names no line.
     fn keva_unpack_ssse3(
@@ -163,7 +163,7 @@ extern "C" {
 // least five bytes with no match inside the last twelve; our packer emits
 // matches up to the final byte, so nothing derived from that promise may live
 // in the body our own values run.
-#[cfg(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[cfg(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
 extern "C" {
     fn keva_unpack_lz4(
         src: *const u8,
@@ -180,7 +180,7 @@ extern "C" {
 // Neoverse V2's copy loop aligns its destination before it streams and the
 // generic one does not, because the same change measures opposite signs on this
 // architecture's two parts. See `asm/aarch64/unpack_lz4_neoverse.S`.
-#[cfg(all(lzv_asm, target_arch = "aarch64"))]
+#[cfg(all(lzvolt_asm, target_arch = "aarch64"))]
 extern "C" {
     fn keva_unpack_lz4_neoverse(
         src: *const u8,
@@ -198,7 +198,7 @@ extern "C" {
 ///
 /// The caller owes what the kernels' contract asks: `dst_cap` bytes writable at
 /// `dst`, `src_len` readable at `src`.
-#[cfg(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[cfg(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[inline]
 unsafe fn run(
     split: Split,
@@ -272,7 +272,7 @@ impl Lz4Body {
     /// instruction rather than a failed assertion. Dispatch would never pick
     /// them there, and neither does this.
     pub fn all() -> &'static [Lz4Body] {
-        #[cfg(all(lzv_asm, target_arch = "x86_64"))]
+        #[cfg(all(lzvolt_asm, target_arch = "x86_64"))]
         {
             if crate::cpu::features().avx2 {
                 &[
@@ -290,11 +290,11 @@ impl Lz4Body {
         // Neoverse body from an Apple host. That matters -- the x86 line bodies
         // went unexercised on this machine for as long as `all()` withheld them,
         // and a kernel nobody runs is a kernel nobody tests.
-        #[cfg(all(lzv_asm, target_arch = "aarch64"))]
+        #[cfg(all(lzvolt_asm, target_arch = "aarch64"))]
         {
             &[Lz4Body::Baseline, Lz4Body::NeoverseV2]
         }
-        #[cfg(not(all(lzv_asm, any(target_arch = "x86_64", target_arch = "aarch64"))))]
+        #[cfg(not(all(lzvolt_asm, any(target_arch = "x86_64", target_arch = "aarch64"))))]
         {
             &[Lz4Body::Baseline]
         }
@@ -302,7 +302,7 @@ impl Lz4Body {
 }
 
 /// The body this machine gets, from the cached feature set.
-#[cfg(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[cfg(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[inline]
 fn detect_lz4_body() -> Lz4Body {
     #[cfg(target_arch = "x86_64")]
@@ -345,11 +345,11 @@ fn detect_lz4_body() -> Lz4Body {
 /// [`unpack_lz4_into_slice_on`] with the answer hoisted out of the loop and
 /// comparing that against [`unpack_lz4_into_slice`], which asks again per call.
 pub fn lz4_body() -> Lz4Body {
-    #[cfg(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         detect_lz4_body()
     }
-    #[cfg(not(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    #[cfg(not(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
     {
         Lz4Body::Baseline
     }
@@ -364,7 +364,7 @@ pub fn lz4_body() -> Lz4Body {
 /// # Safety
 ///
 /// As [`run`]: `dst_cap` bytes writable at `dst`, `src_len` readable at `src`.
-#[cfg(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[cfg(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
 #[inline]
 unsafe fn run_lz4(
     body: Lz4Body,
@@ -402,13 +402,13 @@ pub fn unpack_lz4_into_slice_on(
     dst: &mut [u8],
     declared: usize,
 ) -> bool {
-    #[cfg(not(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    #[cfg(not(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
     {
         let _ = (body, src, dst, declared);
         false
     }
 
-    #[cfg(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         if declared == 0 {
             return false;
@@ -445,13 +445,13 @@ pub fn unpack_lz4_into_slice_on(
 /// `dst` must be at least `declared + UNPACK_SLACK` long; the kernel refuses
 /// otherwise. Returns whether it decoded.
 pub fn unpack_lz4_into_slice(src: &[u8], dst: &mut [u8], declared: usize) -> bool {
-    #[cfg(not(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    #[cfg(not(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
     {
         let _ = (src, dst, declared);
         false
     }
 
-    #[cfg(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         if declared == 0 {
             return false;
@@ -483,7 +483,7 @@ pub enum Split {
 ///
 /// `dst` must be at least `declared + UNPACK_SLACK` long; the kernel refuses
 /// otherwise. Returns whether it decoded; a `false` means the caller should run
-/// the portable decoder, exactly as with [`unpack_asm`].
+/// the portable decoder, exactly as with `unpack_asm`.
 pub fn unpack_into_slice(src: &[u8], dst: &mut [u8], declared: usize, split: Split) -> bool {
     unpack_section(src, dst, declared, 0, split)
 }
@@ -496,7 +496,7 @@ pub fn unpack_into_slice(src: &[u8], dst: &mut [u8], declared: usize, split: Spl
 /// what the first wrote -- the window does not restart at the boundary.
 ///
 /// `start == 0` is the whole-value case and is what [`unpack_into_slice`] and
-/// [`unpack_asm`] use.
+/// `unpack_asm` use.
 pub fn unpack_section(
     src: &[u8],
     dst: &mut [u8],
@@ -504,13 +504,13 @@ pub fn unpack_section(
     start: usize,
     split: Split,
 ) -> bool {
-    #[cfg(not(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    #[cfg(not(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
     {
         let _ = (src, dst, declared, start, split);
         false
     }
 
-    #[cfg(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         if declared == 0 || start >= declared {
             return false;
@@ -543,7 +543,7 @@ pub fn unpack_section(
 /// Both offsets come off the wire and are treated as hostile: they are checked
 /// against the body and the declared length here, and everything past that is
 /// the kernel's own bounds. A `false` means "run the portable decoder", exactly
-/// as with [`unpack_asm`].
+/// as with `unpack_asm`.
 pub fn unpack_asm_hybrid(
     body: &[u8],
     out: &mut Vec<u8>,
@@ -552,13 +552,13 @@ pub fn unpack_asm_hybrid(
     first: Split,
     second: Split,
 ) -> bool {
-    #[cfg(not(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    #[cfg(not(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
     {
         let _ = (body, out, declared, switch, first, second);
         false
     }
 
-    #[cfg(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         let (in_at, out_at) = switch;
         if declared == 0 || out_at == 0 || out_at >= declared || in_at > body.len() {
@@ -607,7 +607,7 @@ pub fn unpack_asm_hybrid(
 /// Whether this build has an assembly decoder.
 pub const fn asm_available() -> bool {
     cfg!(all(
-        lzv_asm,
+        lzvolt_asm,
         any(target_arch = "aarch64", target_arch = "x86_64")
     ))
 }
@@ -620,13 +620,13 @@ pub const fn asm_available() -> bool {
 /// definitely corrupt, so the caller must fall back rather than report an
 /// error.
 pub fn unpack_asm(body: &[u8], out: &mut Vec<u8>, declared: usize, split: Split) -> bool {
-    #[cfg(not(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    #[cfg(not(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
     {
         let _ = (body, out, declared, split);
         false
     }
 
-    #[cfg(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         // Zero is how the kernel says it declined, so it cannot also be how it
         // reports success. An empty value is the portable decoder's business.
@@ -673,19 +673,19 @@ pub fn unpack_asm(body: &[u8], out: &mut Vec<u8>, declared: usize, split: Split)
     }
 }
 
-/// [`unpack_asm`] for a block somebody else wrote.
+/// `unpack_asm` for a block somebody else wrote.
 ///
 /// Same buffer handling, the LZ4 body instead of ours. See
 /// [`unpack_lz4_into_slice`] for why the two are separate symbols and how the
 /// formats are told apart.
 pub fn unpack_lz4_asm(block: &[u8], out: &mut Vec<u8>, declared: usize) -> bool {
-    #[cfg(not(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
+    #[cfg(not(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64"))))]
     {
         let _ = (block, out, declared);
         false
     }
 
-    #[cfg(all(lzv_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[cfg(all(lzvolt_asm, any(target_arch = "aarch64", target_arch = "x86_64")))]
     {
         if declared == 0 {
             return false;

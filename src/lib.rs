@@ -1,6 +1,12 @@
-//! A byte-oriented LZ77 codec with a per-value token layout.
+//! LZ, variable: a byte-oriented LZ77 codec that picks its token layout per
+//! value instead of fixing one for all data.
 //!
-//! `lzv` compresses and decompresses small-to-medium values — the sizes a cache
+//! The `v` is the whole idea. LZ4 spends four bits of every token on the
+//! literal length and four on the match length, once, for everything it will
+//! ever compress. `lzvolt` carries two layouts and writes in the header which
+//! one a value used -- and a value may switch partway.
+//!
+//! `lzvolt` compresses and decompresses small-to-medium values — the sizes a cache
 //! or a key-value store actually holds — and it reads and writes LZ4 blocks as
 //! well, so it can be dropped in front of data somebody else compressed.
 //!
@@ -8,9 +14,9 @@
 //! let data = br#"{"id":1,"tenant":"tenant42","role":"member"}"#;
 //!
 //! let mut packed = Vec::new();
-//! if lzv::compress(data, &mut packed) {
+//! if lzvolt::compress(data, &mut packed) {
 //!     let mut out = Vec::new();
-//!     lzv::decompress(&packed, &mut out).unwrap();
+//!     lzvolt::decompress(&packed, &mut out).unwrap();
 //!     assert_eq!(out, data);
 //! }
 //! ```
@@ -21,7 +27,7 @@
 //! token on the literal length and four on the match length. That split is a
 //! compromise across all data, and for data that compresses well it is the
 //! wrong one: counting real blocks, the match length overflows four bits in 99%
-//! of them at a six-fold ratio. `lzv` carries two layouts — four/four, and two
+//! of them at a six-fold ratio. `lzvolt` carries two layouts — four/four, and two
 //! literal bits with five match bits and one bit meaning "the offset the last
 //! block used" — and writes in the header which one a value used. A value may
 //! even switch partway, which is one call per section to the decoder.

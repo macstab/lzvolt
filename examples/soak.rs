@@ -24,10 +24,10 @@ fn main() {
                 // and EPYC ones -- which is where the AVX literal loop lives --
                 // went unexercised until a deliberate corruption in that loop
                 // failed to turn this red.
-                let ok = lzv::raw::Lz4Body::all()
+                let ok = lzvolt::raw::Lz4Body::all()
                     .iter()
                     .all(|&body| {
-                        lzv::raw::unpack_lz4_into_slice_on(body, &block, &mut out, data.len())
+                        lzvolt::raw::unpack_lz4_into_slice_on(body, &block, &mut out, data.len())
                     });
                 cases += 1;
                 if !ok {

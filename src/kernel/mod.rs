@@ -33,9 +33,9 @@
 //!
 //! # Correctness
 //!
-//! Every kernel has a scalar reference implementation in [`scalar`], and the
-//! differential tests assert that all backends agree on exhaustive or randomly
-//! generated inputs. The scalar path is a supported configuration, not a
+//! Every kernel has a portable reference in `format`, reachable by building
+//! without the `asm` feature, and the differential tests assert that the two
+//! agree. The portable path is a supported configuration, not a
 //! fallback of last resort: building with `--no-default-features` disables the
 //! assembly entirely and must still pass the full test suite.
 
@@ -55,12 +55,12 @@ pub mod decode;
 
 pub const fn asm_enabled() -> bool {
     cfg!(all(
-        lzv_asm,
+        lzvolt_asm,
         any(target_arch = "aarch64", target_arch = "x86_64")
     ))
 }
 
-/// Human-readable name of the backend serving [`ctrl_match`], for `INFO`.
+/// Human-readable name of the selected backend, for labelling a measurement.
 ///
 /// A benchmark number that cannot be traced back to the code path that produced
 /// it is worthless, so this is reported alongside every result.

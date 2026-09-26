@@ -9,7 +9,7 @@
 //! compiled and measured is what makes either claim falsifiable.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use lzv::kernel::encode::{self, PackState, SKIP_TRIGGER, TABLE_SIZE};
+use lzvolt::kernel::encode::{self, PackState, SKIP_TRIGGER, TABLE_SIZE};
 
 fn records(total: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(total);

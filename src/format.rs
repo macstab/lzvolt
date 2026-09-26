@@ -29,11 +29,11 @@
 //! as an offset into the body and the count of bytes produced so far. Both are
 //! two bytes for a value up to 64 KiB and four above it, a width that follows
 //! from `declared` alone so the decoder knows it before it needs it. See
-//! [`Split`] and [`switch_width`].
+//! `Split` and `switch_width` below.
 //!
 //! Compatibility with LZ4 runs one way, and both directions are tested.
-//! [`our_decoder_reads_what_liblz4_wrote`] passes: an LZ4 block decodes here
-//! correctly. [`liblz4_refuses_what_we_wrote`] also passes, and that is the
+//! `our_decoder_reads_what_liblz4_wrote` passes: an LZ4 block decodes here
+//! correctly. `liblz4_refuses_what_we_wrote` also passes, and that is the
 //! interesting one — the even split *is* the LZ4 token layout, so the body of
 //! such a value looks like an LZ4 block. It is not one. LZ4 also constrains
 //! where a block may end, and this packer enforces none of that: it runs
@@ -348,7 +348,7 @@ impl PortablePacker {
 /// test that says they do not is the only reason either is trusted.
 ///
 /// So the width is measured first and migrated afterwards, both sides together.
-/// [`Slot::LIMIT`] bounds what this may be handed.
+/// `Slot::LIMIT` bounds what this may be handed.
 #[derive(Debug)]
 pub struct NarrowPacker {
     table: Box<[u16; HASH_SIZE]>,

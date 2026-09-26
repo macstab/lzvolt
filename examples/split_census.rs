@@ -5,7 +5,7 @@
 //! braucht, wo heute erst fuenfzehn eine ausloest. Der Gewinn sind die
 //! Bloecke, deren Offset der vorige schon war.
 
-use lzv::format;
+use lzvolt::format;
 
 fn records(total: usize) -> Vec<u8> {
     let (mut o, mut i) = (Vec::new(), 0u64);

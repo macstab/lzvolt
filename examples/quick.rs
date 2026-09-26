@@ -22,7 +22,7 @@
 //! error bar: when it moves, the machine moved, and our column has to be read
 //! against it rather than against the baseline.
 
-use lzv::format;
+use lzvolt::format;
 use std::time::Instant;
 
 const BASELINE: &str = "bench-results/quick.txt";
@@ -64,7 +64,7 @@ fn main() {
             let (ours, theirs, spread) = time_pair(
                 CELL_MS,
                 || {
-                    assert!(lzv::raw::unpack_lz4_into_slice(
+                    assert!(lzvolt::raw::unpack_lz4_into_slice(
                         block,
                         &mut dst_a[..len + 64],
                         len
@@ -204,7 +204,7 @@ fn time_pair(budget_ms: u128, mut a: impl FnMut(), mut b: impl FnMut()) -> (f64,
 /// dispatch and everything else.
 #[cfg(feature = "liblz4")]
 fn entry_cost() {
-    let body = lzv::raw::lz4_body();
+    let body = lzvolt::raw::lz4_body();
     println!("Body: {body:?}\n");
     let mut rows: Vec<(&str, f64, f64)> = Vec::new();
     for (label, n) in [("512", 512usize), ("4096", 4096)] {
@@ -219,14 +219,14 @@ fn entry_cost() {
         let with = {
             let d = &mut *dst;
             time(400, || {
-                assert!(lzv::raw::unpack_lz4_into_slice(block, d, len));
+                assert!(lzvolt::raw::unpack_lz4_into_slice(block, d, len));
             })
             .0
         };
         let without = {
             let d = &mut *dst;
             time(400, || {
-                assert!(lzv::raw::unpack_lz4_into_slice_on(body, block, d, len));
+                assert!(lzvolt::raw::unpack_lz4_into_slice_on(body, block, d, len));
             })
             .0
         };

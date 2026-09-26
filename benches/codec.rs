@@ -12,7 +12,7 @@
 //! slow packer costs far less than the raw ratio suggests.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use lzv::format;
+use lzvolt::format;
 
 /// Record-shaped, which is what a store actually holds. A run of identical
 /// bytes would report a throughput no real value ever reaches, because the
@@ -139,7 +139,7 @@ fn packing(c: &mut Criterion) {
 /// crosses once per value, so what shows up here is the kernel's real margin
 /// rather than the boundary's cost.
 fn packing_asm(c: &mut Criterion) {
-    if !lzv::kernel::encode::asm_available() {
+    if !lzvolt::kernel::encode::asm_available() {
         return;
     }
     let mut group = c.benchmark_group("pack/asm");
@@ -156,9 +156,9 @@ fn packing_asm(c: &mut Criterion) {
 
         group.bench_function(BenchmarkId::new("asm", label), |b| {
             let mut out = Vec::with_capacity(data.len() + 16);
-            let mut table = lzv::kernel::encode::new_table();
+            let mut table = lzvolt::kernel::encode::new_table();
             b.iter(|| {
-                black_box(lzv::kernel::encode::pack_asm(
+                black_box(lzvolt::kernel::encode::pack_asm(
                     black_box(&data),
                     &mut out,
                     &mut table,
@@ -195,9 +195,9 @@ fn sizes(c: &mut Criterion) {
 
         group.bench_function(BenchmarkId::new("pack", bytes), |b| {
             let mut out = Vec::with_capacity(bytes + 16);
-            let mut table = lzv::kernel::encode::new_table();
+            let mut table = lzvolt::kernel::encode::new_table();
             b.iter(|| {
-                black_box(lzv::kernel::encode::pack_asm(
+                black_box(lzvolt::kernel::encode::pack_asm(
                     black_box(&data),
                     &mut out,
                     &mut table,
@@ -384,14 +384,14 @@ fn same_bytes(c: &mut Criterion) {
         // The LZ4 body, which is what a foreign block reaches in production
         // too. Identical to the even body today; the point of the separation is
         // that it stops being so without our own format's timings moving.
-        assert!(lzv::raw::unpack_lz4_into_slice(
+        assert!(lzvolt::raw::unpack_lz4_into_slice(
             &block,
             &mut mine,
             data.len()
         ));
         group.bench_function(BenchmarkId::new("keva", label), |b| {
             b.iter(|| {
-                black_box(lzv::raw::unpack_lz4_into_slice(
+                black_box(lzvolt::raw::unpack_lz4_into_slice(
                     black_box(&block),
                     &mut mine,
                     data.len(),
@@ -478,11 +478,11 @@ fn own_format(c: &mut Criterion) {
         let (body, split, other, switch) = if packed {
             let (_declared, hybrid, header) = header_of(&ours);
             // Nothing starts in the wide split; it is reached only by switching.
-            let split = lzv::raw::Split::Even;
-            let other = if split == lzv::raw::Split::Even {
-                lzv::raw::Split::WideMatch
+            let split = lzvolt::raw::Split::Even;
+            let other = if split == lzvolt::raw::Split::Even {
+                lzvolt::raw::Split::WideMatch
             } else {
-                lzv::raw::Split::Even
+                lzvolt::raw::Split::Even
             };
             // A value that changes split partway is two calls, and it is
             // measured as two -- that is what its reader actually pays.
@@ -508,8 +508,8 @@ fn own_format(c: &mut Criterion) {
             // them. They exist so the decode closure has one shape.
             (
                 Vec::new(),
-                lzv::raw::Split::Even,
-                lzv::raw::Split::Even,
+                lzvolt::raw::Split::Even,
+                lzvolt::raw::Split::Even,
                 None,
             )
         };
@@ -554,10 +554,10 @@ fn own_format(c: &mut Criterion) {
         let mut mine = vec![0u8; data.len() + 64];
         let mut yours = vec![0u8; data.len() + 64];
         let decode = |body: &[u8], mine: &mut [u8]| match switch {
-            None => lzv::raw::unpack_into_slice(body, mine, data.len(), split),
+            None => lzvolt::raw::unpack_into_slice(body, mine, data.len(), split),
             Some((in_at, out_at)) => {
-                lzv::raw::unpack_section(&body[..in_at], mine, out_at, 0, split)
-                    && lzv::raw::unpack_section(
+                lzvolt::raw::unpack_section(&body[..in_at], mine, out_at, 0, split)
+                    && lzvolt::raw::unpack_section(
                         &body[in_at..],
                         mine,
                         data.len(),
@@ -704,12 +704,12 @@ fn production(c: &mut Criterion) {
         if packed {
             let (_declared, hybrid, header) = header_of(&ours);
             // Nothing starts in the wide split; it is reached only by switching.
-            let split = lzv::raw::Split::Even;
+            let split = lzvolt::raw::Split::Even;
             let body = ours[header..].to_vec();
             if !hybrid {
                 group.bench_function(BenchmarkId::new("keva_framed", label), |b| {
                     b.iter(|| {
-                        black_box(lzv::raw::unpack_asm(
+                        black_box(lzvolt::raw::unpack_asm(
                             black_box(&body),
                             &mut mine,
                             data.len(),
