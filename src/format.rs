@@ -8,17 +8,25 @@
 //! # Format
 //!
 //! ```text
-//! [header: varint][block][block]...[switch: 2x2 or 2x4 bytes, if hybrid]
+//! [header: 1-4 bytes][block][block]...[switch: 2x2 or 2x4 bytes, if hybrid]
 //!
-//! header := varint(declared << 2 | hybrid << 1 | split)
-//!           split  = 0 -> 4/4 token, 1 -> 2/6 token
-//!           hybrid = 1 -> the stream changes split once, see the trailer
+//! header := [cc h ppppp][more payload, most significant first]
+//!           cc     = class, the header is cc+1 bytes long
+//!           h      = hybrid: the stream changes split once, see the trailer
+//!                    (class 0 has no room for it and needs none)
+//!           p      = declared, big-endian across the header's bytes
 //!
 //! block  := [token: u8][extended literal length][literals]
 //!           [offset: u16][extended match length]
-//!           token literal field: 15 (or 3) means "read more"
-//!           token match field:   the same, and holds length - 4
+//!           even token: 4 bits literal, 4 bits match
+//!           wide token: 2 bits literal, 5 bits match, 1 bit repeat
+//!           a field at its maximum means "read an extension chain"
+//!           the match field holds length - 4
 //! ```
+//!
+//! There is no split bit. A stream that is not hybrid is even throughout, and
+//! the wide layout is reachable only through the switch. `docs/FORMAT.md` is
+//! the normative description; this is the sketch.
 //!
 //! The final block carries literals and no match, which is what terminates the
 //! stream — decoding stops when the declared length has been produced.
@@ -1201,8 +1209,9 @@ fn pack_pass<const SHIFT: u32, S: Slot>(
         let literals = &input[literal_start..at - back];
         let wide = wide_literals_fit(literals, at - back, input.len());
         let offset = at - candidate;
-        // Only the layout that has the bit may claim a repeat; the wide split
-        // spends all eight token bits on lengths.
+        // Only the layout that has the bit may claim a repeat: the even split
+        // spends all eight token bits on lengths, the wide one keeps the low
+        // bit for this.
         let repeat = split.rep_bits == 1 && offset == last_offset;
         last_offset = offset;
         emit_block(
@@ -1473,8 +1482,6 @@ struct Split {
     rep_bits: u32,
 }
 
-/// Three for the literal run, four for the match, one for the repeat.
-///
 /// Four bits each, which is also the LZ4 block format.
 ///
 /// The repeat bit was taken out of this field and put back: it cost 22.9% on
