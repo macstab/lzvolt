@@ -125,8 +125,19 @@ clippy: ## Lint, warnings are errors
 doc: ## Build the API documentation, warnings are errors
 	RUSTDOCFLAGS="-D warnings" $(CARGO) doc --no-deps
 
+.PHONY: lint-workflows
+lint-workflows: ## Validate the GitHub Actions files (needs actionlint)
+	@if command -v actionlint > /dev/null; then \
+	  actionlint && echo "  workflows are valid"; \
+	else \
+	  echo "  actionlint not installed, skipping."; \
+	  echo "  A workflow can be valid YAML and invalid Actions schema --"; \
+	  echo "  `secrets` in a job-level `if` cost one silent release. Install it:"; \
+	  echo "    brew install actionlint"; \
+	fi
+
 .PHONY: check
-check: fmt-check clippy doc test header-check c-example ## Everything CI runs
+check: fmt-check clippy doc test header-check c-example lint-workflows ## Everything CI runs
 	@echo
 	@echo "  all checks passed"
 
