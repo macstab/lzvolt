@@ -51,6 +51,12 @@ in [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md).
   your buffer with no copy; compression copies its result once, which the
   header says where a caller will see it.
 - Builds as `rlib`, `staticlib` and `cdylib`.
+- **Build-system integration:** `lzvolt.pc` for pkg-config and a relocatable
+  CMake package config, installed by `make install` and attached to the
+  release. `pkg-config --cflags --libs lzvolt` and
+  `find_package(lzvolt 1.0 REQUIRED)` both work; both were verified by
+  building and running a consumer against an installed tree, not by
+  inspection.
 
 ### Format and conformance
 
