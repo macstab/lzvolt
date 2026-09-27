@@ -62,8 +62,13 @@ make check
 
 is what runs: the suite with the assembly and without it, clippy with no
 warnings, rustdoc with no warnings, `cargo fmt --check`, and the C example
-compiled against the real static library under `-Wall -Wextra`. Miri and the
-sanitisers run on pull requests; the cross-build matrix runs on top of that.
+compiled against the real static library under `-Wall -Wextra`. Miri,
+AddressSanitizer and `-Zub-checks` run on pull requests; the cross-build
+matrix runs on top of that.
+
+Rust has no UBSan, whatever a checklist suggests — `-Zsanitizer=undefined`
+fails the build. `-Zub-checks` is the substitute, and Miri is what actually
+reads the `unsafe`.
 
 ## Correctness before anything
 

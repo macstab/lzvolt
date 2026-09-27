@@ -84,7 +84,7 @@ jobs:
       - run: make miri
 
   sanitizers:
-    name: asan and ubsan
+    name: asan and ub-checks
     runs-on: ubuntu-24.04
     needs: lint
     steps:
@@ -93,7 +93,10 @@ jobs:
         with:
           components: rust-src
       - uses: Swatinem/rust-cache@v2
-      # These *do* cover the assembly, which is the half Miri cannot reach.
+      # AddressSanitizer *does* cover the assembly, which is the half Miri
+      # cannot reach. Rust has no UBSan to pair with it -- asking for one is a
+      # build error, not a no-op -- so `-Zub-checks` stands in, and `make
+      # sanitize` runs both.
       - run: make sanitize
 
   benchmark-gate:

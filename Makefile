@@ -64,11 +64,22 @@ miri-full: ## The same at full size. Hours, not minutes. Scheduled, not per chan
 	  LZVOLT_MIRI_FULL=1 \
 	  $(CARGO) +nightly miri test --no-default-features --lib format -- --nocapture
 
+# Rust has no UBSan. `-Zsanitizer` takes address, thread, memory, leak and
+# friends -- `undefined` is not on the list, and asking for it fails the build
+# rather than silently doing nothing. Undefined behaviour is Miri's job here,
+# plus `-Zub-checks`, which turns on the standard library's own UB assertions.
+# The two together are what this target means by "sanitised".
 .PHONY: sanitize
-sanitize: ## Address and undefined-behaviour sanitisers (needs nightly)
+sanitize: asan ub-checks ## AddressSanitizer and the library UB checks (needs nightly)
+
+.PHONY: asan
+asan: ## AddressSanitizer. Covers the assembly, which Miri cannot execute.
 	RUSTFLAGS="-Zsanitizer=address" \
 	  $(CARGO) +nightly test --release --target $(shell rustc -vV | sed -n 's/host: //p') --lib
-	RUSTFLAGS="-Zsanitizer=undefined" \
+
+.PHONY: ub-checks
+ub-checks: ## The standard library's UB assertions, at release optimisation
+	RUSTFLAGS="-Zub-checks -Cdebug-assertions=on" \
 	  $(CARGO) +nightly test --release --target $(shell rustc -vV | sed -n 's/host: //p') --lib
 
 .PHONY: soak

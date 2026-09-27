@@ -196,7 +196,8 @@ front of them is the only thing between a malformed stream and memory
 unsafety. They are held to that by fuzzing every truncation and every
 single-bit flip of a packed stream, thousands of multi-byte corruptions,
 streams that were never packed at all, differential testing against the
-portable decoder and against liblz4, and the whole set under Miri.
+portable decoder and against liblz4, the whole set under Miri, and
+AddressSanitizer over the assembly — which is the half Miri cannot execute.
 
 ---
 

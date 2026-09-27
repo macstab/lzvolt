@@ -56,8 +56,11 @@ byte.
 Two things check the `unsafe` itself, and they divide the work because one of
 them is slow:
 
-- **The sanitisers** (address and undefined-behaviour) run on every change and
-  do cover the assembly, which is the half Miri cannot execute.
+- **AddressSanitizer** runs on every change and does cover the assembly,
+  which is the half Miri cannot execute. There is no UBSan to pair it with —
+  Rust does not have one, whatever a checklist may suggest — so the other half
+  is `-Zub-checks`, which turns on the standard library's own UB assertions
+  under release optimisation.
 - **Miri** runs on every change at reduced volume, and at full volume on a
   schedule. The reduction is deliberate and measured: one test that takes a
   hundredth of a second natively took **2229 seconds** under Miri, almost all
