@@ -79,3 +79,33 @@ jobs:
             target/${{ matrix.target }}/release/liblzvolt.a
             target/${{ matrix.target }}/release/liblzvolt.dylib
           retention-days: 7
+
+  windows:
+    name: windows ${{ matrix.arch }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-pc-windows-msvc, arch: amd64, native: true }
+          - { target: aarch64-pc-windows-msvc, arch: arm64, native: false }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: rustup target add ${{ matrix.target }}
+      # No assembly here: the kernels are GAS with ELF/Mach-O directives and
+      # COFF will not take them, so Windows runs the portable decoder. It is
+      # slower and it is correct, and the same tests prove it.
+      - run: cargo build --release --target ${{ matrix.target }}
+      - if: matrix.native
+        run: cargo test --release --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows-${{ matrix.arch }}
+          path: |
+            target/${{ matrix.target }}/release/lzvolt.dll
+            target/${{ matrix.target }}/release/lzvolt.dll.lib
+            target/${{ matrix.target }}/release/lzvolt.lib
+          retention-days: 7
+          if-no-files-found: warn

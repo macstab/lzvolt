@@ -88,10 +88,39 @@ jobs:
           path: dist/
           retention-days: 7
 
+  windows:
+    name: windows binaries ${{ matrix.arch }}
+    runs-on: windows-latest
+    needs: verify
+    strategy:
+      matrix:
+        include:
+          - { target: x86_64-pc-windows-msvc, arch: amd64 }
+          - { target: aarch64-pc-windows-msvc, arch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - name: Collect
+        shell: bash
+        run: |
+          mkdir -p dist
+          t=target/${{ matrix.target }}/release
+          for f in lzvolt.dll lzvolt.dll.lib lzvolt.lib; do
+            [ -f "$t/$f" ] && cp "$t/$f" "dist/${f%.*}-windows-${{ matrix.arch }}.${f##*.}"
+          done
+          ls -la dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: dist/
+          retention-days: 7
+
   publish:
     name: publish the release
     runs-on: ubuntu-24.04
-    needs: [linux, macos]
+    needs: [linux, macos, windows]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -100,7 +129,8 @@ jobs:
       - name: Gather and checksum
         run: |
           mkdir -p dist
-          find staged -type f \( -name 'liblzvolt-*' -o -name 'lzvolt.h' \) \
+          find staged -type f \( -name 'liblzvolt-*' -o -name 'lzvolt*-windows-*' \
+            -o -name 'lzvolt.h' -o -name 'lzvolt.pc' -o -name '*.cmake' \) \
             -exec cp {} dist/ \;
           cp include/lzvolt.h dist/
           cd dist && sha256sum * > SHA256SUMS
