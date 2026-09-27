@@ -148,6 +148,61 @@ bench: ## The long form, about twenty minutes, for numbers worth quoting
 vectors: ## Regenerate docs/vectors.txt from the encoder
 	$(CARGO) run --release --example make_vectors
 
+# ---- installing, and the metadata that makes it findable --------------------
+
+# Where `make install` puts things. `DESTDIR` is honoured so a distribution
+# packager can stage into a fake root.
+PREFIX  ?= /usr/local
+DESTDIR ?=
+
+# What the platform calls a shared library, and what a *static* link needs
+# beyond it. Nothing extra for a shared user; the Rust runtime pulls these in
+# when the archive is linked directly.
+ifeq ($(shell uname),Darwin)
+SHARED_NAME := liblzvolt.dylib
+PRIVATE_LIBS :=
+else
+SHARED_NAME := liblzvolt.so
+PRIVATE_LIBS := -lpthread -ldl -lm
+endif
+
+.PHONY: packaging
+packaging: ## Generate lzvolt.pc and the CMake package config into dist/
+	@mkdir -p $(DIST)
+	@for f in lzvolt.pc lzvolt-config.cmake lzvolt-config-version.cmake; do \
+	  sed -e 's|@PREFIX@|$(PREFIX)|g' \
+	      -e 's|@VERSION@|$(VERSION)|g' \
+	      -e 's|@SHARED_NAME@|$(SHARED_NAME)|g' \
+	      -e 's|@PRIVATE_LIBS@|$(PRIVATE_LIBS)|g' \
+	      packaging/$$f.in > $(DIST)/$$f; \
+	  echo "  $(DIST)/$$f"; \
+	done
+
+.PHONY: install
+install: release packaging ## Install the library, header and metadata under PREFIX
+	install -d $(DESTDIR)$(PREFIX)/lib $(DESTDIR)$(PREFIX)/include \
+	           $(DESTDIR)$(PREFIX)/lib/pkgconfig \
+	           $(DESTDIR)$(PREFIX)/lib/cmake/lzvolt
+	install -m 644 target/release/liblzvolt.a $(DESTDIR)$(PREFIX)/lib/
+	install -m 755 target/release/$(SHARED_NAME) $(DESTDIR)$(PREFIX)/lib/
+	install -m 644 include/lzvolt.h $(DESTDIR)$(PREFIX)/include/
+	install -m 644 $(DIST)/lzvolt.pc $(DESTDIR)$(PREFIX)/lib/pkgconfig/
+	install -m 644 $(DIST)/lzvolt-config.cmake \
+	               $(DIST)/lzvolt-config-version.cmake \
+	               $(DESTDIR)$(PREFIX)/lib/cmake/lzvolt/
+	@echo
+	@echo "  installed under $(DESTDIR)$(PREFIX)"
+	@echo "  pkg-config --cflags --libs lzvolt"
+	@echo "  find_package(lzvolt $(VERSION) REQUIRED)"
+
+.PHONY: uninstall
+uninstall: ## Remove what `install` put there
+	rm -f  $(DESTDIR)$(PREFIX)/lib/liblzvolt.a \
+	       $(DESTDIR)$(PREFIX)/lib/$(SHARED_NAME) \
+	       $(DESTDIR)$(PREFIX)/include/lzvolt.h \
+	       $(DESTDIR)$(PREFIX)/lib/pkgconfig/lzvolt.pc
+	rm -rf $(DESTDIR)$(PREFIX)/lib/cmake/lzvolt
+
 # ---- cross-building and release --------------------------------------------
 
 .PHONY: docker-build-all
@@ -186,11 +241,12 @@ docker-build-%: ## Build one variant, e.g. docker-build-musl-arm64
 .PHONY: checksums
 checksums: ## SHA256SUMS over everything in dist/
 	@cd $(DIST) && { command -v sha256sum > /dev/null \
-	  && sha256sum liblzvolt-* lzvolt.h \
-	  || shasum -a 256 liblzvolt-* lzvolt.h; } > SHA256SUMS && cat SHA256SUMS
+	  && sha256sum liblzvolt-* lzvolt.h lzvolt.pc lzvolt-config*.cmake \
+	  || shasum -a 256 liblzvolt-* lzvolt.h lzvolt.pc lzvolt-config*.cmake; } \
+	  > SHA256SUMS && cat SHA256SUMS
 
 .PHONY: dist
-dist: docker-build-all ## Build every variant, add the header, and checksum it
+dist: docker-build-all packaging ## Every variant, the header, the metadata, checksummed
 	@cp include/lzvolt.h $(DIST)/
 	@$(MAKE) --no-print-directory checksums
 

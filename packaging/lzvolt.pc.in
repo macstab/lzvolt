@@ -1,0 +1,18 @@
+# pkg-config metadata. The C world's equivalent of a POM: it tells a build
+# system where the header and the library are, so a user does not hard-code
+# paths. `build.rs` in this very repository uses pkg-config to find liblz4 --
+# providing one for ourselves is the same courtesy.
+prefix=@PREFIX@
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: lzvolt
+Description: LZ, variable: a byte-oriented LZ77 codec that picks its token layout per value, with hand-written decoders per CPU part line
+URL: https://github.com/macstab/lzvolt
+Version: @VERSION@
+Cflags: -I${includedir}
+Libs: -L${libdir} -llzvolt
+# Only needed when linking the static archive: the Rust runtime pulls these in.
+# A shared-library user never sees them.
+Libs.private: @PRIVATE_LIBS@

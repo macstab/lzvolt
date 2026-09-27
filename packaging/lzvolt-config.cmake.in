@@ -1,0 +1,44 @@
+# CMake package config, so `find_package(lzvolt 1.0 REQUIRED)` works and a
+# consumer writes `target_link_libraries(app PRIVATE lzvolt::lzvolt)` instead
+# of guessing at paths.
+#
+# Relocatable: every path is derived from where this file was found, so moving
+# the install tree does not break it.
+
+get_filename_component(_lzvolt_prefix "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+
+set(_lzvolt_include "${_lzvolt_prefix}/include")
+set(_lzvolt_shared "${_lzvolt_prefix}/lib/@SHARED_NAME@")
+set(_lzvolt_static "${_lzvolt_prefix}/lib/liblzvolt.a")
+
+if(NOT TARGET lzvolt::lzvolt)
+  # Shared where one was installed, the archive otherwise. The musl builds
+  # ship only an archive, so both cases are real.
+  if(EXISTS "${_lzvolt_shared}")
+    add_library(lzvolt::lzvolt UNKNOWN IMPORTED)
+    set_target_properties(lzvolt::lzvolt PROPERTIES
+      IMPORTED_LOCATION "${_lzvolt_shared}"
+      INTERFACE_INCLUDE_DIRECTORIES "${_lzvolt_include}")
+  elseif(EXISTS "${_lzvolt_static}")
+    add_library(lzvolt::lzvolt UNKNOWN IMPORTED)
+    set_target_properties(lzvolt::lzvolt PROPERTIES
+      IMPORTED_LOCATION "${_lzvolt_static}"
+      INTERFACE_INCLUDE_DIRECTORIES "${_lzvolt_include}"
+      INTERFACE_LINK_LIBRARIES "@PRIVATE_LIBS@")
+  else()
+    set(lzvolt_FOUND FALSE)
+    set(lzvolt_NOT_FOUND_MESSAGE
+        "lzvolt: neither ${_lzvolt_shared} nor ${_lzvolt_static} exists")
+    return()
+  endif()
+endif()
+
+# An alias without the namespace, for projects that expect the bare name.
+if(NOT TARGET lzvolt)
+  add_library(lzvolt ALIAS lzvolt::lzvolt)
+endif()
+
+set(lzvolt_FOUND TRUE)
+set(lzvolt_VERSION "@VERSION@")
+set(lzvolt_INCLUDE_DIRS "${_lzvolt_include}")
+set(lzvolt_LIBRARIES lzvolt::lzvolt)

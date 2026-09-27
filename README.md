@@ -89,8 +89,33 @@ cargo build --release          # target/release/liblzvolt.{a,so,dylib}
 make c-example                 # compiles examples/capi.c against it
 ```
 
-Released binaries for glibc and musl on amd64 and arm64 are attached to each
-[release](https://github.com/macstab/lzvolt/releases), with `SHA256SUMS`.
+Released binaries for glibc and musl on amd64 and arm64, and both macOS
+slices, are attached to each
+[release](https://github.com/macstab/lzvolt/releases) with `SHA256SUMS` — plus
+`lzvolt.pc` and a CMake package config, so your build system can find the
+library instead of you hard-coding paths:
+
+```sh
+make install PREFIX=/usr/local     # library, header, lzvolt.pc, CMake config
+```
+
+**pkg-config:**
+
+```sh
+cc myapp.c $(pkg-config --cflags --libs lzvolt) -o myapp
+```
+
+**CMake:**
+
+```cmake
+find_package(lzvolt 1.0 REQUIRED)
+target_link_libraries(myapp PRIVATE lzvolt::lzvolt)
+```
+
+There is no C package registry to publish to — C has never had one, which is
+why the release page *is* the distribution. `apt`, `brew`, vcpkg and Conan are
+each a separate downstream packaging effort, and none of them is required to
+use this.
 
 ---
 
