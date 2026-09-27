@@ -48,8 +48,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14, target: aarch64-apple-darwin }
-          - { os: macos-13, target: x86_64-apple-darwin }
+          # Both slices are built on Apple silicon. `macos-13` was the obvious
+          # host for the x86 one and it does not exist any more -- GitHub
+          # retired it, so that job queued indefinitely rather than failing,
+          # which is the worse of the two outcomes. Cross-compiling is fine:
+          # the macOS SDK carries both architectures.
+          - { os: macos-14, target: aarch64-apple-darwin, native: true }
+          - { os: macos-14, target: x86_64-apple-darwin, native: false }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -57,7 +62,10 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --target ${{ matrix.target }}
-      - run: cargo test --release --target ${{ matrix.target }}
+      # Only where the runner can execute what it just built. The x86 slice is
+      # covered by the Linux amd64 jobs, which run the same assembly.
+      - if: matrix.native
+        run: cargo test --release --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.target }}
