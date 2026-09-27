@@ -107,9 +107,14 @@ jobs:
         run: |
           mkdir -p dist
           t=target/${{ matrix.target }}/release
-          for f in lzvolt.dll lzvolt.dll.lib lzvolt.lib; do
-            [ -f "$t/$f" ] && cp "$t/$f" "dist/${f%.*}-windows-${{ matrix.arch }}.${f##*.}"
-          done
+          # Named explicitly rather than by stripping at the last dot:
+          # `lzvolt.dll.lib` has two, and the clever version produced
+          # `lzvolt.dll-windows-amd64.lib` in the 1.0.0 release.
+          a=${{ matrix.arch }}
+          [ -f "$t/lzvolt.dll" ]     && cp "$t/lzvolt.dll"     "dist/lzvolt-windows-$a.dll"
+          [ -f "$t/lzvolt.dll.lib" ] && cp "$t/lzvolt.dll.lib" "dist/lzvolt-windows-$a.dll.lib"
+          [ -f "$t/lzvolt.lib" ]     && cp "$t/lzvolt.lib"     "dist/lzvolt-windows-$a.lib"
+          true
           ls -la dist/
       - uses: actions/upload-artifact@v4
         with:
