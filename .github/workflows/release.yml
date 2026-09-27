@@ -123,13 +123,41 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
 
+  # crates.io carries the Rust *source* crate and nothing else -- it does not
+  # host binaries. The compiled libraries are the GitHub Release above.
+  #
+  # Skipped when no token is configured rather than failed. The two
+  # destinations are independent: a release that publishes the C libraries and
+  # not the crate is a perfectly good release, and turning a missing secret
+  # into a red run after the Release is already public helps nobody.
   crates-io:
     name: crates.io
     runs-on: ubuntu-24.04
     needs: publish
-    # Only for a real release, never a prerelease tag.
-    if: ${{ !contains(github.ref_name, '-') }}
+    # Not for a prerelease tag, and not without a token.
+    if: ${{ !contains(github.ref_name, '-') && secrets.CARGO_REGISTRY_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # So that a skipped crates.io step is visible rather than silent.
+  say-what-shipped:
+    name: what shipped
+    runs-on: ubuntu-24.04
+    needs: [publish, crates-io]
+    if: always() && needs.publish.result == 'success'
+    steps:
+      - name: Summary
+        run: |
+          {
+            echo "### lzvolt ${GITHUB_REF_NAME} released"
+            echo
+            echo "- GitHub Release with the C libraries and header: **published**"
+            if [ "${{ needs.crates-io.result }}" = "success" ]; then
+              echo "- crates.io: **published**"
+            else
+              echo "- crates.io: **skipped** (no CARGO_REGISTRY_TOKEN secret)."
+              echo "  Set it and re-run, or publish by hand with \`cargo publish\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
