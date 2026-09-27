@@ -68,6 +68,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # `rust-toolchain.toml` pins the channel *and* its target list, and it
+      # wins over the action's `targets:` input -- which is why this job failed
+      # with "can't find crate for `std`" while the arm64 one passed: that one
+      # is the host and was installed anyway. Adding it explicitly is what the
+      # Dockerfiles already do.
+      - run: rustup target add ${{ matrix.target }}
       - run: cargo build --release --target ${{ matrix.target }}
       - name: Collect
         run: |
