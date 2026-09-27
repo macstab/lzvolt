@@ -79,7 +79,8 @@ jobs:
           components: miri
       - uses: Swatinem/rust-cache@v2
       # On the portable decoder: Miri cannot execute the assembly, and the
-      # portable one is what the assembly is diffed against anyway.
+      # portable one is what the assembly is diffed against anyway. Reduced
+      # volume, because the full set takes hours -- deep.yml runs that weekly.
       - run: make miri
 
   sanitizers:

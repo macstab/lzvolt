@@ -1223,7 +1223,10 @@ fn pack_pass<const SHIFT: u32, S: Slot>(
             }
         }
         let literals = &input[literal_start..at - back];
-        let wide = wide_literals_fit(literals, at - back, input.len());
+        // The slice the fixed-width move reads, not just the run: the copy
+        // needs a pointer entitled to all sixteen bytes.
+        let wide = wide_literals_fit(literals, at - back, input.len())
+            .then(|| &input[literal_start..literal_start + WIDE_LITERAL]);
         let offset = at - candidate;
         // Only the layout that has the bit may claim a repeat: the even split
         // spends all eight token bits on lengths, the wide one keeps the low
@@ -1615,11 +1618,22 @@ impl Cursor {
 
     /// Copies a fixed width and advances by the true length. See
     /// [`WIDE_LITERAL`].
+    ///
+    /// `src` is the input from the run's start and must be at least
+    /// `WIDE_LITERAL` long; `n` is how much of it is the run. Those are two
+    /// arguments rather than one because they have to be: this used to take the
+    /// run alone and read `WIDE_LITERAL` through its pointer, which Miri
+    /// rejects. The bytes were always inside the input -- `wide_literals_fit`
+    /// guarantees that and still does -- but a pointer derived from a one-byte
+    /// subslice may not reach sixteen bytes, however valid the memory is. It
+    /// worked, and it was undefined.
     #[inline]
-    unsafe fn literals_wide(&mut self, src: &[u8]) {
+    unsafe fn literals_wide(&mut self, src: &[u8], n: usize) {
+        debug_assert!(src.len() >= WIDE_LITERAL, "the wide source is short");
+        debug_assert!(n <= WIDE_LITERAL, "the run is wider than the move");
         self.guard(WIDE_LITERAL);
         std::ptr::copy_nonoverlapping(src.as_ptr(), self.p, WIDE_LITERAL);
-        self.p = self.p.add(src.len());
+        self.p = self.p.add(n);
     }
 
     #[inline]
@@ -1642,7 +1656,9 @@ fn emit_block(
     matched: usize,
     out: &mut Cursor,
     split: Split,
-    wide: bool,
+    // `Some(src)` takes the fixed-width literal move, with `src` a slice of
+    // the input long enough for it to read. `None` copies the run exactly.
+    wide: Option<&[u8]>,
     repeat: bool,
 ) {
     let match_extra = matched - MIN_MATCH;
@@ -1659,10 +1675,9 @@ fn emit_block(
         if literals.len() >= split.lit_max() {
             put_extended(literals.len() - split.lit_max(), out);
         }
-        if wide {
-            out.literals_wide(literals);
-        } else {
-            out.literals(literals);
+        match wide {
+            Some(src) => out.literals_wide(src, literals.len()),
+            None => out.literals(literals),
         }
         if !repeat {
             out.offset(offset as u16);
@@ -2198,6 +2213,36 @@ unsafe fn unpack_framed(f: Frame<'_>, base: *mut u8, capacity: usize) -> Result<
 mod tests {
     use super::*;
 
+    /// How much bulk a test carries, scaled down when Miri is interpreting it.
+    ///
+    /// Miri executes every operation in software, and the difference is not
+    /// small: `the_published_vectors_hold` took **2229 seconds** under it
+    /// against a hundredth of a second native, almost all of it in one vector
+    /// that decodes 2 MiB through the overlapping-copy path.
+    ///
+    /// That time buys nothing. What Miri checks is the pointer arithmetic and
+    /// the provenance of every access, and a 300-byte match exercises those
+    /// exactly as a 2 MiB one does -- it is the same code on the same branches,
+    /// just fewer times round. So these tests keep their shape under Miri and
+    /// lose their volume, which is what makes running it per-change possible
+    /// at all. The full-size run still exists as `make miri-full`.
+    fn bulk(native: usize) -> usize {
+        if cfg!(miri) {
+            (native / 50).max(1)
+        } else {
+            native
+        }
+    }
+
+    /// The largest output a single test case decodes, same reasoning as [`bulk`].
+    fn biggest(native: usize) -> usize {
+        if cfg!(miri) {
+            native.min(4096)
+        } else {
+            native
+        }
+    }
+
     fn records(total: usize) -> Vec<u8> {
         let mut out = Vec::with_capacity(total);
         let mut i = 0u64;
@@ -2332,7 +2377,7 @@ mod tests {
     /// through a snapshot file. None of these may panic.
     #[test]
     fn corrupt_input_is_refused_rather_than_trusted() {
-        let input = vec![b'q'; 2000];
+        let input = vec![b'q'; bulk(2000)];
         let mut packed = Vec::new();
         assert!(pack(&input, &mut packed));
 
@@ -2389,7 +2434,7 @@ mod tests {
             state
         };
 
-        let source = records(3000);
+        let source = records(bulk(3000));
         let mut packed = Vec::new();
         assert!(pack(&source, &mut packed));
         let mut out = Vec::new();
@@ -2397,7 +2442,7 @@ mod tests {
         // Several bytes corrupted at once, which single-bit coverage misses:
         // a length field can be made large and its guard byte made consistent
         // by the same edit.
-        for _ in 0..4000 {
+        for _ in 0..bulk(4000) {
             let mut broken = packed.clone();
             let hits = 1 + (next() % 6) as usize;
             for _ in 0..hits {
@@ -2418,7 +2463,7 @@ mod tests {
         // the classes it actually produced had nothing to do with the list here.
         for len in [0usize, 1, 63, 64, 8191, 8192, 1 << 20, 2_097_151, 2_097_152] {
             for hybrid in [false, true] {
-                for _ in 0..200 {
+                for _ in 0..bulk(200) {
                     let mut stream = Vec::new();
                     put_header(len, hybrid, &mut stream);
                     for _ in 0..(next() % 200) {
@@ -2430,7 +2475,7 @@ mod tests {
         }
 
         // Streams that were never packed.
-        for _ in 0..2000 {
+        for _ in 0..bulk(2000) {
             let n = (next() % 300) as usize;
             let stream: Vec<u8> = (0..n).map(|_| next() as u8).collect();
             let _ = unpack(&stream, &mut out);
@@ -3745,7 +3790,7 @@ mod tests {
             out
         };
 
-        for len in [8usize, 64, 517, 4096, 9000, 65_536] {
+        for len in [8usize, 64, 517, 4096, 9000, 65_536].map(biggest) {
             for (which, data) in [("records", records(len)), ("varied", varied(len))] {
                 let mut packed = Vec::new();
                 if !pack(&data, &mut packed) {
@@ -3810,6 +3855,7 @@ mod tests {
         let text = include_str!("../docs/vectors.txt");
         let mut fields: Vec<(String, String)> = Vec::new();
         let mut checked = 0usize;
+        let mut skipped = 0usize;
 
         fn unhex(text: &str) -> Vec<u8> {
             text.split_whitespace()
@@ -3817,7 +3863,7 @@ mod tests {
                 .collect()
         }
 
-        fn finish(fields: &mut Vec<(String, String)>, checked: &mut usize) {
+        fn finish(fields: &mut Vec<(String, String)>, checked: &mut usize, skipped: &mut usize) {
             if fields.is_empty() {
                 return;
             }
@@ -3842,6 +3888,15 @@ mod tests {
                     .unwrap_or_else(|| panic!("{name}: no '*'"));
                 let unit = unhex(unit);
                 let count: usize = count.trim().parse().expect("a count");
+                // The class-3 vector decodes 2 MiB through the overlapping
+                // copy, which is 37 minutes under Miri and no extra coverage:
+                // the same branches, more times round. Skipped there, and the
+                // count below is checked so that skipping cannot go unnoticed.
+                if cfg!(miri) && unit.len() * count > 4096 {
+                    *skipped += 1;
+                    fields.clear();
+                    return;
+                }
                 assert_eq!(got, Ok(()), "{name}: refused");
                 assert_eq!(out.len(), unit.len() * count, "{name}: length");
                 assert!(
@@ -3864,7 +3919,7 @@ mod tests {
                 continue;
             }
             if line.trim().is_empty() {
-                finish(&mut fields, &mut checked);
+                finish(&mut fields, &mut checked, &mut skipped);
                 continue;
             }
             if line.starts_with(char::is_whitespace) {
@@ -3877,10 +3932,23 @@ mod tests {
             let (key, value) = line.split_once(':').expect("a line that is not a field");
             fields.push((key.trim().to_owned(), value.trim().to_owned()));
         }
-        finish(&mut fields, &mut checked);
+        finish(&mut fields, &mut checked, &mut skipped);
 
         // A parser that silently skipped every record would otherwise pass.
-        assert_eq!(checked, 16, "wrong number of vectors checked");
+        // Under Miri three vectors are deliberately left out for size, so
+        // the two counts are asserted separately rather than loosened.
+        assert_eq!(
+            checked + skipped,
+            16,
+            "wrong number of vectors seen ({checked} checked, {skipped} skipped)"
+        );
+        if cfg!(miri) {
+            // The class-2 and class-3 vectors, which decode 8 KiB and 2 MiB.
+            // Everything else is small enough to interpret.
+            assert_eq!(skipped, 2, "the set of oversized vectors changed");
+        } else {
+            assert_eq!(skipped, 0, "a vector was skipped in a native run");
+        }
     }
 
     /// One length, one encoding.

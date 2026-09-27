@@ -54,9 +54,15 @@ test-fast: ## The suite once, debug, for a quick loop
 	$(CARGO) test
 
 .PHONY: miri
-miri: ## Undefined behaviour check (needs nightly)
+miri: ## Undefined behaviour check, scaled to run per change (needs nightly)
 	MIRIFLAGS="-Zmiri-disable-isolation" \
 	  $(CARGO) +nightly miri test --no-default-features --lib format
+
+.PHONY: miri-full
+miri-full: ## The same at full size. Hours, not minutes. Scheduled, not per change.
+	MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-ignore-leaks" \
+	  LZVOLT_MIRI_FULL=1 \
+	  $(CARGO) +nightly miri test --no-default-features --lib format -- --nocapture
 
 .PHONY: sanitize
 sanitize: ## Address and undefined-behaviour sanitisers (needs nightly)

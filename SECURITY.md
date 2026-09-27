@@ -50,8 +50,23 @@ a malformed stream and memory unsafety.
 Every release runs, on each supported target: every truncation and every
 single-bit flip of a packed stream; thousands of multi-byte corruptions;
 streams that were never packed at all; differential tests against the portable
-decoder and against liblz4; 5760 liblz4-packed values compared byte for byte;
-and the whole set under Miri. The sanitiser builds run in CI.
+decoder and against liblz4; and 5760 liblz4-packed values compared byte for
+byte.
+
+Two things check the `unsafe` itself, and they divide the work because one of
+them is slow:
+
+- **The sanitisers** (address and undefined-behaviour) run on every change and
+  do cover the assembly, which is the half Miri cannot execute.
+- **Miri** runs on every change at reduced volume, and at full volume on a
+  schedule. The reduction is deliberate and measured: one test that takes a
+  hundredth of a second natively took **2229 seconds** under Miri, almost all
+  of it in a single case that decodes 2 MiB through the overlapping-copy path.
+  That time bought no coverage — Miri checks pointer arithmetic and
+  provenance, and a 300-byte match exercises the same branches. The tests keep
+  their shape under it and lose their bulk; `make miri-full` is the unreduced
+  run, and the reduced one asserts how many cases it skipped so that the
+  skipping cannot grow unnoticed.
 
 A change to the assembly is not accepted on a green test run alone — a
 deliberate corruption of it has to turn the suite red first. Two bugs were
