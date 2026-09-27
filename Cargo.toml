@@ -4,11 +4,30 @@ version = "1.0.0"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
-description = "LZ, variable: a byte-oriented LZ77 codec that picks its token layout per value, with hand-written kernels per CPU part line. Reads and writes LZ4 blocks too."
+authors = ["Christian Schnapka <5767180+nolem@users.noreply.github.com>"]
+description = """\
+LZ, variable. A byte-oriented LZ77 codec that chooses its token layout per \
+value, with hand-written assembly kernels per CPU part line. Decodes 14-83% \
+faster than LZ4 on every shape measured, packs smaller, and reads raw LZ4 \
+blocks too. Rust and C."""
 repository = "https://github.com/macstab/lzvolt"
-categories = ["compression"]
+homepage = "https://github.com/macstab/lzvolt"
+documentation = "https://docs.rs/lzvolt"
+readme = "README.md"
+# Accurate, not aspirational: this crate uses `std` (Vec, thread_local), so no
+# no-std category belongs here however tempting the badge is.
+categories = ["compression", "algorithms", "encoding"]
 keywords = ["compression", "lz77", "lz4", "simd", "assembly"]
-exclude = ["bench-results/", "scripts/"]
+# The measurement log is 120 KB of history a user does not need in their
+# registry cache; the format spec and the test vectors they might.
+exclude = ["bench-results/", "scripts/", "docs/MEASUREMENTS.md"]
+
+# docs.rs builds with default features, which assembles the kernels -- it has a
+# C compiler, so that works. `liblz4` stays off: it links a system library that
+# docs.rs does not have, and nothing in the public API needs it.
+[package.metadata.docs.rs]
+all-features = false
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
 # rlib for Rust callers; the other two are what makes the C ABI usable from

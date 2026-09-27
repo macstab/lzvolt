@@ -239,6 +239,16 @@ AddressSanitizer over the assembly — which is the half Miri cannot execute.
 
 ---
 
+## Credits
+
+Created by **Christian Schnapka** ([@nolem](https://github.com/nolem)), and
+developed inside [KevaVolt](https://github.com/macstab) before being extracted
+and published on its own.
+
+The measurement log in [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md) is the
+record of how it got here — including the roughly twenty ideas that measured
+zero or negative, which are the more useful half.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
