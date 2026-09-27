@@ -15,6 +15,23 @@ fn main() {
         return;
     }
 
+    // The kernels are GAS-syntax `.S` using ELF and Mach-O directives, so the
+    // object format decides whether they can be assembled at all -- not the
+    // architecture. Gating on the architecture alone meant an x86-64 Windows
+    // build handed these files to `cl.exe` and died on
+    // `pack.S:471: unknown directive`: the crate did not build on Windows,
+    // which is the most common target it does not name.
+    //
+    // Where the assembler cannot take them, the portable decoder runs. That is
+    // a supported configuration and the differential tests cover it; what it
+    // is not is a silent one, so `backend()` reports the intrinsics path.
+    let os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let abi = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let assembler_takes_gas = matches!(os.as_str(), "linux" | "macos") && abi != "msvc";
+    if !assembler_takes_gas {
+        return;
+    }
+
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let sources: &[&str] = match arch.as_str() {
         "aarch64" => &[

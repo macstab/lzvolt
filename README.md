@@ -212,7 +212,20 @@ soak, which puts 5760 liblz4-packed values through our kernel and compares byte
 for byte. `build.rs` finds it via `pkg-config`, then `LZ4_LIB_DIR`, then the
 usual prefixes.
 
-The assembly can be turned off entirely with `--no-default-features`, which
+### Which platforms get the assembly
+
+| target | decoder |
+|---|---|
+| Linux and macOS on **x86-64** and **aarch64** | hand-written assembly, per part line |
+| Windows, and every other architecture | portable Rust |
+
+The assembly is GAS-syntax with ELF and Mach-O directives, so where the
+assembler will not take it the portable decoder runs instead. Everything still
+builds, passes the same tests and reads the same streams — it is slower, and
+`lzvolt_backend()` says so rather than leaving you to guess. Extending the
+kernels to COFF is work nobody has done; a patch would be welcome.
+
+The assembly can also be turned off deliberately with `--no-default-features`, which
 falls back to the portable reference. That is a supported configuration and it
 is what the differential tests compare against, not a degraded mode.
 
