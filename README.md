@@ -52,9 +52,16 @@ Eighteen cells of eighteen, +14% to +83%.
 20 of 27 cells. **Packing**: ahead on 25 of 27, and smaller.
 
 Capacity and throughput are independent axes for a cache — more values per GB
-of RAM, and each one read faster. On 64 KiB records the product is **+101% on
-Xeon, +96% on EPYC, +107% on Neoverse V2**: twice the logical bytes per second
-per GB.
+of RAM, and each one read faster. On 64 KiB records of this shape the product
+of the two is:
+
+| | M2 Max | Xeon 8481C | EPYC 9B14 | Neoverse V2 |
+|---|---|---|---|---|
+| capacity × throughput | **+101.5%** | **+96.3%** | +79.1% | **+106.6%** |
+
+Roughly twice the logical bytes per second per GB of RAM on three of the four.
+(Measured in a separate four-machine run from the table above, which is why
+the M2 appears here and not there.)
 
 Every number here, how it was measured, and the roughly twenty ideas that
 measured zero or negative, are in [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md).
@@ -72,7 +79,7 @@ liblz4 there. It is written up in the measurement log rather than left out.
 
 ## Getting it
 
-**Rust:**
+**Rust** — requires 1.85 or newer:
 
 ```toml
 [dependencies]
