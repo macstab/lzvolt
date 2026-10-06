@@ -1,11 +1,47 @@
 # lzvolt
 
-**LZ, variable.** A byte-oriented LZ77 codec that picks its token layout per
-value, with hand-written decoders per CPU part line.
+[![crates.io](https://img.shields.io/crates/v/lzvolt.svg)](https://crates.io/crates/lzvolt)
+[![docs.rs](https://img.shields.io/docsrs/lzvolt)](https://docs.rs/lzvolt)
+[![CI](https://github.com/macstab/lzvolt/actions/workflows/ci.yml/badge.svg)](https://github.com/macstab/lzvolt/actions/workflows/ci.yml)
+[![license](https://img.shields.io/crates/l/lzvolt.svg)](LICENSE)
 
-It decodes its own format **14% to 83% faster than LZ4** on every shape and
-every machine measured, and packs **smaller**. It also reads raw LZ4 blocks —
-faster than LZ4 does, on most shapes.
+**LZ, variable.** A byte-oriented LZ77 codec that picks its token layout per
+value, with hand-written decoders assembled per CPU part line.
+
+## 31% smaller *and* up to 83% faster than LZ4
+
+Compression is supposed to be a trade — you buy ratio with time. This one takes
+both ends. On 64 KiB records it writes **5524 bytes where liblz4 writes 7992**,
+then reads them back **23–45% faster**. Those gains multiply:
+
+| | capacity | × | decode | = | together |
+|---|---|---|---|---|---|
+| records 64 KiB, Xeon 8481C | **+44.7%** | | **+36%** | | **≈ +96%** |
+
+<sub>1.447 × 1.36 = 1.97. Measured directly in the same run: +96.3%.</sub>
+
+Across four machines that product is **+79% to +107%**. In the unit anyone
+actually pays in: **a cache holding a given working set at a given read rate
+needs about half the machines.**
+
+### You can keep the data you already have
+
+This decoder reads **LZ4's own blocks** — the bytes liblz4 already wrote — and
+on 20 of 27 measured shapes it reads them faster than liblz4 does.
+
+```c
+/* stage one: change one call. Nothing is re-encoded, nothing is migrated. */
+- LZ4_decompress_safe(src, dst, src_len, dst_cap);
++ lzvolt_decompress_lz4(src, src_len, dst, dst_cap, declared);
+```
+
+Stage two is re-encoding into the native format, when it suits you, for the
+31% and the factor above.
+
+**Compatibility runs one way only.** lzvolt reads LZ4; LZ4 cannot read lzvolt.
+The native format's streams are not LZ4 blocks and a conforming LZ4 decoder
+will reject some of them — see [the format](#the-format). There is no mode that
+emits LZ4-compatible output.
 
 ```rust
 let mut packed = Vec::new();
@@ -49,7 +85,43 @@ bytes, same machine, same process.
 Eighteen cells of eighteen, +14% to +83%.
 
 **Reading LZ4's own blocks**, the same decoder on bytes liblz4 wrote: ahead on
-20 of 27 cells. **Packing**: ahead on 25 of 27, and smaller.
+20 of 27 cells.
+
+**Packing, GiB/s and the margin over liblz4:**
+
+| shape | Xeon 8481C | EPYC 9B14 | Neoverse V2 |
+|---|---|---|---|
+| records 512 B | 2.00 **+55%** | 2.62 **+122%** | 2.23 **+54%** |
+| varied 512 B | 1.25 **+58%** | 1.55 **+89%** | 1.22 +28% |
+| noise 512 B | 2.43 **+81%** | 2.95 **+134%** | 2.87 **+77%** |
+| records 4 KiB | 2.78 +19% | 3.60 +29% | 3.33 +22% |
+| varied 4 KiB | 1.15 +20% | 1.47 +27% | 1.16 −2% |
+| noise 4 KiB | 7.16 **+70%** | 7.74 **+76%** | 10.34 **+99%** |
+| records 64 KiB | 3.14 +25% | 3.83 +20% | 3.56 +20% |
+| varied 64 KiB | 1.25 **+92%** | 1.08 +0% | 1.08 +4% |
+| noise 64 KiB | 114.6 **+859%** | 125.6 **+820%** | 165.1 **+837%** |
+
+Twenty-five cells of twenty-seven. The 64 KiB noise row is **9.6×** and is a
+different operation from the eight above it: lzvolt probes a value before
+packing it and answers *"not worth compressing"* without running a match
+search, where liblz4 compresses all 64 KiB and returns a block larger than the
+input. Every cache performs that check; most bolt it on top of the codec and
+pay for it twice. All comparisons call `LZ4_compress_default`, i.e.
+acceleration 1.
+
+**Packed size, bytes, against liblz4 and lz4_flex:**
+
+| shape | lzvolt | liblz4 | lz4_flex | vs liblz4 |
+|---|---|---|---|---|
+| records 64 KiB | **5524** | 7992 | 7722 | **−30.9%** |
+| records 4 KiB | **487** | 658 | 660 | **−26.0%** |
+| varied 4 KiB | **2228** | 2333 | 2329 | −4.5% |
+| varied 512 B | **356** | 366 | 368 | −2.7% |
+| varied 64 KiB | 33180 | **32730** | 33005 | +1.4% |
+| records 512 B | 195 | **192** | — | +1.6% |
+
+Smaller on four shapes of six; larger on two, by 1.4% and 1.6%. Both are here
+rather than left out.
 
 Capacity and throughput are independent axes for a cache — more values per GB
 of RAM, and each one read faster. On 64 KiB records of this shape the product
@@ -184,8 +256,12 @@ before it was kept:
 
 **A token layout chosen per value.** Most codecs fix the split between
 literal-length and match-length bits at design time. This one carries two and
-lets a value change its mind once, which is worth about 19% on the shapes where
-match lengths cluster past the narrow field's ceiling.
+lets a value change its mind once. On 4 KiB records that is 19.2% off the
+packed size and 15.1% on 64 KiB ones — and the bytes come out of *offsets*
+alone: 58 of 96 blocks, and 493 of 1567, stop writing one at all because the
+second layout spends its spare bit on a repeat flag. The wider match field pays
+for itself separately, by removing chain bytes and the mispredict that comes
+with them.
 
 **Hand-written decoders, one per CPU part line.** Not one SIMD kernel with
 runtime checks — separate assembled bodies for Xeon, EPYC, SSSE3-only x86,
