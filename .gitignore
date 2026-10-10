@@ -23,3 +23,13 @@ flamegraph.svg
 /bench-results/
 /packer-report*.txt
 /dist/
+
+# Fuzzing. The corpus is regenerated from docs/vectors.txt by fuzz/seed.py and
+# then grown by the run, so committing it would be committing a cache. The
+# artifacts directory only ever holds reproducers for a crash -- if one turns
+# up it belongs in a test in src/format.rs, not here.
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/
+/fuzz/Cargo.lock

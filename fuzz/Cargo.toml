@@ -1,0 +1,53 @@
+[package]
+name = "lzvolt-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Its own workspace. The parent pins a stable toolchain in rust-toolchain.toml
+# and these targets need nightly; keeping them out of the parent workspace
+# means `cargo test` there never tries to build them.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.lzvolt]
+path = ".."
+
+[profile.release]
+debug = true
+# Overflow is a bug here like anywhere else, and the decoder does a lot of
+# arithmetic on lengths that came out of the input.
+overflow-checks = true
+
+[[bin]]
+name = "decode_native"
+path = "fuzz_targets/decode_native.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_lz4"
+path = "fuzz_targets/decode_lz4.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_into"
+path = "fuzz_targets/decode_into.rs"
+test = false
+doc = false
+bench = false

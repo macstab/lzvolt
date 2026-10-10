@@ -53,6 +53,26 @@ streams that were never packed at all; differential tests against the portable
 decoder and against liblz4; and 5760 liblz4-packed values compared byte for
 byte.
 
+Those all begin from a stream the packer wrote, which bounds what they can
+reach. **Coverage-guided fuzzing** covers the rest:
+
+- Four targets under `cargo-fuzz` with AddressSanitizer: the native decoder,
+  the raw-LZ4 entry point, a pack/unpack round trip, and the caller-owned
+  buffer path including buffers that are deliberately too small.
+- An hour per target, every week, four in parallel. Reproducers for any crash
+  are kept as CI artifacts for 90 days, because the input is what belongs in a
+  regression test and it cannot be reconstructed from a log.
+- Corpora are seeded from `docs/vectors.txt` by `fuzz/seed.py`. Unseeded, a run
+  spends its whole budget proving the header reader rejects noise and never
+  reaches the decode loop.
+- The targets assert, not just survive: output length must equal the declared
+  length, and a round trip must return the input byte for byte. A fuzzer only
+  sees crashes, so silent wrongness has to be turned into one.
+
+As of the last full run: **115 million executions across the four targets, no
+crashes and no artifacts.** That is a statement about what was reachable in
+that time from those seeds, not a proof of absence.
+
 Two things check the `unsafe` itself, and they divide the work because one of
 them is slow:
 

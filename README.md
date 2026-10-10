@@ -38,10 +38,34 @@ on 20 of 27 measured shapes it reads them faster than liblz4 does.
 Stage two is re-encoding into the native format, when it suits you, for the
 31% and the factor above.
 
-**Compatibility runs one way only.** lzvolt reads LZ4; LZ4 cannot read lzvolt.
-The native format's streams are not LZ4 blocks and a conforming LZ4 decoder
-will reject some of them — see [the format](#the-format). There is no mode that
-emits LZ4-compatible output.
+**An LZ4 decoder cannot read a native stream.** They are not LZ4 blocks and a
+conforming decoder rejects them, correctly — see [the format](#the-format).
+Two consequences, and neither is a trapdoor:
+
+**Stage two is ordered.** Every reader must be on lzvolt before any writer
+switches format. Decoder-first, always. One straggler — a pinned sidecar, a
+replica that did not restart — and it receives bytes it cannot parse.
+
+**Going back is a batch job, not a migration you cannot undo.** There is no
+single call that turns a native stream into an LZ4 block, but decode and
+re-encode restores one exactly, and you already have both halves:
+
+```c
+/* out: native -> liblz4, whenever you want it */
+int64_t n = lzvolt_decompress(src, src_len, plain, cap);
+int     m = LZ4_compress_default(plain, dst, (int)n, dst_cap);
+```
+
+The cost is bounded by liblz4's encoder, not by this decoder — 2.51 GiB/s
+against 11.86 on 64 KiB records. **Rolling a terabyte of logical data back to
+LZ4 is about seven core-minutes**, and it parallelises perfectly.
+
+**What reversibility does not solve: keep a format flag.** A stream carries its
+length and nothing else — no magic number, which is part of why it is small. So
+a stored blob cannot be sniffed: some LZ4 blocks parse as a plausible native
+header and decode to garbage silently. While both formats exist side by side,
+record which is which — a key prefix, a column, a version bit. Mixed storage
+with no marker is a corruption source, not a migration.
 
 ```rust
 let mut packed = Vec::new();
@@ -288,6 +312,7 @@ make test          # the suite, both with and without the assembly
 make check         # test + clippy + rustdoc + format, what CI runs
 make quick         # a thumbs up/down benchmark in about seven seconds
 make bench         # the long form, twenty minutes, for numbers worth quoting
+make fuzz          # coverage-guided, 60 s per target (needs nightly)
 ```
 
 `cargo test` alone works too. Some tests need the system liblz4 — the interop
@@ -314,11 +339,27 @@ is what the differential tests compare against, not a degraded mode.
 
 **On correctness.** The decoders' copies are unchecked, so the validation in
 front of them is the only thing between a malformed stream and memory
-unsafety. They are held to that by fuzzing every truncation and every
-single-bit flip of a packed stream, thousands of multi-byte corruptions,
-streams that were never packed at all, differential testing against the
-portable decoder and against liblz4, the whole set under Miri, and
-AddressSanitizer over the assembly — which is the half Miri cannot execute.
+unsafety. What holds it to that:
+
+| | |
+|---|---|
+| Coverage-guided fuzzing | four targets under `cargo-fuzz`, ASan on — 115 million executions, no crashes |
+| Exhaustive corruption | every truncation and every single-bit flip of a packed stream, thousands of multi-byte corruptions, streams that were never packed |
+| Differential testing | against the portable decoder and against liblz4, byte for byte |
+| Miri | the whole set, scaled to run per change; full size weekly |
+| AddressSanitizer | over the assembly, which is the half Miri cannot execute |
+
+The distinction between the first two rows is the point. The corruption tests
+start from a stream the *packer* wrote, so every input they try is a mutation
+of something well-formed. A coverage-guided search reaches shapes the packer
+cannot emit at all — a token claiming a 60 000-byte match at offset 3 in a
+20-byte stream — which is exactly what arrives from a hostile source.
+
+```sh
+make fuzz                 # 60 s per target
+make fuzz FUZZ_SECONDS=600
+make fuzz-long            # an hour each; also runs weekly in CI
+```
 
 ---
 

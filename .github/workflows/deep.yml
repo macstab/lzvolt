@@ -29,6 +29,34 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: make miri-full
 
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [decode_native, decode_lz4, roundtrip, decode_into]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-fuzz --locked
+      # Unseeded, a run spends its whole budget proving the header reader
+      # rejects noise and never reaches the decode loop. The published vectors
+      # are valid streams covering every branch the format has.
+      - run: make fuzz-seed
+      - run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=3600 -print_final_stats=1
+      # A crash leaves a reproducer behind. Keep it -- it is the input that
+      # belongs in a regression test, and it is not reconstructable from the
+      # log alone.
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/
+          retention-days: 90
+
   soak:
     name: interop soak, both architectures
     runs-on: ${{ matrix.os }}

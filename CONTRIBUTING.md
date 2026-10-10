@@ -79,6 +79,22 @@ without it — see `docs/FORMAT.md` for the eight things a decoder must reject.
 
 If you add a path the fuzzing cannot reach, say so in the pull request.
 
+Before sending a change to a decoder, give it a few minutes of fuzzing:
+
+```sh
+make fuzz                      # 60 s per target
+make fuzz FUZZ_SECONDS=600     # longer, if you touched a bounds check
+make fuzz-repro                # replay anything that crashed earlier
+```
+
+Needs nightly and `cargo install cargo-fuzz`. It is deliberately not part of
+`make test` — a fuzz run has no natural end, and nothing that cannot finish
+belongs in the loop you run on every save. CI runs an hour per target weekly.
+
+A crash leaves a reproducer in `fuzz/artifacts/`. That file is the valuable
+part: add it as a case in `src/format.rs` so the bug stays dead, rather than
+leaving the fuzzer to rediscover it.
+
 ## Changing the format
 
 Don't, casually. [docs/FORMAT.md](docs/FORMAT.md) is normative and streams are

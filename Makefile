@@ -86,6 +86,40 @@ ub-checks: ## The standard library's UB assertions, at release optimisation
 soak: ## Push thousands of liblz4-packed values through the kernel
 	$(CARGO) run --release $(LZ4_FEATURE) --example soak
 
+# Coverage-guided fuzzing. The property tests reach truncations and bit flips
+# of streams the packer wrote; these reach shapes the packer cannot emit at
+# all, which is the input an attacker actually supplies. Deliberately not part
+# of `test` -- a fuzz run has no natural end.
+FUZZ_TARGETS := decode_native decode_lz4 roundtrip decode_into
+FUZZ_SECONDS ?= 60
+
+.PHONY: fuzz-seed
+fuzz-seed: ## Seed the corpora from docs/vectors.txt (unseeded runs stall at the header)
+	python3 fuzz/seed.py
+
+.PHONY: fuzz
+fuzz: fuzz-seed ## Fuzz every target for FUZZ_SECONDS each (default 60, needs nightly)
+	@for t in $(FUZZ_TARGETS); do \
+	  echo "== $$t"; \
+	  $(CARGO) +nightly fuzz run $$t -- \
+	    -max_total_time=$(FUZZ_SECONDS) -print_final_stats=1 || exit 1; \
+	done
+
+.PHONY: fuzz-long
+fuzz-long: ## An hour per target. Scheduled, not per change.
+	$(MAKE) fuzz FUZZ_SECONDS=3600
+
+.PHONY: fuzz-repro
+fuzz-repro: ## Re-run every saved crash reproducer, if any exist
+	@test -d fuzz/artifacts || { echo "  no artifacts: nothing has crashed"; exit 0; }
+	@for t in $(FUZZ_TARGETS); do \
+	  for f in fuzz/artifacts/$$t/*; do \
+	    [ -e "$$f" ] || continue; \
+	    echo "== $$t $$f"; \
+	    $(CARGO) +nightly fuzz run $$t "$$f" || exit 1; \
+	  done; \
+	done
+
 # ---- the C ABI --------------------------------------------------------------
 
 .PHONY: c-example
